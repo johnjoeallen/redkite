@@ -23,3 +23,7 @@
 hs_err_pid*
 replay_pid*
 /?/
+.docker/
+.redkite-docker/
+.idea/
+data/
