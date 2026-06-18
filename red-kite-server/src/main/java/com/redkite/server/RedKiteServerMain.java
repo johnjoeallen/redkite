@@ -1248,7 +1248,6 @@ public class RedKiteServerMain {
                     LOGGER.info(() -> "No Maven/CVE verification attempted for SNAPSHOT component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
-                    complete = false;
                 } else {
                     VersionMetadata versionMetadata = versionProvider.latestVersion(component.coordinate(), component.version());
                     LOGGER.info(() -> "Maven version metadata for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => latest=" + versionMetadata.latestVersion() + ", sameMajor=" + versionMetadata.latestSameMajorVersion() + ", complete=" + versionMetadata.complete() + ", status=" + versionMetadata.status());
@@ -1282,9 +1281,14 @@ public class RedKiteServerMain {
                     }
                 }
             }
-            String message = complete
-                    ? "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache."
-                    : "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
+            String message;
+            if (complete) {
+                message = snapshotRisks.isEmpty()
+                        ? "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache."
+                        : "Report complete. " + snapshotRisks.size() + " SNAPSHOT " + (snapshotRisks.size() == 1 ? "dependency" : "dependencies") + " skipped (no stable metadata available).";
+            } else {
+                message = "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
+            }
             return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.of(), recs, snapshotRisks, metadata);
         }
 
