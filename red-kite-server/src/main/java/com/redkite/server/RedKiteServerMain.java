@@ -82,9 +82,22 @@ public class RedKiteServerMain {
         try {
             handler.handle(exchange);
         } catch (Exception e) {
-            LOGGER.severe(() -> "HTTP handler failed for " + exchange.getRequestURI() + ": " + e.getMessage());
-            sendText(exchange, 500, BRAND + " error: " + escape(e.getMessage() == null ? "unexpected failure" : e.getMessage()));
+            LOGGER.log(java.util.logging.Level.SEVERE, "HTTP handler failed for " + exchange.getRequestURI(), e);
+            String msg = causeChain(e);
+            sendText(exchange, 500, BRAND + " error: " + escape(msg));
         }
+    }
+
+    private static String causeChain(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        while (t != null) {
+            if (sb.length() > 0) {
+                sb.append(": ");
+            }
+            sb.append(t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage());
+            t = t.getCause();
+        }
+        return sb.length() == 0 ? "unexpected failure" : sb.toString();
     }
 
     private void handleIndex(HttpExchange exchange) throws IOException {
@@ -1173,30 +1186,19 @@ public class RedKiteServerMain {
         }
 
         private void persistMetadataCache(Connection connection, ScanReport report) throws SQLException {
+            java.util.Set<String> seen = new java.util.HashSet<>();
             try (PreparedStatement insert = connection.prepareStatement("""
                     insert into metadata_cache_entries(
                       scan_id, component_id, metadata_type, provider, component_group_id, component_artifact_id, component_version, latest_version, latest_same_major_version,
                       complete, status, cache_state, last_successful_check_at, cache_expiry_at, attempted_refresh_at,
                       suggested_retry_at, message
                     ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    on conflict (scan_id, component_id, metadata_type) do update set
-                      provider = excluded.provider,
-                      component_group_id = excluded.component_group_id,
-                      component_artifact_id = excluded.component_artifact_id,
-                      component_version = excluded.component_version,
-                      latest_version = excluded.latest_version,
-                      latest_same_major_version = excluded.latest_same_major_version,
-                      complete = excluded.complete,
-                      status = excluded.status,
-                      cache_state = excluded.cache_state,
-                      last_successful_check_at = excluded.last_successful_check_at,
-                      cache_expiry_at = excluded.cache_expiry_at,
-                      attempted_refresh_at = excluded.attempted_refresh_at,
-                      suggested_retry_at = excluded.suggested_retry_at,
-                      message = excluded.message,
-                      updated_at = current_timestamp
                     """)) {
                 for (MetadataResult result : report.metadataResults()) {
+                    String key = result.scanId() + ":" + result.componentId() + ":" + result.metadataType().name();
+                    if (!seen.add(key)) {
+                        continue;
+                    }
                     ScanComponent component = componentById(report.components(), result.componentId());
                     insert.setLong(1, result.scanId());
                     insert.setLong(2, result.componentId());
@@ -1205,8 +1207,8 @@ public class RedKiteServerMain {
                     insert.setString(5, component == null ? "unknown" : component.coordinate().groupId());
                     insert.setString(6, component == null ? "unknown" : component.coordinate().artifactId());
                     insert.setString(7, component == null ? "unknown" : component.version());
-                    insert.setString(8, result.latestVersion());
-                    insert.setString(9, result.latestSameMajorVersion());
+                    insert.setString(8, result.latestVersion() == null ? "unknown" : result.latestVersion());
+                    insert.setString(9, result.latestSameMajorVersion() == null ? "unknown" : result.latestSameMajorVersion());
                     insert.setBoolean(10, result.complete());
                     insert.setString(11, result.status().name());
                     insert.setString(12, result.cacheState().name());
