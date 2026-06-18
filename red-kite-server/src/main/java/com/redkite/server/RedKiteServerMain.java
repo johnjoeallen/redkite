@@ -52,9 +52,9 @@ public class RedKiteServerMain {
     }
 
     public static void main(String[] args) throws Exception {
-        String jdbcUrl = System.getProperty("redkite.db.url", "jdbc:postgresql://localhost:5432/redkite");
-        String dbUser = System.getProperty("redkite.db.user", "redkite");
-        String dbPassword = System.getProperty("redkite.db.password", "redkite");
+        String jdbcUrl = System.getProperty("redkite.db.url", "jdbc:h2:./data/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE");
+        String dbUser = System.getProperty("redkite.db.user", "sa");
+        String dbPassword = System.getProperty("redkite.db.password", "");
         int port = Integer.parseInt(System.getProperty("redkite.port", "6502"));
         RedKiteServerMain app = new RedKiteServerMain(jdbcUrl, dbUser, dbPassword, port);
         app.start();

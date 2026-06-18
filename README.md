@@ -9,26 +9,37 @@ It scans local working copies, builds a dependency inventory, checks cached or f
 - scans local Maven repositories
 - shows direct and transitive dependencies
 - highlights SNAPSHOT dependencies as unverified risks
-- caches Maven version metadata and vulnerability metadata in PostgreSQL
+- caches Maven version metadata and vulnerability metadata
 - creates upgrade plans from selected recommendations
 - applies approved plans locally with the CLI
 - keeps all Git and file mutations on the developer machine
 
 ## Requirements
 
-- Java 17
-- Docker and Docker Compose
-- PostgreSQL 16 or compatible
+- Java 17 or later ([download](https://adoptium.net))
+
+## Install
+
+Download the latest `red-kite-<version>.zip` from the [releases page](../../releases), then unzip it:
+
+```bash
+unzip red-kite-<version>.zip -d red-kite
+cd red-kite
+```
 
 ## Start The Server
 
-Start the full local stack on port `6502`:
-
 ```bash
-./scripts/red-kite.sh start
+./red-kite.sh
 ```
 
-The server is available at:
+On Windows:
+
+```bat
+red-kite.bat
+```
+
+The server starts on port `6502` and stores its database in a `data/` subdirectory next to the JAR. Open the UI at:
 
 ```text
 http://localhost:6502
@@ -36,37 +47,31 @@ http://localhost:6502
 
 ## Scan A Repository
 
-Run a scan against a local checked-out Maven repository:
+With the server running, open a second terminal and point the scan client at a local Maven repository:
 
 ```bash
-./scripts/red-kite.sh scan /path/to/repo
+./red-kite.sh scan /path/to/repo
 ```
 
-If you omit the path, the current directory is scanned.
-
-## Open The Database
-
-Open a `psql` session against the local PostgreSQL container:
+Omit the path to scan the current directory:
 
 ```bash
-./scripts/red-kite.sh db
+./red-kite.sh scan
 ```
 
-## Stop The Stack
+## Apply An Upgrade Plan
+
+After reviewing recommendations in the UI and creating a plan, apply it locally:
 
 ```bash
-./scripts/red-kite.sh stop
+./red-kite.sh apply-plan <planId>
 ```
+
+The CLI creates a local branch and edits the Maven files. Changes are left uncommitted and nothing is pushed.
 
 ## UI
 
-Open the local UI in a browser:
-
-```text
-http://localhost:6502/
-```
-
-From the UI you can:
+From the UI at `http://localhost:6502` you can:
 
 - browse projects and scans
 - inspect dependency inventory
@@ -76,57 +81,42 @@ From the UI you can:
 
 ## CLI Flow
 
-Typical flow:
-
-1. Start `red-kite-server`.
-2. Run `red-kite scan .` against a local Maven repository.
+1. Start the server with `./red-kite.sh`.
+2. Run `./red-kite.sh scan .` against a local Maven repository.
 3. Review the scan in the UI.
-4. Select one or more recommendations.
-5. Create an upgrade plan.
-6. Run `red-kite apply-plan <planId>`.
-7. Confirm the local branch and file changes.
-8. Let the CLI create the branch and apply the Maven file edits.
-
-The CLI leaves changes uncommitted by default and does not push anything.
+4. Select one or more recommendations and create an upgrade plan.
+5. Run `./red-kite.sh apply-plan <planId>` to apply it locally.
+6. Confirm the branch name and file changes when prompted.
 
 ## Configuration
 
-Database settings:
-
-- `redkite.db.url`
-- `redkite.db.user`
-- `redkite.db.password`
-
-Port:
-
-- `redkite.port`
-
-Default server port:
-
-- `6502`
-
-## Build
-
-Compile everything with Java 17:
+Pass JVM system properties to override defaults:
 
 ```bash
-rm -rf /tmp/redkite-classes
-mkdir -p /tmp/redkite-classes
-javac --release 17 -d /tmp/redkite-classes $(find red-kite-core/src/main/java red-kite-git/src/main/java red-kite-maven/src/main/java red-kite-metadata/src/main/java red-kite-server/src/main/java red-kite-scan/src/main/java -name '*.java')
+java -Dredkite.port=8080 -jar red-kite.jar
 ```
+
+| Property | Default |
+|---|---|
+| `redkite.port` | `6502` |
+| `redkite.db.url` | `jdbc:h2:./data/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE` |
+| `redkite.db.user` | `sa` |
+| `redkite.db.password` | _(empty)_ |
+
+## Build From Source
+
+Requires Maven 3.9+ and Java 17.
+
+```bash
+mvn package -DskipTests
+```
+
+The fat JAR is produced at `red-kite-server/target/red-kite-<version>.jar`.
 
 ## Known Limitations
 
 - Maven projects only.
 - Local repositories only.
-- PostgreSQL-backed persistence.
 - No remote Git hosting integration.
-- No branch pushes.
-- No pull requests.
+- No branch pushes or pull requests.
 - No Gradle, npm, Docker, or license scanning.
-
-## GitHub Description
-
-Use this short description for the GitHub repository:
-
-> Local Maven dependency reporting and upgrade planning for checked-out Java repositories, with PostgreSQL-backed scans and local-only plan application.

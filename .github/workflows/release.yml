@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Set version from tag
+        run: mvn --no-transfer-progress versions:set -DnewVersion=${GITHUB_REF_NAME#v} -DgenerateBackupPoms=false
+
+      - name: Build
+        run: mvn --no-transfer-progress package -DskipTests
+
+      - name: Package zip
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          mkdir dist
+          cp red-kite-server/target/red-kite-${VERSION}.jar dist/red-kite.jar
+          cp scripts/red-kite.sh dist/
+          cp scripts/red-kite.bat dist/
+          chmod +x dist/red-kite.sh
+          zip -j red-kite-${VERSION}.zip dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            red-kite-${GITHUB_REF_NAME#v}.zip \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
