@@ -18,7 +18,12 @@ public record PomModel(
         List<PomDependency> dependencyManagement,
         String parentGroupId,
         String parentArtifactId,
-        String parentVersion) {
+        String parentVersion,
+        List<String> modules) {
+
+    public boolean isAggregator() {
+        return !modules.isEmpty() || "pom".equalsIgnoreCase(packaging);
+    }
 
     public record PomDependency(
             String groupId,

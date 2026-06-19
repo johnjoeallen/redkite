@@ -75,7 +75,11 @@ public class MavenProjectScanner {
                     componentsByKey.put(directKey(sourceFile, dep.groupId(), dep.artifactId()), component);
                 }
 
-                collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId);
+                if (model.isAggregator()) {
+                    LOGGER.info(() -> "Skipping dependency:tree for aggregator POM " + relativePom + " (packaging=" + model.packaging() + ", modules=" + model.modules().size() + ")");
+                } else {
+                    collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId);
+                }
             }
 
             if (componentsByKey.isEmpty()) {
@@ -406,7 +410,8 @@ public class MavenProjectScanner {
 
         List<PomModel.PomDependency> deps = parseDependencies(project, properties);
         List<PomModel.PomDependency> managed = parseManagedDependencies(project, properties);
-        return new PomModel(pom, groupId, artifactId, version, packaging, properties, deps, managed, parentGroupId, parentArtifactId, parentVersion);
+        List<String> modules = parseModules(project);
+        return new PomModel(pom, groupId, artifactId, version, packaging, properties, deps, managed, parentGroupId, parentArtifactId, parentVersion, modules);
     }
 
     private List<PomModel.PomDependency> parseDependencies(Element project, Map<String, String> properties) {
@@ -442,6 +447,18 @@ public class MavenProjectScanner {
                     propertyName));
         }
         return result;
+    }
+
+    private List<String> parseModules(Element project) {
+        Element modulesEl = childElement(project, "modules");
+        if (modulesEl == null) return List.of();
+        List<String> result = new ArrayList<>();
+        NodeList items = modulesEl.getElementsByTagName("module");
+        for (int i = 0; i < items.getLength(); i++) {
+            String text = items.item(i).getTextContent();
+            if (text != null && !text.isBlank()) result.add(text.trim());
+        }
+        return List.copyOf(result);
     }
 
     private List<PomModel.PomDependency> parseManagedDependencies(Element project, Map<String, String> properties) {
