@@ -577,7 +577,28 @@ public class RedKiteServerMain {
         html.append("</div>");
         html.append("</div>");
 
-        // Toggle
+        // Build module index (preserve urgency sort within each module)
+        Map<String, List<ComponentView>> byModule = new LinkedHashMap<>();
+        for (ComponentView v : views) {
+            String mod = v.component().modulePath() == null || v.component().modulePath().isBlank()
+                    ? "(root)" : v.component().modulePath();
+            byModule.computeIfAbsent(mod, k -> new ArrayList<>()).add(v);
+        }
+
+        // Module tabs (only if more than one module)
+        if (byModule.size() > 1) {
+            html.append("<div class=\"rem-module-tabs\">");
+            html.append("<button class=\"button primary rem-module-tab\" type=\"button\" data-module=\"all\" onclick=\"filterRemediationModule('all')\">All modules <span class=\"tab-count\">").append(byModule.size()).append("</span></button>");
+            for (Map.Entry<String, List<ComponentView>> entry : byModule.entrySet()) {
+                String mod = entry.getKey();
+                html.append("<button class=\"button rem-module-tab\" type=\"button\" data-module=\"").append(escape(mod))
+                        .append("\" onclick=\"filterRemediationModule('").append(escape(mod)).append("')\">")
+                        .append(escape(mod)).append(" <span class=\"tab-count\">").append(entry.getValue().size()).append("</span></button>");
+            }
+            html.append("</div>");
+        }
+
+        // Remediation / All toggle
         long remCount = views.stream().filter(v -> v.status().needsRemediation()).count();
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"remediation\" onclick=\"setRemediationMode('remediation')\">Remediation only <span class=\"tab-count\">").append(remCount).append("</span></button>");
@@ -585,24 +606,27 @@ public class RedKiteServerMain {
         html.append("<span id=\"hidden-clean-count\" class=\"muted\" style=\"font-size:.88rem\"></span>");
         html.append("</div>");
 
-        // Component cards
+        // Component cards (flat list; JS handles module + mode visibility)
         html.append("<div class=\"rem-list\">");
         for (ComponentView view : views) {
-            html.append(renderComponentCard(view));
+            String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
+                    ? "(root)" : view.component().modulePath();
+            html.append(renderComponentCard(view, mod));
         }
         html.append("</div>");
 
         return html.toString();
     }
 
-    private String renderComponentCard(ComponentView view) {
+    private String renderComponentCard(ComponentView view, String module) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean clean = !status.needsRemediation();
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
 
         StringBuilder html = new StringBuilder();
-        html.append("<div class=\"rem-card").append(clean ? " clean" : "").append("\" data-clean=\"").append(clean).append("\">");
+        html.append("<div class=\"rem-card").append(clean ? " clean" : "").append("\" data-clean=\"").append(clean)
+                .append("\" data-module=\"").append(escape(module)).append("\">");
 
         // Header: coordinate + badges
         html.append("<div class=\"rem-header\">");
@@ -1043,6 +1067,7 @@ public class RedKiteServerMain {
                 + ".sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }"
                 + ".sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }"
                 + ".sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }"
+                + ".rem-module-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }"
                 + ".rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }"
                 + ".rem-list { display:flex; flex-direction:column; gap:10px; }"
                 + ".rem-card { padding:15px 18px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.02); display:flex; flex-direction:column; gap:9px; }"
@@ -1072,7 +1097,7 @@ public class RedKiteServerMain {
                 + ".version-current.cve { border-color:rgba(248,113,113,.6); color:#fca5a5; }"
                 + ".version-note { font-size:.9rem; color:var(--muted); }"
                 + "@media (max-width: 700px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}function setRemediationMode(mode){const cards=document.querySelectorAll('.rem-card');cards.forEach(card=>{if(mode==='remediation'){card.style.display=card.dataset.clean==='true'?'none':'';}else{card.style.display='';}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===mode);});const cleanCards=document.querySelectorAll('.rem-card[data-clean=\"true\"]').length;const el=document.getElementById('hidden-clean-count');if(el)el.textContent=mode==='remediation'&&cleanCards>0?cleanCards+' clean hidden':'';}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();setRemediationMode('remediation');});</script></head><body><div class=\"shell\">"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='remediation';let remModule='all';function applyRemediationFilters(){document.querySelectorAll('.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;const cleanOk=remMode!=='remediation'||card.dataset.clean!=='true';card.style.display=modOk&&cleanOk?'':'none';});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>btn.classList.toggle('primary',btn.dataset.mode===remMode));document.querySelectorAll('.rem-module-tab').forEach(btn=>btn.classList.toggle('primary',btn.dataset.module===remModule));const hidden=document.querySelectorAll('.rem-card[data-clean=\"true\"]').length;const el=document.getElementById('hidden-clean-count');if(el)el.textContent=remMode==='remediation'&&hidden>0?hidden+' clean hidden':'';}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();});</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-mark\" href=\"/\" aria-label=\"" + escape(brand) + "\">" + logoSvgInline() + "</a><div class=\"brand-copy\"><strong>" + escape(brand) + "</strong><span>" + escape(title) + "</span></div></div><div class=\"nav\"><a href=\"/\">Projects</a><a href=\"/upgrade-planner\">Planner</a></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
