@@ -749,7 +749,6 @@ public class RedKiteServerMain {
                 + ".version-choice.current { opacity:.8; }"
                 + ".version-choice.active { border-color: rgba(125,211,252,.65); background: rgba(125,211,252,.15); color: #d9f5ff; }"
                 + ".version-choice.cve { border-color: rgba(248,113,113,.6); }"
-                + ".version-choice .pill { display:inline-flex; align-items:center; justify-content:center; padding:2px 7px; border-radius:999px; background: rgba(255,255,255,.12); font-size:.72rem; text-transform:uppercase; }"
                 + ".footer { margin-top:24px; color:var(--muted); font-size:.9rem; }"
                 + ".inventory-group.is-hidden, .inventory-row.is-hidden { display:none; }"
                 + "@media (max-width: 960px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
@@ -882,7 +881,7 @@ public class RedKiteServerMain {
         html.append("\" data-version=\"").append(escape(version)).append("\" onclick=\"selectVersionChoice(this, '").append(escape(selectorId)).append("')\">");
         html.append(escape(label));
         if (cve) {
-            html.append("<span class=\"pill\">CVE</span>");
+            html.append("*");
         }
         html.append("</button>");
         return html.toString();
