@@ -148,7 +148,10 @@ public class MavenProjectScanner {
         if (direct) {
             for (ScanComponent component : componentsByKey.values()) {
                 if (component.direct() && sourceFile.equals(component.sourceFilePath()) && component.coordinate().groupId().equals(node.groupId()) && component.coordinate().artifactId().equals(node.artifactId())) {
-                    if (isUnknownVersion(component.version()) && !isUnknownVersion(node.version())) {
+                    // Prefer the version from dependency:tree (Maven's effective/resolved version)
+                    // over what we read from the raw POM, which may be an unresolved property or
+                    // a declared version that loses to conflict/BOM resolution at runtime.
+                    if (!isUnknownVersion(node.version()) && !node.version().equals(component.version())) {
                         ScanComponent resolved = new ScanComponent(
                                 component.id(),
                                 component.coordinate(),
@@ -163,7 +166,7 @@ public class MavenProjectScanner {
                                 component.owningVersionControlPoint(),
                                 component.modulePath());
                         replaceComponent(componentsByKey, component, resolved);
-                        LOGGER.info(() -> "Resolved direct dependency version from dependency tree for " + node.groupId() + ":" + node.artifactId() + " => " + node.version());
+                        LOGGER.info(() -> "Resolved direct dependency version from dependency tree for " + node.groupId() + ":" + node.artifactId() + " POM=" + component.version() + " => tree=" + node.version());
                         return resolved;
                     }
                     return component;
@@ -257,6 +260,11 @@ public class MavenProjectScanner {
             String coords = line.substring(markerIndex + 2).trim();
             while (coords.startsWith("|")) {
                 coords = coords.substring(1).trim();
+            }
+            // Skip omitted conflict entries — these are losing versions from Maven's
+            // nearest-wins conflict resolution, not what's actually on the classpath.
+            if (coords.contains("(omitted")) {
+                return null;
             }
             String[] parts = coords.split(":");
             if (parts.length < 5) {
