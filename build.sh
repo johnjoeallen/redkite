@@ -2,7 +2,7 @@
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-mvn --no-transfer-progress package -DskipTests
+mvn --no-transfer-progress clean package -DskipTests
 
 JAR=$(ls "$DIR"/red-kite-server/target/red-kite-*.jar 2>/dev/null | grep -v 'shaded' | head -1)
 if [ -z "$JAR" ]; then

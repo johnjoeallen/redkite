@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-mvn --no-transfer-progress package -DskipTests
+mvn --no-transfer-progress clean package -DskipTests
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 for %%f in ("%~dp0red-kite-server\target\red-kite-*.jar") do (
