@@ -407,6 +407,11 @@ public class RedKiteServerMain {
         return value == null ? "" : value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
+    private static String jsString(String value) {
+        if (value == null) return "''";
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'";
+    }
+
     private static Map<String, String> parseForm(String body) {
         Map<String, String> result = new LinkedHashMap<>();
         if (body == null || body.isBlank()) {
@@ -599,15 +604,18 @@ public class RedKiteServerMain {
             byModule.computeIfAbsent(mod, k -> new ArrayList<>()).add(v);
         }
 
-        // Module tabs (only if more than one module)
+        // Module tabs — always one per module; never an "All" aggregate view
         if (byModule.size() > 1) {
+            String firstModule = byModule.keySet().iterator().next();
+            html.append("<script>remModule=").append(jsString(firstModule)).append(";</script>");
             html.append("<div class=\"rem-module-tabs\">");
-            html.append("<button class=\"button primary rem-module-tab\" type=\"button\" data-module=\"all\" onclick=\"filterRemediationModule('all')\">All modules <span class=\"tab-count\">").append(byModule.size()).append("</span></button>");
+            boolean firstTab = true;
             for (Map.Entry<String, List<ComponentView>> entry : byModule.entrySet()) {
                 String mod = entry.getKey();
-                html.append("<button class=\"button rem-module-tab\" type=\"button\" data-module=\"").append(escape(mod))
+                html.append("<button class=\"button").append(firstTab ? " primary" : "").append(" rem-module-tab\" type=\"button\" data-module=\"").append(escape(mod))
                         .append("\" onclick=\"filterRemediationModule('").append(escape(mod)).append("')\">")
                         .append(escape(mod)).append(" <span class=\"tab-count\">").append(entry.getValue().size()).append("</span></button>");
+                firstTab = false;
             }
             html.append("</div>");
         }
