@@ -1605,9 +1605,7 @@ public class RedKiteServerMain {
             }
             String message;
             if (complete) {
-                message = snapshotRisks.isEmpty()
-                        ? "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache."
-                        : "Report complete. " + snapshotRisks.size() + " SNAPSHOT " + (snapshotRisks.size() == 1 ? "dependency" : "dependencies") + " skipped (no stable metadata available).";
+                message = "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache.";
             } else {
                 message = "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
             }
