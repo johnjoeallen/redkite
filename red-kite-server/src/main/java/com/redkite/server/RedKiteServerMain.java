@@ -4,6 +4,7 @@ import com.redkite.core.domain.*;
 import com.redkite.core.service.SerializationSupport;
 import com.redkite.maven.MavenProjectScanner;
 import com.redkite.metadata.HttpVersionMetadataProvider;
+import com.redkite.metadata.HttpVulnerabilityProvider;
 
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -953,12 +954,14 @@ public class RedKiteServerMain {
         private final String dbUser;
         private final String dbPassword;
         private final HttpVersionMetadataProvider versionProvider;
+        private final HttpVulnerabilityProvider vulnerabilityProvider;
 
         private Store(String jdbcUrl, String dbUser, String dbPassword) {
             this.jdbcUrl = jdbcUrl;
             this.dbUser = dbUser;
             this.dbPassword = dbPassword;
             this.versionProvider = new HttpVersionMetadataProvider(System.getProperty("redkite.maven.repositories", "https://repo1.maven.org/maven2"));
+            this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
             initializeSchema();
         }
 
@@ -1236,6 +1239,7 @@ public class RedKiteServerMain {
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
             List<MetadataResult> metadata = new ArrayList<>();
+            List<VulnerabilityFinding> vulnerabilityFindings = new ArrayList<>();
             boolean complete = true;
             for (ScanComponent component : input.components()) {
                 LOGGER.info(() -> "Enriching component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " version=" + component.version());
@@ -1258,13 +1262,24 @@ public class RedKiteServerMain {
                     if (!versionMetadata.complete()) {
                         complete = false;
                     }
+
+                    List<VulnerabilityFinding> compVulns = vulnerabilityProvider.vulnerabilities(component.coordinate(), component.version());
+                    boolean hasVulns = !compVulns.isEmpty();
+                    String vulnMessage = hasVulns
+                            ? "Found " + compVulns.size() + " vulnerabilit" + (compVulns.size() == 1 ? "y" : "ies") + "."
+                            : "No known vulnerabilities.";
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "osv.dev", component.version(), "unknown", "unknown", List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, vulnMessage));
+                    for (VulnerabilityFinding f : compVulns) {
+                        vulnerabilityFindings.add(new VulnerabilityFinding(f.advisoryId(), f.severity(), f.coordinate(), f.affectedVersion(), f.fixedVersion(), component.direct(), component.owningVersionControlPoint(), f.cves(), null));
+                    }
+
                     if (versionMetadata.complete() && canPlanUpgrade(component)) {
                         String target = selectUpgradeTarget(component.version(), versionMetadata);
                         if (target != null && isUpgradeable(component.version(), target)) {
                             if (!input.allowMajorUpgrades() && isMajorUpgrade(component.version(), target)) {
                                 LOGGER.info(() -> "Skipping major upgrade recommendation for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " because the scan did not allow major upgrades");
                             } else {
-                                RecommendationReason reason = upgradeReason(component.version(), target);
+                                RecommendationReason reason = hasVulns ? RecommendationReason.CVE_FIX : upgradeReason(component.version(), target);
                                 RiskLevel risk = component.direct() ? upgradeRisk(component.version(), target) : RiskLevel.ELEVATED;
                                 RecommendationConfidence confidence = RecommendationConfidence.HIGH;
                                 PlannedFileChange change = plannedChangeFor(component, input, target, reasonMessage(reason, target));
@@ -1289,7 +1304,7 @@ public class RedKiteServerMain {
             } else {
                 message = "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
             }
-            return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.of(), recs, snapshotRisks, metadata);
+            return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.copyOf(vulnerabilityFindings), recs, snapshotRisks, metadata);
         }
 
         private PlannedFileChange plannedChangeFor(ScanComponent component, ScanInput input, String targetVersion, String reason) {
