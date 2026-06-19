@@ -5,6 +5,8 @@ import com.redkite.core.service.SerializationSupport;
 import com.redkite.maven.MavenProjectScanner;
 import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
+import com.redkite.core.service.AdvisoryClassifier;
+import com.redkite.core.service.RemediationClassifier;
 
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -27,6 +29,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -209,13 +212,8 @@ public class RedKiteServerMain {
             html.append("<div><p class=\"eyebrow\">Scan ").append(report.scanId()).append("</p><h1>Scan report</h1></div>");
             html.append(report.complete() ? "<span class=\"badge success\">Complete</span>" : "<span class=\"badge warn\">Incomplete</span>");
             html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p></section>");
-            html.append("<section class=\"card\">").append(statGrid(
-                    statCard("Components", String.valueOf(report.components().size())),
-                    statCard("Recommendations", String.valueOf(report.recommendations().size())),
-                    statCard("Snapshots", String.valueOf(report.snapshotDependencyRisks().size())),
-                    statCard("Metadata results", String.valueOf(report.metadataResults().size())))).append("</section>");
-            html.append("<section class=\"card span-2\"><h2>Dependency inventory</h2>");
-            html.append(renderDependencyInventory(report));
+            html.append("<section class=\"card span-2\">");
+            html.append(renderRemediationView(report));
             html.append("</section>");
             html.append("</div>");
             html.append(pageShellEnd());
@@ -276,7 +274,7 @@ public class RedKiteServerMain {
                         html.append("<label class=\"muted\" for=\"targetVersion_").append(rec.id()).append("\">Release version</label>");
                         html.append("<input id=\"targetVersion_").append(rec.id()).append("\" name=\"targetVersion_").append(rec.id()).append("\" type=\"text\" placeholder=\"Enter release version\" value=\"").append(escape(defaultTarget)).append("\"/>");
                     } else {
-                        html.append(renderVersionButtonGroup(rec.coordinate(), rec.currentVersion(), rec.id(), versionMetadata, rec, choices, defaultTarget, vulnerabilitiesByComponent.get(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId()), true));
+                        html.append(renderVersionSelect("targetVersion_" + rec.id(), rec.coordinate(), rec.currentVersion(), defaultTarget, versionMetadata, rec, vulnerabilitiesByComponent.get(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId()), true));
                     }
                     html.append("</div>");
                     html.append("<span class=\"badge\">").append(escape(reasonLabel(rec.reason()))).append("</span>");
@@ -488,6 +486,278 @@ public class RedKiteServerMain {
         }
         html.append("</ul>");
         return html.toString();
+    }
+
+    // ---- Stage 6: Remediation-first single-column view ----
+
+    private record ComponentView(
+            ScanComponent component,
+            RemediationStatus status,
+            MetadataResult versionMetadata,
+            UpgradeRecommendation recommendation,
+            List<VulnerabilityFinding> findings) {}
+
+    private String renderRemediationView(ScanReport report) {
+        ReportSummary summary = RemediationClassifier.summarize(report);
+        List<ScanComponent> components = report.components();
+        if (components.isEmpty()) {
+            return "<p class=\"muted\">No dependency inventory is available for this scan.</p>";
+        }
+
+        // Build lookup maps
+        Map<Long, UpgradeRecommendation> recByComponent = new LinkedHashMap<>();
+        for (UpgradeRecommendation rec : report.recommendations()) {
+            if (!rec.affectedComponentIds().isEmpty()) {
+                recByComponent.put(rec.affectedComponentIds().get(0), rec);
+            } else {
+                recByComponent.put(rec.id(), rec);
+            }
+        }
+        Map<Long, MetadataResult> versionMetaByComponent = new LinkedHashMap<>();
+        for (MetadataResult m : report.metadataResults()) {
+            if (m.metadataType() == MetadataType.VERSION) {
+                versionMetaByComponent.put(m.componentId(), m);
+            }
+        }
+        Map<String, List<VulnerabilityFinding>> vulnsByKey = new LinkedHashMap<>();
+        for (VulnerabilityFinding f : report.vulnerabilityFindings()) {
+            vulnsByKey.computeIfAbsent(
+                    f.coordinate().groupId() + ":" + f.coordinate().artifactId(),
+                    k -> new ArrayList<>()).add(f);
+        }
+
+        // Deduplicate and classify
+        Map<String, ScanComponent> unique = new LinkedHashMap<>();
+        for (ScanComponent c : components) {
+            String key = c.sourceFilePath() + "|" + c.coordinate().groupId() + ":"
+                    + c.coordinate().artifactId() + "|" + c.version() + "|" + c.direct();
+            unique.putIfAbsent(key, c);
+        }
+        List<ComponentView> views = new ArrayList<>();
+        for (ScanComponent c : unique.values()) {
+            RemediationStatus status = RemediationClassifier.classify(
+                    c, report.vulnerabilityFindings(), report.recommendations(), report.metadataResults());
+            MetadataResult versionMeta = versionMetaByComponent.get(c.id());
+            UpgradeRecommendation rec = recByComponent.get(c.id());
+            List<VulnerabilityFinding> vulns = vulnsByKey.getOrDefault(
+                    c.coordinate().groupId() + ":" + c.coordinate().artifactId(), List.of());
+            views.add(new ComponentView(c, status, versionMeta, rec, vulns));
+        }
+
+        // Sort: CRITICAL → HIGH → MEDIUM → LOW → UNKNOWN advisory → SNAPSHOT → STALE → VERSION_MGMT → UPGRADE → CLEAN
+        // Within same bucket: direct before transitive, then alphabetical
+        views.sort((a, b) -> {
+            int ka = remediationSortKey(a.component(), a.status());
+            int kb = remediationSortKey(b.component(), b.status());
+            if (ka != kb) return Integer.compare(ka, kb);
+            if (a.component().direct() != b.component().direct()) return a.component().direct() ? -1 : 1;
+            return a.component().coordinate().artifactId()
+                    .compareTo(b.component().coordinate().artifactId());
+        });
+
+        StringBuilder html = new StringBuilder();
+
+        // Summary banner
+        html.append("<div class=\"rem-banner\">");
+        html.append("<div class=\"rem-banner-row\">");
+        html.append("<span class=\"rem-stat\"><strong>").append(summary.totalComponents()).append("</strong> components</span>");
+        if (summary.needsRemediation() > 0) {
+            html.append("<span class=\"rem-stat\"><strong>").append(summary.needsRemediation()).append("</strong> need remediation</span>");
+        }
+        html.append("<span class=\"rem-stat muted\">").append(summary.clean()).append(" clean</span>");
+        html.append("</div>");
+        html.append("<div class=\"rem-banner-row\">");
+        if (summary.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\">&#9762; ").append(summary.criticalCount()).append(" Critical</span>");
+        if (summary.highCount() > 0) html.append("<span class=\"sev-chip sev-high\">&#9760; ").append(summary.highCount()).append(" High</span>");
+        if (summary.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\">&#9888; ").append(summary.mediumCount()).append(" Medium</span>");
+        if (summary.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\">&#x2139; ").append(summary.lowCount()).append(" Low</span>");
+        if (summary.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\">? ").append(summary.unknownCount()).append(" Unknown</span>");
+        if (summary.snapshotCount() > 0) html.append("<span class=\"sev-chip sev-snap\">&#9889; ").append(summary.snapshotCount()).append(" Snapshot</span>");
+        if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
+        html.append("</div>");
+        html.append("</div>");
+
+        // Toggle
+        long remCount = views.stream().filter(v -> v.status().needsRemediation()).count();
+        html.append("<div class=\"rem-toggle\">");
+        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"remediation\" onclick=\"setRemediationMode('remediation')\">Remediation only <span class=\"tab-count\">").append(remCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All components <span class=\"tab-count\">").append(views.size()).append("</span></button>");
+        html.append("<span id=\"hidden-clean-count\" class=\"muted\" style=\"font-size:.88rem\"></span>");
+        html.append("</div>");
+
+        // Component cards
+        html.append("<div class=\"rem-list\">");
+        for (ComponentView view : views) {
+            html.append(renderComponentCard(view));
+        }
+        html.append("</div>");
+
+        return html.toString();
+    }
+
+    private String renderComponentCard(ComponentView view) {
+        ScanComponent comp = view.component();
+        RemediationStatus status = view.status();
+        boolean clean = !status.needsRemediation();
+        String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
+
+        StringBuilder html = new StringBuilder();
+        html.append("<div class=\"rem-card").append(clean ? " clean" : "").append("\" data-clean=\"").append(clean).append("\">");
+
+        // Header: coordinate + badges
+        html.append("<div class=\"rem-header\">");
+        html.append("<span class=\"rem-title\">").append(escape(coordStr)).append("</span>");
+        html.append("<div class=\"rem-badges\">");
+        html.append(severityBadgeHtml(status.highestSeverity(), clean));
+        String kindClass = comp.snapshot() ? "warn" : comp.direct() ? "success" : "neutral";
+        String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "direct" : "transitive";
+        html.append("<span class=\"badge ").append(kindClass).append("\">").append(kindLabel).append("</span>");
+        html.append("<span class=\"badge neutral\">").append(comp.scope().name().toLowerCase()).append("</span>");
+        html.append("</div>");
+        html.append("</div>");
+
+        // Version info
+        html.append("<div class=\"rem-meta\">");
+        html.append("<span>Current: <strong>").append(escape(comp.version() != null ? comp.version() : "unknown")).append("</strong></span>");
+        if (view.recommendation() != null && !status.isSnapshot()) {
+            html.append("<span>&rarr; Recommended: <strong>").append(escape(view.recommendation().targetVersion())).append("</strong></span>");
+        }
+        if (view.versionMetadata() != null && view.versionMetadata().latestVersion() != null
+                && !view.versionMetadata().latestVersion().isBlank()
+                && !"unknown".equalsIgnoreCase(view.versionMetadata().latestVersion())) {
+            html.append("<span class=\"muted\">(Latest: ").append(escape(view.versionMetadata().latestVersion())).append(")</span>");
+        }
+        html.append("</div>");
+
+        // CVE identifiers
+        if (status.hasVulnerability() && !view.findings().isEmpty()) {
+            List<String> allCves = new ArrayList<>();
+            for (VulnerabilityFinding f : view.findings()) {
+                if (f.cves() != null) allCves.addAll(f.cves());
+            }
+            if (!allCves.isEmpty()) {
+                html.append("<div class=\"rem-cves\">").append(escape(String.join(", ", allCves))).append("</div>");
+            }
+        }
+
+        // Remediation reason chips
+        if (!status.reasons().isEmpty()) {
+            html.append("<div class=\"rem-reasons\">");
+            for (String reason : status.reasons()) {
+                html.append("<span class=\"reason-chip\">").append(escape(reason)).append("</span>");
+            }
+            html.append("</div>");
+        }
+
+        // Version selector (display-only on scan page) + planner link
+        if (!clean && view.versionMetadata() != null) {
+            String selectorId = "view_" + comp.id();
+            String selectedVersion = view.recommendation() != null ? view.recommendation().targetVersion() : comp.version();
+            html.append("<div class=\"rem-actions\">");
+            html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
+                    view.versionMetadata(), view.recommendation(), view.findings(), false));
+            html.append("</div>");
+        }
+
+        html.append("</div>");
+        return html.toString();
+    }
+
+    private String severityBadgeHtml(AdvisorySeverity severity, boolean clean) {
+        if (clean || severity == AdvisorySeverity.NONE) {
+            return "<span class=\"sev-badge sev-none\">&#10003; Clean</span>";
+        }
+        String cls = "sev-" + severity.name().toLowerCase();
+        return "<span class=\"sev-badge " + cls + "\">" + escape(severity.icon()) + " " + escape(severity.label()) + "</span>";
+    }
+
+    private int remediationSortKey(ScanComponent component, RemediationStatus status) {
+        if (status.hasVulnerability()) {
+            return switch (status.highestSeverity()) {
+                case CRITICAL -> 0;
+                case HIGH -> 10;
+                case MEDIUM -> 20;
+                case LOW -> 30;
+                default -> 40; // UNKNOWN
+            };
+        }
+        if (status.isSnapshot()) return 50;
+        if (status.hasStaleMetadata()) return 60;
+        if (status.hasDirectVersionDeclaration()) return 70;
+        if (status.hasUpgradeRecommendation()) return 80;
+        return 90;
+    }
+
+    // ---- Stage 8: Compact version selector dropdown ----
+
+    private String renderVersionSelect(String selectorId, ComponentCoordinate coordinate, String currentVersion,
+            String selectedVersion, MetadataResult versionMetadata, UpgradeRecommendation recommendation,
+            List<VulnerabilityFinding> vulnFindings, boolean includeNameAttr) {
+        List<String> choices = versionChoices(versionMetadata, recommendation);
+        // Build deduplicated ordered set: recommended first, then choices, then latest
+        LinkedHashSet<String> ordered = new LinkedHashSet<>();
+        if (recommendation != null && recommendation.targetVersion() != null && !recommendation.targetVersion().isBlank()) {
+            ordered.add(recommendation.targetVersion());
+        }
+        ordered.addAll(choices);
+        if (versionMetadata != null && versionMetadata.latestVersion() != null
+                && !versionMetadata.latestVersion().isBlank()
+                && !"unknown".equalsIgnoreCase(versionMetadata.latestVersion())) {
+            ordered.add(versionMetadata.latestVersion());
+        }
+
+        if (ordered.isEmpty()) {
+            return "<span class=\"version-note muted\">No upgrade candidates</span>";
+        }
+
+        StringBuilder html = new StringBuilder();
+        html.append("<div class=\"version-sel-wrap\">");
+
+        // Show current version chip
+        if (currentVersion != null && !currentVersion.isBlank()) {
+            boolean currentHasCve = hasCveForVersion(coordinate, currentVersion, vulnFindings);
+            html.append("<span class=\"version-current").append(currentHasCve ? " cve" : "").append("\">");
+            html.append(escape(currentVersion));
+            if (currentHasCve) html.append("<span class=\"pill\">CVE</span>");
+            html.append("</span>");
+            html.append("<span style=\"color:var(--muted)\">&#8594;</span>");
+        }
+
+        String recommendedVersion = recommendation != null ? recommendation.targetVersion() : null;
+        String latestVersion = versionMetadata != null ? versionMetadata.latestVersion() : null;
+        String latestSameMajor = versionMetadata != null ? versionMetadata.latestSameMajorVersion() : null;
+        String effectiveSelected = selectedVersion != null ? selectedVersion : recommendedVersion;
+
+        String nameAttr = includeNameAttr ? " name=\"" + escape(selectorId) + "\"" : "";
+        html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr).append(">");
+        for (String version : ordered) {
+            boolean isSelected = version.equals(effectiveSelected);
+            boolean hasCve = hasCveForVersion(coordinate, version, vulnFindings);
+            String label = buildVersionOptionLabel(version, recommendedVersion, latestVersion, latestSameMajor,
+                    recommendation != null ? recommendation.reason() : null, hasCve, currentVersion);
+            html.append("<option value=\"").append(escape(version)).append("\"")
+                    .append(isSelected ? " selected" : "")
+                    .append(">").append(escape(label)).append("</option>");
+        }
+        html.append("</select>");
+        html.append("</div>");
+        return html.toString();
+    }
+
+    private String buildVersionOptionLabel(String version, String recommendedVersion, String latestVersion,
+            String latestSameMajor, RecommendationReason reason, boolean hasCve, String currentVersion) {
+        List<String> tags = new ArrayList<>();
+        if (version.equals(recommendedVersion)) {
+            tags.add("recommended");
+            if (reason == RecommendationReason.CVE_FIX) tags.add("fixes CVE");
+        }
+        if (version.equals(latestVersion)) tags.add("latest");
+        if (version.equals(latestSameMajor) && !version.equals(latestVersion)) tags.add("latest same major");
+        if (hasCve) tags.add("vulnerable");
+        if (version.contains("-SNAPSHOT") || version.contains("-alpha") || version.contains("-beta") || version.contains("-rc")) {
+            tags.add("pre-release");
+        }
+        return tags.isEmpty() ? version : version + " — " + String.join(", ", tags);
     }
 
     private String renderDependencyInventory(ScanReport report) {
@@ -752,8 +1022,48 @@ public class RedKiteServerMain {
                 + ".version-choice .pill { display:inline-flex; align-items:center; justify-content:center; padding:2px 7px; border-radius:999px; background: rgba(255,255,255,.12); font-size:.72rem; text-transform:uppercase; }"
                 + ".footer { margin-top:24px; color:var(--muted); font-size:.9rem; }"
                 + ".inventory-group.is-hidden, .inventory-row.is-hidden { display:none; }"
+                + ".rem-banner { padding:14px 18px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.02); margin-bottom:16px; display:flex; flex-direction:column; gap:10px; }"
+                + ".rem-banner-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
+                + ".rem-stat { font-size:.95rem; } .rem-stat strong { font-size:1.1rem; }"
+                + ".sev-chip { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:999px; font-size:.8rem; font-weight:600; }"
+                + ".sev-chip.sev-critical,.sev-badge.sev-critical { background:rgba(220,38,38,.2); border:1px solid rgba(220,38,38,.45); color:#fca5a5; }"
+                + ".sev-chip.sev-high,.sev-badge.sev-high { background:rgba(234,88,12,.2); border:1px solid rgba(234,88,12,.45); color:#fdba74; }"
+                + ".sev-chip.sev-medium,.sev-badge.sev-medium { background:rgba(234,179,8,.18); border:1px solid rgba(234,179,8,.4); color:#fde68a; }"
+                + ".sev-chip.sev-low,.sev-badge.sev-low { background:rgba(59,130,246,.18); border:1px solid rgba(59,130,246,.35); color:#93c5fd; }"
+                + ".sev-chip.sev-unknown,.sev-badge.sev-unknown { background:rgba(107,114,128,.18); border:1px solid rgba(107,114,128,.4); color:#d1d5db; }"
+                + ".sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }"
+                + ".sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }"
+                + ".sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }"
+                + ".rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }"
+                + ".rem-list { display:flex; flex-direction:column; gap:10px; }"
+                + ".rem-card { padding:15px 18px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.02); display:flex; flex-direction:column; gap:9px; }"
+                + ".rem-card.clean { opacity:.7; }"
+                + ".rem-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }"
+                + ".rem-title { font-weight:700; font-size:1rem; font-family:ui-monospace,monospace; }"
+                + ".rem-badges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }"
+                + ".sev-badge { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:700; }"
+                + ".rem-meta { font-size:.93rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
+                + ".rem-meta strong { color:var(--text); }"
+                + ".rem-cves { font-size:.85rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }"
+                + ".rem-reasons { display:flex; flex-wrap:wrap; gap:6px; }"
+                + ".reason-chip { padding:3px 9px; border-radius:999px; border:1px solid rgba(167,139,250,.3); background:rgba(167,139,250,.1); color:#d8c8ff; font-size:.78rem; }"
+                + ".rem-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:2px; }"
+                + ".action-btn { display:inline-flex; align-items:center; padding:7px 15px; border-radius:12px; font-size:.86rem; font-weight:600; border:1px solid transparent; cursor:pointer; text-decoration:none; }"
+                + ".action-btn:hover { filter:brightness(1.12); }"
+                + ".action-btn.sev-critical { background:rgba(220,38,38,.25); color:#fca5a5; border-color:rgba(220,38,38,.45); }"
+                + ".action-btn.sev-high { background:rgba(234,88,12,.25); color:#fdba74; border-color:rgba(234,88,12,.45); }"
+                + ".action-btn.sev-medium { background:rgba(234,179,8,.2); color:#fde68a; border-color:rgba(234,179,8,.4); }"
+                + ".action-btn.sev-low { background:rgba(59,130,246,.2); color:#93c5fd; border-color:rgba(59,130,246,.35); }"
+                + ".action-btn.sev-unknown { background:rgba(107,114,128,.2); color:#d1d5db; border-color:rgba(107,114,128,.4); }"
+                + ".action-btn.sev-none { background:rgba(52,211,153,.14); color:#6ee7b7; border-color:rgba(52,211,153,.3); }"
+                + ".action-btn.sev-snap { background:rgba(139,92,246,.2); color:#c4b5fd; border-color:rgba(139,92,246,.4); }"
+                + ".version-sel-wrap { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }"
+                + ".version-sel { padding:7px 10px; border-radius:12px; border:1px solid var(--line); background:rgba(8,15,30,.9); color:var(--text); font-size:.88rem; min-width:200px; max-width:100%; }"
+                + ".version-current { padding:4px 10px; border-radius:999px; border:1px solid var(--line); font-size:.86rem; color:var(--muted); display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }"
+                + ".version-current.cve { border-color:rgba(248,113,113,.6); color:#fca5a5; }"
+                + ".version-note { font-size:.9rem; color:var(--muted); }"
                 + "@media (max-width: 960px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}window.addEventListener('DOMContentLoaded',applyInventoryFilters);</script></head><body><div class=\"shell\">"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}function setRemediationMode(mode){const cards=document.querySelectorAll('.rem-card');cards.forEach(card=>{if(mode==='remediation'){card.style.display=card.dataset.clean==='true'?'none':'';}else{card.style.display='';}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===mode);});const cleanCards=document.querySelectorAll('.rem-card[data-clean=\"true\"]').length;const el=document.getElementById('hidden-clean-count');if(el)el.textContent=mode==='remediation'&&cleanCards>0?cleanCards+' clean hidden':'';}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();setRemediationMode('remediation');});</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-mark\" href=\"/\" aria-label=\"" + escape(brand) + "\">" + logoSvgInline() + "</a><div class=\"brand-copy\"><strong>" + escape(brand) + "</strong><span>" + escape(title) + "</span></div></div><div class=\"nav\"><a href=\"/\">Projects</a><a href=\"/upgrade-planner\">Planner</a></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
