@@ -94,10 +94,12 @@ public final class RemediationClassifier {
         if (allFindings == null) return result;
         String groupId = component.coordinate().groupId();
         String artifactId = component.coordinate().artifactId();
+        String version = component.version();
         for (VulnerabilityFinding f : allFindings) {
             if (f == null || f.coordinate() == null) continue;
             if (groupId.equals(f.coordinate().groupId())
-                    && artifactId.equals(f.coordinate().artifactId())) {
+                    && artifactId.equals(f.coordinate().artifactId())
+                    && version.equals(f.affectedVersion())) {
                 result.add(f);
             }
         }

@@ -258,7 +258,7 @@ public class RedKiteServerMain {
                     }
                 }
                 for (VulnerabilityFinding finding : report.vulnerabilityFindings()) {
-                    String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId();
+                    String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId() + "@" + finding.affectedVersion();
                     vulnerabilitiesByComponent.computeIfAbsent(key, k -> new ArrayList<>()).add(finding);
                 }
                 for (UpgradeRecommendation rec : report.recommendations()) {
@@ -274,7 +274,7 @@ public class RedKiteServerMain {
                         html.append("<label class=\"muted\" for=\"targetVersion_").append(rec.id()).append("\">Release version</label>");
                         html.append("<input id=\"targetVersion_").append(rec.id()).append("\" name=\"targetVersion_").append(rec.id()).append("\" type=\"text\" placeholder=\"Enter release version\" value=\"").append(escape(defaultTarget)).append("\"/>");
                     } else {
-                        html.append(renderVersionSelect("targetVersion_" + rec.id(), rec.coordinate(), rec.currentVersion(), defaultTarget, versionMetadata, rec, vulnerabilitiesByComponent.get(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId()), true));
+                        html.append(renderVersionSelect("targetVersion_" + rec.id(), rec.coordinate(), rec.currentVersion(), defaultTarget, versionMetadata, rec, vulnerabilitiesByComponent.get(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId() + "@" + rec.currentVersion()), true));
                     }
                     html.append("</div>");
                     html.append("<span class=\"badge\">").append(escape(reasonLabel(rec.reason()))).append("</span>");
@@ -522,7 +522,7 @@ public class RedKiteServerMain {
         Map<String, List<VulnerabilityFinding>> vulnsByKey = new LinkedHashMap<>();
         for (VulnerabilityFinding f : report.vulnerabilityFindings()) {
             vulnsByKey.computeIfAbsent(
-                    f.coordinate().groupId() + ":" + f.coordinate().artifactId(),
+                    f.coordinate().groupId() + ":" + f.coordinate().artifactId() + "@" + f.affectedVersion(),
                     k -> new ArrayList<>()).add(f);
         }
 
@@ -554,7 +554,7 @@ public class RedKiteServerMain {
             MetadataResult versionMeta = versionMetaByComponent.get(c.id());
             UpgradeRecommendation rec = recByComponent.get(c.id());
             List<VulnerabilityFinding> vulns = vulnsByKey.getOrDefault(
-                    c.coordinate().groupId() + ":" + c.coordinate().artifactId(), List.of());
+                    c.coordinate().groupId() + ":" + c.coordinate().artifactId() + "@" + c.version(), List.of());
             views.add(new ComponentView(c, status, versionMeta, rec, vulns));
         }
 
@@ -859,7 +859,7 @@ public class RedKiteServerMain {
             }
         }
         for (VulnerabilityFinding finding : report.vulnerabilityFindings()) {
-            String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId();
+            String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId() + "@" + finding.affectedVersion();
             vulnerabilitiesByComponent.computeIfAbsent(key, k -> new ArrayList<>()).add(finding);
         }
         Map<String, ScanComponent> unique = new LinkedHashMap<>();
@@ -909,7 +909,7 @@ public class RedKiteServerMain {
                 html.append("<div class=\"inventory-main\">");
                 html.append("<div class=\"inventory-title\">").append(escape(component.coordinate().groupId() + ":" + component.coordinate().artifactId())).append("</div>");
                 html.append("<div class=\"inventory-subtitle\">current ").append(escape(component.version())).append("</div>");
-                html.append(renderVersionButtonGroup(component.coordinate(), component.version(), component.id(), versionMetadata, recommendation, versionChoices(versionMetadata, recommendation), recommendation == null ? component.version() : recommendation.targetVersion(), vulnerabilitiesByComponent.get(component.coordinate().groupId() + ":" + component.coordinate().artifactId()), false));
+                html.append(renderVersionButtonGroup(component.coordinate(), component.version(), component.id(), versionMetadata, recommendation, versionChoices(versionMetadata, recommendation), recommendation == null ? component.version() : recommendation.targetVersion(), vulnerabilitiesByComponent.get(component.coordinate().groupId() + ":" + component.coordinate().artifactId() + "@" + component.version()), false));
                 html.append("</div>");
                 html.append("<div class=\"inventory-badges\">");
                 html.append("<span class=\"badge ").append(component.snapshot() ? "warn" : component.direct() ? "success" : "neutral").append("\">");
