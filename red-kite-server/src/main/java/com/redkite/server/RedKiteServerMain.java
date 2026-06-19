@@ -763,7 +763,8 @@ public class RedKiteServerMain {
         ordered.addAll(choices);
         if (versionMetadata != null && versionMetadata.latestVersion() != null
                 && !versionMetadata.latestVersion().isBlank()
-                && !"unknown".equalsIgnoreCase(versionMetadata.latestVersion())) {
+                && !"unknown".equalsIgnoreCase(versionMetadata.latestVersion())
+                && !isPreRelease(versionMetadata.latestVersion())) {
             ordered.add(versionMetadata.latestVersion());
         }
 
@@ -1292,21 +1293,24 @@ public class RedKiteServerMain {
 
     private List<String> versionChoices(MetadataResult versionMetadata, UpgradeRecommendation recommendation) {
         java.util.LinkedHashSet<String> choices = new java.util.LinkedHashSet<>();
-        if (recommendation != null && recommendation.targetVersion() != null && !recommendation.targetVersion().isBlank()) {
+        if (recommendation != null && recommendation.targetVersion() != null && !recommendation.targetVersion().isBlank()
+                && !isPreRelease(recommendation.targetVersion())) {
             choices.add(recommendation.targetVersion());
         }
         if (versionMetadata != null) {
-            if (versionMetadata.latestSameMajorVersion() != null && !versionMetadata.latestSameMajorVersion().isBlank()) {
+            if (versionMetadata.latestSameMajorVersion() != null && !versionMetadata.latestSameMajorVersion().isBlank()
+                    && !isPreRelease(versionMetadata.latestSameMajorVersion())) {
                 choices.add(versionMetadata.latestSameMajorVersion());
             }
             if (versionMetadata.upgradePathVersions() != null) {
                 for (String version : versionMetadata.upgradePathVersions()) {
-                    if (version != null && !version.isBlank()) {
+                    if (version != null && !version.isBlank() && !isPreRelease(version)) {
                         choices.add(version);
                     }
                 }
             }
-            if (versionMetadata.latestVersion() != null && !versionMetadata.latestVersion().isBlank()) {
+            if (versionMetadata.latestVersion() != null && !versionMetadata.latestVersion().isBlank()
+                    && !isPreRelease(versionMetadata.latestVersion())) {
                 choices.add(versionMetadata.latestVersion());
             }
         }
@@ -1314,6 +1318,16 @@ public class RedKiteServerMain {
             choices.remove(recommendation.currentVersion());
         }
         return List.copyOf(choices);
+    }
+
+    private static boolean isPreRelease(String version) {
+        if (version == null || version.isBlank()) return false;
+        String v = version.toLowerCase();
+        return v.contains("snapshot") || v.contains("alpha") || v.contains("beta")
+                || v.matches(".*[.\\-]rc\\d*([.\\-].*)?")
+                || v.matches(".*[.\\-]m\\d+([.\\-].*)?")
+                || v.contains("milestone") || v.contains("preview") || v.contains("incubat")
+                || v.matches(".*[.\\-]cr\\d*([.\\-].*)?");
     }
 
     private String reasonLabel(RecommendationReason reason) {

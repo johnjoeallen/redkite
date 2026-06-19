@@ -70,7 +70,11 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 int status = response.statusCode();
                 LOGGER.info(() -> "Maven repository response for " + metadataUrl + " => HTTP " + status);
                 if (status == 200) {
-                    List<String> versions = parseVersions(response.body());
+                    List<String> allVersions = parseVersions(response.body());
+                    List<String> versions = allVersions.stream()
+                            .filter(v -> !isPreRelease(v))
+                            .collect(java.util.stream.Collectors.toList());
+                    if (versions.isEmpty()) versions = allVersions; // all pre-release? keep all
                     String latest = versions.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
                     if (latest == null || latest.isBlank()) {
                         lastStatus = MetadataStatus.PROVIDER_ERROR;
@@ -156,6 +160,16 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             }
         }
         return bases.isEmpty() ? List.of("https://repo1.maven.org/maven2") : List.copyOf(bases);
+    }
+
+    static boolean isPreRelease(String version) {
+        if (version == null || version.isBlank()) return false;
+        String v = version.toLowerCase();
+        return v.contains("snapshot") || v.contains("alpha") || v.contains("beta")
+                || v.matches(".*[.\\-]rc\\d*([.\\-].*)?") // -RC1, .rc2
+                || v.matches(".*[.\\-]m\\d+([.\\-].*)?")  // -M1, milestone
+                || v.contains("milestone") || v.contains("preview") || v.contains("incubat")
+                || v.matches(".*[.\\-]cr\\d*([.\\-].*)?"); // candidate release
     }
 
     private static String metadataUrl(String repositoryBaseUrl, ComponentCoordinate coordinate) {
