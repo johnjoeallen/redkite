@@ -1026,7 +1026,7 @@ public class RedKiteServerMain {
                 + "* { box-sizing:border-box; }"
                 + "body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, rgba(125,211,252,.15), transparent 28%), linear-gradient(180deg, #070b16, var(--bg)); color:var(--text); }"
                 + "a { color:inherit; text-decoration:none; }"
-                + ".shell { width: 100%; padding: 28px 32px 48px; box-sizing: border-box; }"
+                + ".shell { width: 100%; max-width: 1400px; margin: 0 auto; padding: 28px 32px 48px; box-sizing: border-box; }"
                 + ".topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; gap:20px; }"
                 + ".brand { display:flex; align-items:center; gap:12px; }"
                 + ".brand-mark { width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; border-radius:14px; background: rgba(255,255,255,.04); border:1px solid var(--line); overflow:hidden; flex:0 0 auto; }"
