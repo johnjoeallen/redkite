@@ -533,6 +533,20 @@ public class RedKiteServerMain {
                     + c.coordinate().artifactId() + "|" + c.version() + "|" + c.direct();
             unique.putIfAbsent(key, c);
         }
+
+        // Build id→component index and reverse edge map (child → parent component ids)
+        Map<Long, ScanComponent> componentsById = new LinkedHashMap<>();
+        for (ScanComponent c : unique.values()) componentsById.put(c.id(), c);
+        Map<Long, List<Long>> parentIdsByChild = new LinkedHashMap<>();
+        for (DependencyEdge edge : report.dependencyEdges()) {
+            if (edge.fromComponentId() == null || edge.fromComponentId().startsWith("module:")) continue;
+            try {
+                long fromId = Long.parseLong(edge.fromComponentId());
+                long toId = Long.parseLong(edge.toComponentId());
+                parentIdsByChild.computeIfAbsent(toId, k -> new ArrayList<>()).add(fromId);
+            } catch (NumberFormatException ignored) {}
+        }
+
         List<ComponentView> views = new ArrayList<>();
         for (ScanComponent c : unique.values()) {
             RemediationStatus status = RemediationClassifier.classify(
@@ -612,14 +626,27 @@ public class RedKiteServerMain {
         for (ComponentView view : views) {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
-            html.append(renderComponentCard(view, mod));
+            String pulledInBy = null;
+            if (!view.component().direct() && !view.component().snapshot()) {
+                List<Long> parentIds = parentIdsByChild.getOrDefault(view.component().id(), List.of());
+                List<String> parentNames = new ArrayList<>();
+                for (Long pid : parentIds) {
+                    ScanComponent parent = componentsById.get(pid);
+                    if (parent != null) {
+                        parentNames.add(parent.coordinate().groupId() + ":" + parent.coordinate().artifactId());
+                    }
+                    if (parentNames.size() == 3) break;
+                }
+                if (!parentNames.isEmpty()) pulledInBy = String.join(", ", parentNames);
+            }
+            html.append(renderComponentCard(view, mod, pulledInBy));
         }
         html.append("</div>");
 
         return html.toString();
     }
 
-    private String renderComponentCard(ComponentView view, String module) {
+    private String renderComponentCard(ComponentView view, String module, String pulledInBy) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean clean = !status.needsRemediation();
@@ -655,6 +682,11 @@ public class RedKiteServerMain {
             html.append("<span class=\"muted\">(Latest: ").append(escape(view.versionMetadata().latestVersion())).append(")</span>");
         }
         html.append("</div>");
+
+        // Pulled in by (transitive only)
+        if (pulledInBy != null) {
+            html.append("<div class=\"rem-via\">via ").append(escape(pulledInBy)).append("</div>");
+        }
 
         // CVE identifiers
         if (status.hasVulnerability() && !view.findings().isEmpty()) {
@@ -986,7 +1018,7 @@ public class RedKiteServerMain {
                 + "* { box-sizing:border-box; }"
                 + "body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, rgba(125,211,252,.15), transparent 28%), linear-gradient(180deg, #070b16, var(--bg)); color:var(--text); }"
                 + "a { color:inherit; text-decoration:none; }"
-                + ".shell { max-width: min(60vw, 1600px); margin: 0 auto; padding: 28px 20px 48px; }"
+                + ".shell { max-width: min(80vw, 1800px); margin: 0 auto; padding: 28px 20px 48px; }"
                 + ".topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; gap:20px; }"
                 + ".brand { display:flex; align-items:center; gap:12px; }"
                 + ".brand-mark { width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; border-radius:14px; background: rgba(255,255,255,.04); border:1px solid var(--line); overflow:hidden; flex:0 0 auto; }"
@@ -1083,6 +1115,7 @@ public class RedKiteServerMain {
                 + ".sev-badge { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:700; }"
                 + ".rem-meta { font-size:.93rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
                 + ".rem-meta strong { color:var(--text); }"
+                + ".rem-via { font-size:.83rem; color:var(--muted); font-style:italic; }"
                 + ".rem-cves { font-size:.85rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }"
                 + ".rem-reasons { display:flex; flex-wrap:wrap; gap:6px; }"
                 + ".reason-chip { padding:3px 9px; border-radius:999px; border:1px solid rgba(167,139,250,.3); background:rgba(167,139,250,.1); color:#d8c8ff; font-size:.78rem; }"
