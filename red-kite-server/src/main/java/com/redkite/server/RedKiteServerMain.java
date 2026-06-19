@@ -752,12 +752,21 @@ public class RedKiteServerMain {
             if (reason == RecommendationReason.CVE_FIX) tags.add("fixes CVE");
         }
         if (version.equals(latestVersion)) tags.add("latest");
-        if (version.equals(latestSameMajor) && !version.equals(latestVersion)) tags.add("latest same major");
+        if (version.equals(latestSameMajor) && !version.equals(latestVersion)) {
+            tags.add(sameMajorMinor(version, currentVersion) ? "latest same minor" : "latest same major");
+        }
         if (hasCve) tags.add("vulnerable");
         if (version.contains("-SNAPSHOT") || version.contains("-alpha") || version.contains("-beta") || version.contains("-rc")) {
             tags.add("pre-release");
         }
         return tags.isEmpty() ? version : version + " — " + String.join(", ", tags);
+    }
+
+    private boolean sameMajorMinor(String v1, String v2) {
+        if (v1 == null || v2 == null) return false;
+        String[] p1 = v1.split("\\.", 3);
+        String[] p2 = v2.split("\\.", 3);
+        return p1.length >= 2 && p2.length >= 2 && p1[0].equals(p2[0]) && p1[1].equals(p2[1]);
     }
 
     private String renderDependencyInventory(ScanReport report) {
