@@ -10,9 +10,8 @@ It scans local working copies, builds a dependency inventory, checks cached or f
 - shows direct and transitive dependencies
 - highlights SNAPSHOT dependencies as unverified risks
 - caches Maven version metadata and vulnerability metadata
-- creates upgrade plans from selected recommendations
-- applies approved plans locally with the CLI
-- keeps all Git and file mutations on the developer machine
+- generates updated POM previews for selected upgrades
+- keeps all data on the developer machine
 
 ## Requirements
 
@@ -59,15 +58,9 @@ Omit the path to scan the current directory:
 ./red-kite.sh scan
 ```
 
-## Apply An Upgrade Plan
+## Apply Upgrades
 
-After reviewing recommendations in the UI and creating a plan, apply it locally:
-
-```bash
-./red-kite.sh apply-plan <planId>
-```
-
-The CLI creates a local branch and edits the Maven files. Changes are left uncommitted and nothing is pushed.
+After reviewing recommendations in the UI, select target versions using the dropdowns and click **Apply**. A popup appears with the updated POM content. Copy it and paste it into the file on disk.
 
 ## UI
 
@@ -76,17 +69,16 @@ From the UI at `http://localhost:6502` you can:
 - browse projects and scans
 - inspect dependency inventory
 - review upgrade recommendations
-- select recommendations for an upgrade plan
-- fetch the generated plan for local application
+- choose target versions and generate an updated POM preview
+- copy the patched POM content to apply it locally
 
-## CLI Flow
+## Workflow
 
 1. Start the server with `./red-kite.sh`.
 2. Run `./red-kite.sh scan .` against a local Maven repository.
 3. Review the scan in the UI.
-4. Select one or more recommendations and create an upgrade plan.
-5. Run `./red-kite.sh apply-plan <planId>` to apply it locally.
-6. Confirm the branch name and file changes when prompted.
+4. Use the module dropdown to select a POM, adjust target versions, and click **Apply**.
+5. Copy the updated POM from the popup and save it to disk.
 
 ## Configuration
 
