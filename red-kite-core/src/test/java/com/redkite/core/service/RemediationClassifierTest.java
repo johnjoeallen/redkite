@@ -30,7 +30,7 @@ class RemediationClassifierTest {
     private static UpgradeRecommendation recommendation(long componentId) {
         return new UpgradeRecommendation(componentId, COORD, "1.0.0", "2.0.0",
                 RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH,
-                RecommendationConfidence.HIGH, List.of(), List.of(componentId), null);
+                RecommendationConfidence.HIGH, List.of(), List.of(componentId));
     }
 
     private static MetadataResult freshMetadata(long componentId) {
