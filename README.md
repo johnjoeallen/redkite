@@ -4,6 +4,8 @@ RedKite is a local Maven dependency scanner and upgrade assistant for checked-ou
 
 It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and copy a ready-to-paste updated POM.
 
+![RedKite scan report](images/screenshot.png)
+
 ## What It Does
 
 - scans Maven multi-module projects (dependencies, dependency management, and build plugins)
