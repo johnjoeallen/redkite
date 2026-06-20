@@ -1,8 +1,0 @@
-package com.redkite.core.domain;
-
-public enum ChangeType {
-    MAVEN_PROPERTY_UPDATE,
-    MAVEN_DIRECT_DEPENDENCY_VERSION_UPDATE,
-    MAVEN_PARENT_VERSION_UPDATE,
-    MAVEN_BOM_VERSION_UPDATE
-}

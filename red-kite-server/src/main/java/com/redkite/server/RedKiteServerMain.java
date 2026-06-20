@@ -105,13 +105,9 @@ public class RedKiteServerMain {
         server.createContext("/logo.svg", exchange -> safeHandle(exchange, this::handleLogo));
         server.createContext("/projects", exchange -> safeHandle(exchange, this::handleProjects));
         server.createContext("/scans", exchange -> safeHandle(exchange, this::handleScans));
-        server.createContext("/upgrade-planner", exchange -> safeHandle(exchange, this::handlePlanner));
-        server.createContext("/upgrade-plans", exchange -> safeHandle(exchange, this::handleUpgradePlans));
         server.createContext("/api/scan", exchange -> safeHandle(exchange, this::handleApiScan));
         server.createContext("/api/scan-status", exchange -> safeHandle(exchange, this::handleApiScanStatus));
-        server.createContext("/api/scans/input", exchange -> safeHandle(exchange, this::handleApiScanInput));
         server.createContext("/api/scans/pom", exchange -> safeHandle(exchange, this::handleApiScanPom));
-        server.createContext("/api/upgrade-plans", exchange -> safeHandle(exchange, this::handleApiUpgradePlans));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -145,7 +141,7 @@ public class RedKiteServerMain {
         html.append(pageShellStart(BRAND, "Projects", "Local Maven dependency scans, version checks, and upgrade planning."));
         html.append("<div class=\"hero\">");
         html.append("<div><h1>RedKite</h1><p>Local dependency reporting and upgrade planning for checked-out Maven repositories.</p></div>");
-        html.append("<div class=\"hero-actions\"><a class=\"button primary\" href=\"/upgrade-planner\">Open planner</a><a class=\"button\" href=\"/projects\">Projects</a></div>");
+        html.append("<div class=\"hero-actions\"><a class=\"button primary\" href=\"/projects\">Projects</a></div>");
         html.append("</div>");
 
         // Scan new project section
@@ -223,10 +219,7 @@ public class RedKiteServerMain {
             html.append("<section class=\"card\">");
             html.append("<h2>Actions</h2>");
             if (scan != null) {
-                html.append("<div class=\"stack\">");
                 html.append("<a class=\"button primary\" href=\"/scans/").append(scan.id()).append("\">View latest scan</a>");
-                html.append("<a class=\"button\" href=\"/upgrade-planner/").append(scan.id()).append("\">Create plan</a>");
-                html.append("</div>");
             } else {
                 html.append("<p class=\"muted\">No scans yet.</p>");
             }
@@ -291,122 +284,6 @@ public class RedKiteServerMain {
             html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\"><div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div><span>Scanning&hellip;</span><span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span></div></div>");
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
-            return;
-        }
-        sendText(exchange, 404, "Not found");
-    }
-
-    private void handlePlanner(HttpExchange exchange) throws IOException {
-        URI uri = exchange.getRequestURI();
-        String[] parts = uri.getPath().split("/");
-        if (parts.length != 3) {
-            sendText(exchange, 404, "Not found");
-            return;
-        }
-        long scanId = Long.parseLong(parts[2]);
-        if ("GET".equals(exchange.getRequestMethod())) {
-            ScanEntry scan = store.getScan(scanId);
-            ScanInput input = scan.input();
-            ScanReport report = scan.report();
-            StringBuilder html = new StringBuilder();
-            html.append(pageShellStart(BRAND, "Upgrade planner", "Choose recommendations and create a local upgrade plan."));
-            html.append("<div class=\"page-grid\">");
-            html.append("<section class=\"card span-2\"><div class=\"headline\"><div><p class=\"eyebrow\">Scan ").append(report.scanId()).append("</p><h1>Upgrade planner</h1></div><span class=\"badge\">").append(report.recommendations().size()).append(" recommendations</span></div>");
-            html.append("<p class=\"muted\">Select one or more recommendations to generate a local plan.</p></section>");
-            html.append("<section class=\"card span-2\">");
-            html.append("<form method=\"post\" action=\"/upgrade-planner/").append(scanId).append("\">");
-            html.append("<input type=\"hidden\" name=\"proposedBranchName\" value=\"red-kite/security-upgrades-").append(LocalDate.now()).append("\"/>");
-            html.append("<input type=\"hidden\" name=\"baseBranchAtScanTime\" value=\"").append(escape(input.currentBranch())).append("\"/>");
-            html.append("<input type=\"hidden\" name=\"baseHeadAtScanTime\" value=\"").append(escape(input.currentHeadCommit())).append("\"/>");
-            html.append("<input type=\"hidden\" name=\"expectedWorkingTreePath\" value=\"").append(escape(input.workingTreePath())).append("\"/>");
-            html.append("<h2>Recommendations</h2><div class=\"stack\">");
-            if (report.recommendations().isEmpty()) {
-                html.append("<p class=\"muted\">No recommendations available for this scan.</p>");
-            } else {
-                Map<Long, MetadataResult> versionByComponent = new LinkedHashMap<>();
-                Map<String, List<VulnerabilityFinding>> vulnerabilitiesByComponent = new LinkedHashMap<>();
-                for (MetadataResult result : report.metadataResults()) {
-                    if (result.metadataType() == MetadataType.VERSION) {
-                        versionByComponent.put(result.componentId(), result);
-                    }
-                }
-                for (VulnerabilityFinding finding : report.vulnerabilityFindings()) {
-                    String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId() + "@" + finding.affectedVersion();
-                    vulnerabilitiesByComponent.computeIfAbsent(key, k -> new ArrayList<>()).add(finding);
-                }
-                for (UpgradeRecommendation rec : report.recommendations()) {
-                    MetadataResult versionMetadata = versionByComponent.get(rec.id());
-                    List<String> choices = versionChoices(versionMetadata, rec);
-                    String defaultTarget = rec.targetVersion();
-                    html.append("<div class=\"result-row selectable\">");
-                    html.append("<label class=\"selectable-target\"><input type=\"checkbox\" name=\"recommendationIds\" value=\"").append(rec.id()).append("\"/> ");
-                    html.append("<strong>").append(escape(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId())).append("</strong>");
-                    html.append("<div class=\"muted\">").append(escape(rec.currentVersion())).append("</div></label>");
-                    html.append("<div class=\"upgrade-choice\">");
-                    if (rec.reason() == RecommendationReason.SNAPSHOT_REPLACEMENT || choices.isEmpty()) {
-                        html.append("<label class=\"muted\" for=\"targetVersion_").append(rec.id()).append("\">Release version</label>");
-                        html.append("<input id=\"targetVersion_").append(rec.id()).append("\" name=\"targetVersion_").append(rec.id()).append("\" type=\"text\" placeholder=\"Enter release version\" value=\"").append(escape(defaultTarget)).append("\"/>");
-                    } else {
-                        html.append(renderVersionSelect("targetVersion_" + rec.id(), rec.coordinate(), rec.currentVersion(), defaultTarget, versionMetadata, rec, vulnerabilitiesByComponent.get(rec.coordinate().groupId() + ":" + rec.coordinate().artifactId() + "@" + rec.currentVersion()), true));
-                    }
-                    html.append("</div>");
-                    html.append("<span class=\"badge\">").append(escape(reasonLabel(rec.reason()))).append("</span>");
-                    html.append("</div>");
-                }
-            }
-            html.append("</div><button class=\"button primary\" type=\"submit\">Create plan</button></form></section>");
-            html.append("</div>");
-            html.append(pageShellEnd());
-            sendHtml(exchange, 200, html.toString());
-            return;
-        }
-        if ("POST".equals(exchange.getRequestMethod())) {
-            Map<String, String> form = parseForm(readBody(exchange));
-            List<Long> recommendationIds = parseLongList(form.getOrDefault("recommendationIds", ""));
-            Map<Long, String> targetVersions = parseTargetVersions(form);
-            UpgradePlan plan = store.createPlan(scanId, recommendationIds, targetVersions, form.get("proposedBranchName"), form.get("baseBranchAtScanTime"), form.get("baseHeadAtScanTime"), form.get("expectedWorkingTreePath"));
-            StringBuilder html = new StringBuilder();
-            html.append(pageShellStart(BRAND, "Upgrade plan", "Plan created and ready for local application."));
-            html.append("<div class=\"page-grid\">");
-            html.append("<section class=\"card span-2\"><div class=\"headline\"><div><p class=\"eyebrow\">Plan ").append(plan.id()).append("</p><h1>Upgrade plan created</h1></div><span class=\"badge success\">Created</span></div>");
-            html.append("<p class=\"muted\">Apply it locally from the repository checkout.</p></section>");
-            html.append("<section class=\"card\"><h2>Branch</h2><p class=\"mono\">").append(escape(plan.proposedBranchName())).append("</p></section>");
-            html.append("<section class=\"card\"><h2>Command</h2><p class=\"mono\">red-kite apply-plan ").append(plan.id()).append("</p></section>");
-            html.append("<section class=\"card span-2\"><h2>Planned changes</h2><div class=\"stack\">");
-            for (PlannedFileChange change : plan.plannedFileChanges()) {
-                html.append("<div class=\"result-row\"><div><strong>").append(escape(change.relativeFilePath())).append("</strong>");
-                html.append("<div class=\"muted\">").append(escape(change.oldVersion() + " → " + change.newVersion())).append("</div></div>");
-                html.append("<div class=\"badge\">").append(escape(change.changeType().name())).append("</div></div>");
-            }
-            html.append("</div></section>");
-            html.append("</div>");
-            html.append(pageShellEnd());
-            sendHtml(exchange, 200, html.toString());
-            return;
-        }
-        sendText(exchange, 405, "Method not allowed");
-    }
-
-    private void handleUpgradePlans(HttpExchange exchange) throws IOException {
-        String path = exchange.getRequestURI().getPath();
-        String[] parts = path.split("/");
-        if (parts.length == 3 && "GET".equals(exchange.getRequestMethod())) {
-            long planId = Long.parseLong(parts[2]);
-            UpgradePlan plan = store.getPlan(planId);
-            sendBase64(exchange, 200, plan);
-            return;
-        }
-        if (parts.length == 3 && "POST".equals(exchange.getRequestMethod())) {
-            PlanCreationRequest request = SerializationSupport.fromBase64(readBody(exchange), PlanCreationRequest.class);
-            UpgradePlan plan = store.createPlan(request.scanId(), request.recommendationIds(), request.targetVersions(), request.proposedBranchName(), request.baseBranchAtScanTime(), request.baseHeadAtScanTime(), request.expectedWorkingTreePath());
-            sendBase64(exchange, 200, plan);
-            return;
-        }
-        if (parts.length == 5 && "POST".equals(exchange.getRequestMethod()) && "application-result".equals(parts[4])) {
-            long planId = Long.parseLong(parts[3]);
-            PlanApplicationResult result = SerializationSupport.fromBase64(readBody(exchange), PlanApplicationResult.class);
-            store.saveApplicationResult(planId, result);
-            sendText(exchange, 200, "");
             return;
         }
         sendText(exchange, 404, "Not found");
@@ -506,16 +383,6 @@ public class RedKiteServerMain {
             }
         }
         return sb.toString();
-    }
-
-    private void handleApiScanInput(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendText(exchange, 405, "Method not allowed");
-            return;
-        }
-        ScanInput input = SerializationSupport.fromBase64(readBody(exchange), ScanInput.class);
-        ScanReport report = store.ingest(input);
-        sendBase64(exchange, 200, report);
     }
 
     private void handleApiScanPom(HttpExchange exchange) throws IOException {
@@ -786,30 +653,6 @@ public class RedKiteServerMain {
         return null;
     }
 
-    private void handleApiUpgradePlans(HttpExchange exchange) throws IOException {
-        String path = exchange.getRequestURI().getPath();
-        String[] parts = path.split("/");
-        if (parts.length == 4 && "GET".equals(exchange.getRequestMethod())) {
-            long planId = Long.parseLong(parts[3]);
-            sendBase64(exchange, 200, store.getPlan(planId));
-            return;
-        }
-        if (parts.length == 3 && "POST".equals(exchange.getRequestMethod())) {
-            PlanCreationRequest request = SerializationSupport.fromBase64(readBody(exchange), PlanCreationRequest.class);
-            UpgradePlan plan = store.createPlan(request.scanId(), request.recommendationIds(), request.targetVersions(), request.proposedBranchName(), request.baseBranchAtScanTime(), request.baseHeadAtScanTime(), request.expectedWorkingTreePath());
-            sendBase64(exchange, 200, plan);
-            return;
-        }
-        if (parts.length == 5 && "POST".equals(exchange.getRequestMethod()) && "application-result".equals(parts[4])) {
-            long planId = Long.parseLong(parts[3]);
-            PlanApplicationResult result = SerializationSupport.fromBase64(readBody(exchange), PlanApplicationResult.class);
-            store.saveApplicationResult(planId, result);
-            sendText(exchange, 200, "");
-            return;
-        }
-        sendText(exchange, 404, "Not found");
-    }
-
     private static void sendHtml(HttpExchange exchange, int status, String body) throws IOException {
         Headers headers = exchange.getResponseHeaders();
         headers.set("Content-Type", "text/html; charset=utf-8");
@@ -867,39 +710,6 @@ public class RedKiteServerMain {
 
     private static String urlDecode(String value) {
         return URLDecoder.decode(value, StandardCharsets.UTF_8);
-    }
-
-    private static List<Long> parseLongList(String value) {
-        if (value == null || value.isBlank()) {
-            return List.of();
-        }
-        List<Long> out = new ArrayList<>();
-        for (String part : value.split(",")) {
-            if (!part.isBlank()) {
-                out.add(Long.parseLong(part.trim()));
-            }
-        }
-        return out;
-    }
-
-    private static Map<Long, String> parseTargetVersions(Map<String, String> form) {
-        Map<Long, String> targetVersions = new LinkedHashMap<>();
-        for (Map.Entry<String, String> entry : form.entrySet()) {
-            String key = entry.getKey();
-            if (key == null || !key.startsWith("targetVersion_")) {
-                continue;
-            }
-            String suffix = key.substring("targetVersion_".length());
-            if (suffix.isBlank() || entry.getValue() == null || entry.getValue().isBlank()) {
-                continue;
-            }
-            try {
-                targetVersions.put(Long.parseLong(suffix), entry.getValue().trim());
-            } catch (NumberFormatException ignored) {
-                // Ignore malformed row ids; the scan report stays usable.
-            }
-        }
-        return targetVersions;
     }
 
     private String renderDependencyTree(ScanReport report) {
@@ -2012,30 +1822,6 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized UpgradePlan getPlan(long planId) {
-            try (Connection connection = connection();
-                 PreparedStatement statement = connection.prepareStatement("""
-                         select id, project_id, scan_id, recommendation_ids, proposed_branch_name, base_branch_at_scan_time,
-                                base_head_at_scan_time, expected_working_tree_path, expected_file_hashes,
-                                planned_file_changes, warnings, metadata_completeness_notes, created_at, status,
-                                application_result_json
-                         from upgrade_plans
-                         where id = ?
-                         """)) {
-                statement.setLong(1, planId);
-                try (ResultSet rs = statement.executeQuery()) {
-                    if (!rs.next()) {
-                        throw new IllegalArgumentException("plan not found");
-                    }
-                    UpgradePlan plan = planFromRow(rs);
-                    String resultJson = rs.getString("application_result_json");
-                    return resultJson == null ? plan : withStatus(plan, mapStatus(SerializationSupport.fromBase64(resultJson, PlanApplicationResult.class).status()));
-                }
-            } catch (SQLException e) {
-                throw new IllegalStateException("Failed to fetch plan", e);
-            }
-        }
-
         synchronized ScanReport ingest(ScanInput input) {
             return ingest(input, msg -> {});
         }
@@ -2060,88 +1846,6 @@ public class RedKiteServerMain {
                 }
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to ingest scan", e);
-            }
-        }
-
-        synchronized UpgradePlan createPlan(long scanId, List<Long> recommendationIds, Map<Long, String> targetVersions, String proposedBranchName, String baseBranchAtScanTime, String baseHeadAtScanTime, String expectedWorkingTreePath) {
-            ScanEntry scan = getScan(scanId);
-            Map<Long, UpgradeRecommendation> recommendationById = new LinkedHashMap<>();
-            for (UpgradeRecommendation recommendation : scan.report().recommendations()) {
-                recommendationById.put(recommendation.id(), recommendation);
-            }
-            List<UpgradeRecommendation> selected = new ArrayList<>();
-            List<PlannedFileChange> changes = new ArrayList<>();
-            for (Long recommendationId : recommendationIds) {
-                UpgradeRecommendation recommendation = recommendationById.get(recommendationId);
-                if (recommendation == null) {
-                    continue;
-                }
-                selected.add(recommendation);
-                String chosenTarget = targetVersions == null ? null : targetVersions.get(recommendationId);
-                if (chosenTarget == null || chosenTarget.isBlank()) {
-                    chosenTarget = recommendation.targetVersion();
-                }
-                PlannedFileChange baseChange = recommendation.plannedFileChange();
-                String reason = reasonMessage(upgradeReason(recommendation.currentVersion(), chosenTarget), chosenTarget);
-                changes.add(new PlannedFileChange(
-                        baseChange.relativeFilePath(),
-                        baseChange.expectedSha256Before(),
-                        baseChange.changeType(),
-                        baseChange.groupId(),
-                        baseChange.artifactId(),
-                        baseChange.propertyName(),
-                        baseChange.oldVersion(),
-                        chosenTarget,
-                        reason,
-                        baseChange.relatedRecommendationId()));
-            }
-            List<Long> selectedRecommendationIds = selected.stream().map(UpgradeRecommendation::id).toList();
-            try (Connection connection = connection();
-                 PreparedStatement statement = connection.prepareStatement("""
-                         insert into upgrade_plans(
-                           project_id, scan_id, recommendation_ids, proposed_branch_name, base_branch_at_scan_time,
-                           base_head_at_scan_time, expected_working_tree_path, expected_file_hashes, planned_file_changes,
-                           warnings, metadata_completeness_notes, status
-                         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                         """, Statement.RETURN_GENERATED_KEYS)) {
-                statement.setLong(1, scan.projectId());
-                statement.setLong(2, scanId);
-                statement.setString(3, SerializationSupport.toBase64((java.io.Serializable) selectedRecommendationIds));
-                statement.setString(4, proposedBranchName);
-                statement.setString(5, baseBranchAtScanTime);
-                statement.setString(6, baseHeadAtScanTime);
-                statement.setString(7, expectedWorkingTreePath);
-                statement.setString(8, SerializationSupport.toBase64((java.io.Serializable) scan.input().fileHashes()));
-                statement.setString(9, SerializationSupport.toBase64((java.io.Serializable) changes));
-                statement.setString(10, SerializationSupport.toBase64((java.io.Serializable) List.of()));
-                statement.setString(11, SerializationSupport.toBase64((java.io.Serializable) List.of()));
-                statement.setString(12, PlanStatus.CREATED.name());
-                statement.executeUpdate();
-                try (ResultSet keys = statement.getGeneratedKeys()) {
-                    if (!keys.next()) {
-                        throw new IllegalStateException("failed to create plan");
-                    }
-                    long planId = keys.getLong(1);
-                    return new UpgradePlan(planId, scan.projectId(), scanId, selectedRecommendationIds, proposedBranchName, baseBranchAtScanTime, baseHeadAtScanTime, expectedWorkingTreePath, scan.input().fileHashes(), List.copyOf(changes), List.of(), List.of(), Instant.now(), PlanStatus.CREATED);
-                }
-            } catch (SQLException e) {
-                throw new IllegalStateException("Failed to create plan", e);
-            }
-        }
-
-        synchronized void saveApplicationResult(long planId, PlanApplicationResult result) {
-            try (Connection connection = connection();
-                 PreparedStatement statement = connection.prepareStatement("""
-                         update upgrade_plans
-                         set application_result_json = ?, status = ?
-                         where id = ?
-                         """)) {
-                statement.setString(1, SerializationSupport.toBase64(result));
-                statement.setString(2, result.status());
-                statement.setLong(3, planId);
-                statement.executeUpdate();
-            } catch (SQLException e) {
-                throw new IllegalStateException("Failed to store application result", e);
             }
         }
 
@@ -2213,8 +1917,7 @@ public class RedKiteServerMain {
                     LOGGER.info(() -> "Component is SNAPSHOT; recording unverified dependency risk for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                     snapshotRisks.add(new SnapshotDependencyRisk(component.id(), "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata.", "Use release.", severity(component.scope())));
                     String target = component.version() == null ? "1.0.0" : component.version().replace("-SNAPSHOT", "");
-                    PlannedFileChange change = new PlannedFileChange(component.sourceFilePath(), input.fileHashes().get(component.sourceFilePath()), ChangeType.MAVEN_DIRECT_DEPENDENCY_VERSION_UPDATE, component.coordinate().groupId(), component.coordinate().artifactId(), null, component.version(), target, "Use release.", component.id());
-                    recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, RecommendationReason.SNAPSHOT_REPLACEMENT, RiskLevel.MAJOR, RecommendationConfidence.MEDIUM, List.of(), List.of(component.id()), change));
+                    recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, RecommendationReason.SNAPSHOT_REPLACEMENT, RiskLevel.MAJOR, RecommendationConfidence.MEDIUM, List.of(), List.of(component.id())));
                     LOGGER.info(() -> "No Maven/CVE verification attempted for SNAPSHOT component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
@@ -2248,8 +1951,7 @@ public class RedKiteServerMain {
                                 RecommendationReason reason = hasVulns ? RecommendationReason.CVE_FIX : upgradeReason(component.version(), target);
                                 RiskLevel risk = component.direct() ? upgradeRisk(component.version(), target) : RiskLevel.ELEVATED;
                                 RecommendationConfidence confidence = RecommendationConfidence.HIGH;
-                                PlannedFileChange change = plannedChangeFor(component, input, target, reasonMessage(reason, target));
-                                recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, reason, risk, confidence, List.of(), List.of(component.id()), change));
+                                recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, reason, risk, confidence, List.of(), List.of(component.id())));
                                 LOGGER.info(() -> "Created Maven upgrade recommendation for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => " + component.version() + " -> " + target);
                             }
                         } else if (versionMetadata.complete()) {
@@ -2269,38 +1971,6 @@ public class RedKiteServerMain {
                 message = "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
             }
             return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.copyOf(vulnerabilityFindings), recs, snapshotRisks, metadata);
-        }
-
-        private PlannedFileChange plannedChangeFor(ScanComponent component, ScanInput input, String targetVersion, String reason) {
-            String propertyName = propertyName(component);
-            ChangeType changeType = switch (component.versionSource()) {
-                case PROPERTY -> ChangeType.MAVEN_PROPERTY_UPDATE;
-                case PARENT_MANAGED -> ChangeType.MAVEN_PARENT_VERSION_UPDATE;
-                case BOM_MANAGED -> ChangeType.MAVEN_BOM_VERSION_UPDATE;
-                case LITERAL, UNKNOWN -> ChangeType.MAVEN_DIRECT_DEPENDENCY_VERSION_UPDATE;
-            };
-            return new PlannedFileChange(
-                    component.sourceFilePath(),
-                    input.fileHashes().get(component.sourceFilePath()),
-                    changeType,
-                    component.coordinate().groupId(),
-                    component.coordinate().artifactId(),
-                    propertyName,
-                    component.version(),
-                    targetVersion,
-                    reason,
-                    component.id());
-        }
-
-        private String propertyName(ScanComponent component) {
-            if (component.owningVersionControlPoint() == null) {
-                return null;
-            }
-            int hash = component.owningVersionControlPoint().indexOf('#');
-            if (hash < 0 || hash == component.owningVersionControlPoint().length() - 1) {
-                return null;
-            }
-            return component.owningVersionControlPoint().substring(hash + 1);
         }
 
         private String reasonMessage(RecommendationReason reason, String target) {
@@ -2448,14 +2118,6 @@ public class RedKiteServerMain {
             }
         }
 
-        private UpgradePlan withStatus(UpgradePlan plan, PlanStatus status) {
-            return new UpgradePlan(plan.id(), plan.projectId(), plan.scanId(), plan.recommendationIds(), plan.proposedBranchName(), plan.baseBranchAtScanTime(), plan.baseHeadAtScanTime(), plan.expectedWorkingTreePath(), plan.expectedFileHashes(), plan.plannedFileChanges(), plan.warnings(), plan.metadataCompletenessNotes(), plan.createdAt(), status);
-        }
-
-        private PlanStatus mapStatus(String status) {
-            return PlanStatus.valueOf(status);
-        }
-
         private String severity(DependencyScope scope) {
             return switch (scope) {
                 case COMPILE, RUNTIME -> "HIGH";
@@ -2490,25 +2152,6 @@ public class RedKiteServerMain {
                           report_json text not null,
                           complete boolean not null,
                           completeness_message text not null,
-                          created_at timestamp not null default current_timestamp
-                        )
-                        """);
-                statement.executeUpdate("""
-                        create table if not exists upgrade_plans (
-                          id bigint generated by default as identity primary key,
-                          project_id bigint not null,
-                          scan_id bigint not null,
-                          recommendation_ids text not null,
-                          proposed_branch_name varchar(255) not null,
-                          base_branch_at_scan_time varchar(255) not null,
-                          base_head_at_scan_time varchar(128) not null,
-                          expected_working_tree_path varchar(1024) not null,
-                          expected_file_hashes text not null,
-                          planned_file_changes text not null,
-                          warnings text not null,
-                          metadata_completeness_notes text not null,
-                          application_result_json text,
-                          status varchar(32) not null,
                           created_at timestamp not null default current_timestamp
                         )
                         """);
@@ -2771,37 +2414,11 @@ public class RedKiteServerMain {
             }
         }
 
-        @SuppressWarnings("unchecked")
-        private UpgradePlan planFromRow(ResultSet rs) throws SQLException {
-            List<Long> recommendationIds = SerializationSupport.fromBase64(rs.getString("recommendation_ids"), List.class);
-            Map<String, String> expectedHashes = SerializationSupport.fromBase64(rs.getString("expected_file_hashes"), Map.class);
-            List<PlannedFileChange> changes = SerializationSupport.fromBase64(rs.getString("planned_file_changes"), List.class);
-            List<String> warnings = SerializationSupport.fromBase64(rs.getString("warnings"), List.class);
-            List<String> notes = SerializationSupport.fromBase64(rs.getString("metadata_completeness_notes"), List.class);
-            return new UpgradePlan(
-                    rs.getLong("id"),
-                    rs.getLong("project_id"),
-                    rs.getLong("scan_id"),
-                    recommendationIds,
-                    rs.getString("proposed_branch_name"),
-                    rs.getString("base_branch_at_scan_time"),
-                    rs.getString("base_head_at_scan_time"),
-                    rs.getString("expected_working_tree_path"),
-                    expectedHashes,
-                    changes,
-                    warnings,
-                    notes,
-                    rs.getTimestamp("created_at").toInstant(),
-                    PlanStatus.valueOf(rs.getString("status")));
-        }
     }
 
     record ProjectEntry(long id, String name, String rootPath, Instant createdAt, Instant updatedAt) implements java.io.Serializable {
     }
 
     record ScanEntry(long id, long projectId, ScanInput input, ScanReport report, Instant createdAt) implements java.io.Serializable {
-    }
-
-    record PlanEntry(UpgradePlan plan, PlanApplicationResult result) implements java.io.Serializable {
     }
 }

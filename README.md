@@ -1,8 +1,8 @@
 # RedKite
 
-RedKite is a local Maven dependency scanning and upgrade assistant for checked-out Java repositories.
+RedKite is a local Maven dependency scanner and upgrade assistant for checked-out Java repositories.
 
-It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and gives you two ways to apply upgrades — a quick POM popup in the UI or a CLI-driven plan that creates a local git branch and edits files in place.
+It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and copy a ready-to-paste updated POM.
 
 ## What It Does
 
@@ -12,9 +12,8 @@ It scans local working copies, builds a dependency inventory, checks Maven Centr
 - fetches and caches version metadata from Maven Central
 - fetches and caches vulnerability data from OSV.dev
 - recommends upgrades grouped by module with per-component version selectors
-- generates an updated POM preview in-browser for quick copy/paste
-- creates stored upgrade plans that a CLI command can apply locally (new git branch, files edited in place, uncommitted)
-- keeps all data and Git mutations on the developer machine
+- generates an updated POM preview in-browser — copy and paste it into the file on disk
+- keeps all data on the developer machine
 
 ## Requirements
 
@@ -50,53 +49,13 @@ http://localhost:6502
 
 ## Scan A Repository
 
-**From the UI** — on the home page, type the full path to a Maven project and click **Scan**. A progress overlay shows while the scan runs; the browser navigates to the scan report when complete. You can also click the **Scan** button next to any previously-scanned project, or **Rescan** from inside a scan report.
+On the home page, type the full path to a Maven project and click **Scan**. A progress overlay shows while the scan runs; the browser navigates to the scan report when complete.
 
-**From the CLI** — with the server running, run:
-
-```bash
-./red-kite.sh scan /path/to/repo
-```
-
-Omit the path to scan the current directory:
-
-```bash
-./red-kite.sh scan
-```
-
-Options:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--server URL` | `http://localhost:6502` | Server base URL |
-| `--allow-major` | off | Include major-version upgrades in recommendations |
+You can also click the **Scan** button next to any previously-scanned project, or **Rescan** from inside a scan report.
 
 ## Apply Upgrades
 
-### Quick edit (UI popup)
-
 In the scan report, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply**. A popup shows the updated POM XML. Click **Copy** and paste it into the file on disk.
-
-### Upgrade plan (CLI + git branch)
-
-1. From a scan report, click **Create plan** to open the Upgrade Planner.
-2. Select one or more recommendations, choose target versions, and click **Create plan**.
-3. Note the plan ID shown on the confirmation page.
-4. Back in the terminal, apply the plan:
-
-```bash
-./red-kite.sh apply-plan <planId>
-```
-
-The CLI validates the working tree matches the scan state, creates the proposed branch, and edits the POM files in place. Changes are left uncommitted.
-
-Options:
-
-| Flag | Default | Description |
-|---|---|---|
-| `--repo PATH` | `.` | Path to the local repository |
-| `--server URL` | `http://localhost:6502` | Server base URL |
-| `--yes` | off | Skip the confirmation prompt |
 
 ## Configuration
 
@@ -127,5 +86,4 @@ The fat JAR is produced at `red-kite-server/target/red-kite-<version>.jar`.
 
 - Maven projects only.
 - Local repositories only.
-- No remote Git hosting integration.
 - No Gradle, npm, Docker, or license scanning.

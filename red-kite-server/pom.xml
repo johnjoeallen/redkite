@@ -32,16 +32,6 @@
       <artifactId>red-kite-maven</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <dependency>
-      <groupId>com.redkite</groupId>
-      <artifactId>red-kite-git</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.redkite</groupId>
-      <artifactId>red-kite-scan</artifactId>
-      <version>${project.version}</version>
-    </dependency>
   </dependencies>
   <build>
     <finalName>red-kite-${project.version}</finalName>

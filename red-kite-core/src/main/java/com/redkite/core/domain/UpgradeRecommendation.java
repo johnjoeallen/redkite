@@ -12,6 +12,5 @@ public record UpgradeRecommendation(
         RiskLevel riskLevel,
         RecommendationConfidence confidence,
         List<String> fixedCves,
-        List<Long> affectedComponentIds,
-        PlannedFileChange plannedFileChange) implements Serializable {
+        List<Long> affectedComponentIds) implements Serializable {
 }

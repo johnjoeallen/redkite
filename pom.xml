@@ -8,10 +8,8 @@
   <modules>
     <module>red-kite-core</module>
     <module>red-kite-maven</module>
-    <module>red-kite-git</module>
     <module>red-kite-metadata</module>
     <module>red-kite-server</module>
-    <module>red-kite-scan</module>
   </modules>
   <properties>
     <java.version>17</java.version>
