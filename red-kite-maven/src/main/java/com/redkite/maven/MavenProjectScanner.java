@@ -11,6 +11,7 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 public class MavenProjectScanner {
@@ -26,9 +27,14 @@ public class MavenProjectScanner {
     }
 
     public ScanInput scan(Path projectRoot) {
+        return scan(projectRoot, msg -> {});
+    }
+
+    public ScanInput scan(Path projectRoot, Consumer<String> progress) {
         try {
             Path root = projectRoot.toAbsolutePath().normalize();
             LOGGER.info(() -> "Starting Maven scan for " + root);
+            progress.accept("Reading git metadata…");
             GitMetadata gitMetadata = readGitMetadata(root);
             LOGGER.info(() -> "Git metadata: branch=" + gitMetadata.branch() + ", head=" + gitMetadata.head() + ", clean=" + gitMetadata.clean());
 
@@ -37,6 +43,7 @@ public class MavenProjectScanner {
                 pomFiles = stream.filter(p -> p.getFileName().toString().equals("pom.xml")).sorted().toList();
             }
             LOGGER.info(() -> "Found " + pomFiles.size() + " pom.xml file(s)");
+            progress.accept("Found " + pomFiles.size() + " module(s) — parsing POMs…");
 
             Map<String, PomModel> models = new LinkedHashMap<>();
             Map<String, String> hashes = new LinkedHashMap<>();
@@ -75,9 +82,57 @@ public class MavenProjectScanner {
                     componentsByKey.put(directKey(sourceFile, dep.groupId(), dep.artifactId()), component);
                 }
 
+                // Add build plugins and managed plugins for all POMs
+                List<PomModel.PomDependency> allPlugins = new ArrayList<>(model.managedPlugins());
+                for (PomModel.PomDependency p : model.buildPlugins()) {
+                    String pluginKey = directKey(relativePom, p.groupId(), p.artifactId());
+                    if (!componentsByKey.containsKey(pluginKey)) allPlugins.add(p);
+                }
+                for (PomModel.PomDependency dep : allPlugins) {
+                    String key = directKey(relativePom, dep.groupId(), dep.artifactId());
+                    if (componentsByKey.containsKey(key)) continue;
+                    boolean snapshot = dep.version() != null && dep.version().contains("SNAPSHOT");
+                    boolean managed = model.managedPlugins().contains(dep);
+                    ScanComponent component = new ScanComponent(
+                            nextId.getAndIncrement(),
+                            new ComponentCoordinate(dep.groupId(), dep.artifactId()),
+                            dep.version() == null ? "unknown" : dep.version(),
+                            DependencyScope.PLUGIN_BUILD,
+                            true,
+                            dep.versionSource(),
+                            relativePom,
+                            (managed ? "/project/build/pluginManagement/plugins/plugin[" : "/project/build/plugins/plugin[") + dep.groupId() + ":" + dep.artifactId() + "]",
+                            model.properties(),
+                            snapshot,
+                            versionControlPoint(dep, model),
+                            relativePom);
+                    componentsByKey.put(key, component);
+                }
+
                 if (model.isAggregator()) {
                     LOGGER.info(() -> "Skipping dependency:tree for aggregator POM " + relativePom + " (packaging=" + model.packaging() + ", modules=" + model.modules().size() + ")");
+                    for (PomModel.PomDependency dep : model.dependencyManagement()) {
+                        if (isSelfDependency(model, dep)) continue;
+                        String key = directKey(relativePom, dep.groupId(), dep.artifactId());
+                        if (componentsByKey.containsKey(key)) continue;
+                        boolean snapshot = dep.version() != null && dep.version().contains("SNAPSHOT");
+                        ScanComponent component = new ScanComponent(
+                                nextId.getAndIncrement(),
+                                new ComponentCoordinate(dep.groupId(), dep.artifactId()),
+                                dep.version() == null ? "unknown" : dep.version(),
+                                dep.scope(),
+                                true,
+                                dep.versionSource(),
+                                relativePom,
+                                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
+                                model.properties(),
+                                snapshot,
+                                versionControlPoint(dep, model),
+                                relativePom);
+                        componentsByKey.put(key, component);
+                    }
                 } else {
+                    progress.accept("Running dependency:tree for " + relativePom + "…");
                     collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId);
                 }
             }
@@ -101,6 +156,7 @@ public class MavenProjectScanner {
 
             List<ScanComponent> components = new ArrayList<>(componentsByKey.values());
             LOGGER.info(() -> "Scan completed with " + components.size() + " component(s), " + edges.size() + " dependency edge(s), and " + hashes.size() + " editable file hash(es)");
+            progress.accept("Dependency scan complete — found " + components.size() + " component(s)");
             return new ScanInput(root.getFileName().toString(), root.toString(), root.toString(), gitMetadata.branch(), gitMetadata.head(), gitMetadata.clean(), allowMajorUpgrades, Instant.now(), components, edges, hashes);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to scan Maven project", e);
@@ -411,7 +467,9 @@ public class MavenProjectScanner {
         List<PomModel.PomDependency> deps = parseDependencies(project, properties);
         List<PomModel.PomDependency> managed = parseManagedDependencies(project, properties);
         List<String> modules = parseModules(project);
-        return new PomModel(pom, groupId, artifactId, version, packaging, properties, deps, managed, parentGroupId, parentArtifactId, parentVersion, modules);
+        List<PomModel.PomDependency> buildPlugins = parseBuildPlugins(project, properties);
+        List<PomModel.PomDependency> managedPlugins = parseManagedPlugins(project, properties);
+        return new PomModel(pom, groupId, artifactId, version, packaging, properties, deps, managed, parentGroupId, parentArtifactId, parentVersion, modules, buildPlugins, managedPlugins);
     }
 
     private List<PomModel.PomDependency> parseDependencies(Element project, Map<String, String> properties) {
@@ -490,6 +548,48 @@ public class MavenProjectScanner {
                     false,
                     source,
                     propertyName));
+        }
+        return result;
+    }
+
+    private List<PomModel.PomDependency> parseBuildPlugins(Element project, Map<String, String> properties) {
+        Element build = childElement(project, "build");
+        if (build == null) return List.of();
+        Element plugins = childElement(build, "plugins");
+        if (plugins == null) return List.of();
+        return parsePluginList(plugins, properties);
+    }
+
+    private List<PomModel.PomDependency> parseManagedPlugins(Element project, Map<String, String> properties) {
+        Element build = childElement(project, "build");
+        if (build == null) return List.of();
+        Element pm = childElement(build, "pluginManagement");
+        if (pm == null) return List.of();
+        Element plugins = childElement(pm, "plugins");
+        if (plugins == null) return List.of();
+        return parsePluginList(plugins, properties);
+    }
+
+    private List<PomModel.PomDependency> parsePluginList(Element plugins, Map<String, String> properties) {
+        List<PomModel.PomDependency> result = new ArrayList<>();
+        NodeList items = plugins.getElementsByTagName("plugin");
+        for (int i = 0; i < items.getLength(); i++) {
+            if (!(items.item(i) instanceof Element plugin)) continue;
+            if (plugin.getParentNode() != plugins) continue;
+            String groupId = optionalText(plugin, "groupId");
+            String artifactId = optionalText(plugin, "artifactId");
+            if (groupId == null) groupId = "org.apache.maven.plugins";
+            if (artifactId == null) continue;
+            String version = optionalText(plugin, "version");
+            if (version == null) continue; // skip plugins without explicit version
+            String propertyName = null;
+            VersionSource source = VersionSource.LITERAL;
+            if (version.startsWith("${") && version.endsWith("}")) {
+                propertyName = version.substring(2, version.length() - 1);
+                version = resolveExpression(version, properties);
+                source = VersionSource.PROPERTY;
+            }
+            result.add(new PomModel.PomDependency(groupId, artifactId, version, DependencyScope.PLUGIN_BUILD, false, source, propertyName));
         }
         return result;
     }

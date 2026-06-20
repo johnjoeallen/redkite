@@ -12,13 +12,18 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.StringReader;
+import java.io.StringWriter;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -32,9 +37,24 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
 
 public class RedKiteServerMain {
     private static final Logger LOGGER = Logger.getLogger(RedKiteServerMain.class.getName());
@@ -47,6 +67,15 @@ public class RedKiteServerMain {
 
     private final Store store;
     private final HttpServer server;
+    private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
+
+    private static final class ScanJob {
+        enum Status { RUNNING, DONE, ERROR }
+        volatile Status status = Status.RUNNING;
+        volatile String message = "Starting…";
+        volatile long scanId;
+        volatile String errorMessage;
+    }
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
         this.store = Store.connect(jdbcUrl, dbUser, dbPassword);
@@ -78,7 +107,10 @@ public class RedKiteServerMain {
         server.createContext("/scans", exchange -> safeHandle(exchange, this::handleScans));
         server.createContext("/upgrade-planner", exchange -> safeHandle(exchange, this::handlePlanner));
         server.createContext("/upgrade-plans", exchange -> safeHandle(exchange, this::handleUpgradePlans));
+        server.createContext("/api/scan", exchange -> safeHandle(exchange, this::handleApiScan));
+        server.createContext("/api/scan-status", exchange -> safeHandle(exchange, this::handleApiScanStatus));
         server.createContext("/api/scans/input", exchange -> safeHandle(exchange, this::handleApiScanInput));
+        server.createContext("/api/scans/pom", exchange -> safeHandle(exchange, this::handleApiScanPom));
         server.createContext("/api/upgrade-plans", exchange -> safeHandle(exchange, this::handleApiUpgradePlans));
     }
 
@@ -115,13 +147,28 @@ public class RedKiteServerMain {
         html.append("<div><h1>RedKite</h1><p>Local dependency reporting and upgrade planning for checked-out Maven repositories.</p></div>");
         html.append("<div class=\"hero-actions\"><a class=\"button primary\" href=\"/upgrade-planner\">Open planner</a><a class=\"button\" href=\"/projects\">Projects</a></div>");
         html.append("</div>");
+
+        // Scan new project section
+        html.append("<section class=\"card\" style=\"margin-bottom:18px\">");
+        html.append("<h2>Scan project</h2>");
+        html.append("<div class=\"scan-path-row\">");
+        html.append("<input id=\"scan-path\" class=\"scan-path-input\" type=\"text\" placeholder=\"/full/path/to/project\" autocomplete=\"off\" spellcheck=\"false\" onkeydown=\"if(event.key==='Enter')startScan()\"/>");
+        html.append("<button class=\"button primary\" type=\"button\" onclick=\"startScan()\">Scan</button>");
+        html.append("</div>");
+        html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none\"></div>");
+        html.append("</section>");
+
+        // Existing projects
         html.append("<section class=\"card\"><h2>Projects</h2><div class=\"list\">");
         try {
             for (ProjectEntry project : store.listProjects()) {
-                html.append("<a class=\"list-row\" href=\"/projects/").append(project.id()).append("\">")
+                html.append("<div class=\"list-row\">")
+                        .append("<a href=\"/projects/").append(project.id()).append("\" class=\"list-row-link\">")
                         .append("<span class=\"list-title\">").append(escape(project.name())).append("</span>")
                         .append("<span class=\"list-meta\">").append(escape(project.rootPath())).append("</span>")
-                        .append("</a>");
+                        .append("</a>")
+                        .append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(project.rootPath()))).append(")\">Scan</button>")
+                        .append("</div>");
             }
         } catch (Exception e) {
             LOGGER.warning(() -> "Unable to list projects for dashboard: " + e.getMessage());
@@ -130,6 +177,22 @@ public class RedKiteServerMain {
                     .append("</div></div><div class=\"badge warn\">database</div></div>");
         }
         html.append("</div></section>");
+
+        // Blocking overlay shown during scan
+        html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\">");
+        html.append("<div class=\"scan-overlay-box\">");
+        html.append("<div class=\"scan-spinner\"></div>");
+        html.append("<span>Scanning&hellip;</span>");
+        html.append("<span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span>");
+        html.append("</div>");
+        html.append("</div>");
+
+        html.append("<script>");
+        html.append("function startScan(){var path=document.getElementById('scan-path').value.trim();if(!path){showScanError('Enter the full path to the project.');return;}hideScanError();triggerScan(path);}");
+        html.append("function showScanError(msg){var el=document.getElementById('scan-error');if(el){el.textContent=msg;el.style.display='block';}}");
+        html.append("function hideScanError(){var el=document.getElementById('scan-error');if(el){el.textContent='';el.style.display='none';}}");
+        html.append("</script>");
+
         html.append(pageShellEnd());
         sendHtml(exchange, 200, html.toString());
     }
@@ -192,7 +255,11 @@ public class RedKiteServerMain {
         String[] parts = uri.getPath().split("/");
         if (parts.length == 3) {
             long scanId = Long.parseLong(parts[2]);
-            ScanReport report = store.getScan(scanId).report();
+            ScanEntry scanEntry = store.getScan(scanId);
+            ScanReport report = scanEntry.report();
+            String projectPath = scanEntry.input().workingTreePath();
+            Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
+            Map<String, String> moduleArtifactIds = buildModuleArtifactIds(sourcePoms);
             Map<Long, UpgradeRecommendation> recommendationsByComponent = new LinkedHashMap<>();
             for (UpgradeRecommendation recommendation : report.recommendations()) {
                 if (!recommendation.affectedComponentIds().isEmpty()) {
@@ -210,12 +277,18 @@ public class RedKiteServerMain {
             html.append("<div class=\"page-grid\">");
             html.append("<section class=\"card span-2\"><div class=\"headline\">");
             html.append("<div><p class=\"eyebrow\">Scan ").append(report.scanId()).append("</p><h1>Scan report</h1></div>");
+            html.append("<div style=\"display:flex;align-items:center;gap:10px\">");
             html.append(report.complete() ? "<span class=\"badge success\">Complete</span>" : "<span class=\"badge warn\">Incomplete</span>");
-            html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p></section>");
+            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Rescan</button>");
+            html.append("</div>");
+            html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
+            html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
+            html.append("</section>");
             html.append("<section class=\"card span-2\">");
-            html.append(renderRemediationView(report));
+            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds));
             html.append("</section>");
             html.append("</div>");
+            html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\"><div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div><span>Scanning&hellip;</span><span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span></div></div>");
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
             return;
@@ -339,6 +412,102 @@ public class RedKiteServerMain {
         sendText(exchange, 404, "Not found");
     }
 
+    private void handleApiScan(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        String path = parseJsonPath(readBody(exchange));
+        if (path == null || path.isBlank()) {
+            sendText(exchange, 400, "Missing path");
+            return;
+        }
+        Path projectRoot = Path.of(path).toAbsolutePath().normalize();
+        if (!Files.isDirectory(projectRoot)) {
+            sendText(exchange, 400, "Not a directory: " + path);
+            return;
+        }
+        if (!Files.exists(projectRoot.resolve("pom.xml"))) {
+            sendText(exchange, 400, "No pom.xml found at: " + path);
+            return;
+        }
+        String jobId = UUID.randomUUID().toString();
+        ScanJob job = new ScanJob();
+        scanJobs.put(jobId, job);
+        sendJson(exchange, 200, "{\"jobId\":\"" + jobId + "\"}");
+        new Thread(() -> {
+            try {
+                Consumer<String> progress = msg -> job.message = msg;
+                ScanInput input = new MavenProjectScanner().scan(projectRoot, progress);
+                ScanReport report = store.ingest(input, progress);
+                job.scanId = report.scanId();
+                job.status = ScanJob.Status.DONE;
+            } catch (Throwable e) {
+                job.errorMessage = causeChain(e);
+                job.status = ScanJob.Status.ERROR;
+            }
+        }, "redkite-scan-" + jobId).start();
+    }
+
+    private void handleApiScanStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        String jobId = queryParam(exchange.getRequestURI().getQuery(), "jobId");
+        if (jobId == null) { sendText(exchange, 400, "Missing jobId"); return; }
+        ScanJob job = scanJobs.get(jobId);
+        if (job == null) { sendText(exchange, 404, "Job not found"); return; }
+        switch (job.status) {
+            case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"message\":" + jsonStr(job.message) + "}");
+            case DONE -> {
+                scanJobs.remove(jobId);
+                sendJson(exchange, 200, "{\"status\":\"done\",\"scanId\":" + job.scanId + "}");
+            }
+            case ERROR -> {
+                scanJobs.remove(jobId);
+                sendJson(exchange, 200, "{\"status\":\"error\",\"message\":" + jsonStr(job.errorMessage) + "}");
+            }
+        }
+    }
+
+    private static void sendJson(HttpExchange exchange, int status, String json) throws IOException {
+        byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        exchange.sendResponseHeaders(status, bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
+        }
+    }
+
+    private static String parseJsonPath(String json) {
+        if (json == null) return null;
+        int idx = json.indexOf("\"path\"");
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + 6);
+        if (colon < 0) return null;
+        int q1 = json.indexOf('"', colon + 1);
+        if (q1 < 0) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = q1 + 1; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '"') break;
+            if (c == '\\' && i + 1 < json.length()) {
+                char next = json.charAt(++i);
+                if (next == '"') sb.append('"');
+                else if (next == '\\') sb.append('\\');
+                else if (next == '/') sb.append('/');
+                else if (next == 'n') sb.append('\n');
+                else if (next == 'r') sb.append('\r');
+                else if (next == 't') sb.append('\t');
+                else sb.append(next);
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
     private void handleApiScanInput(HttpExchange exchange) throws IOException {
         if (!"POST".equals(exchange.getRequestMethod())) {
             sendText(exchange, 405, "Method not allowed");
@@ -347,6 +516,274 @@ public class RedKiteServerMain {
         ScanInput input = SerializationSupport.fromBase64(readBody(exchange), ScanInput.class);
         ScanReport report = store.ingest(input);
         sendBase64(exchange, 200, report);
+    }
+
+    private void handleApiScanPom(HttpExchange exchange) throws IOException {
+        String scanIdParam = queryParam(exchange.getRequestURI().getQuery(), "scanId");
+        if (scanIdParam == null) { sendText(exchange, 400, "Missing scanId"); return; }
+        long scanId;
+        try { scanId = Long.parseLong(scanIdParam); } catch (NumberFormatException e) { sendText(exchange, 400, "Bad scanId"); return; }
+
+        if ("POST".equals(exchange.getRequestMethod())) {
+            Map<String, String> updates = parseForm(readBody(exchange));
+            if (updates.isEmpty()) { sendText(exchange, 400, "No updates"); return; }
+            try {
+                ScanEntry scan = store.getScan(scanId);
+                Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
+                Map<String, String> patchedFiles = generatePomPatches(scan.report(), sourcePoms, scan.input().workingTreePath(), updates);
+                if (patchedFiles.isEmpty()) { sendText(exchange, 400, "No matching source POMs for the selected components"); return; }
+                StringBuilder json = new StringBuilder("{");
+                boolean first = true;
+                for (Map.Entry<String, String> entry : patchedFiles.entrySet()) {
+                    if (!first) json.append(",");
+                    first = false;
+                    json.append(jsonStr(entry.getKey())).append(":").append(jsonStr(entry.getValue()));
+                }
+                json.append("}");
+                sendJson(exchange, 200, json.toString());
+            } catch (Exception e) {
+                LOGGER.warning(() -> "POM generation failed: " + e.getMessage());
+                sendText(exchange, 500, "Failed: " + e.getMessage());
+            }
+            return;
+        }
+
+        if ("GET".equals(exchange.getRequestMethod())) {
+            Map<String, String> files = store.loadPomFiles(scanId);
+            if (files.isEmpty()) files = store.loadSourcePoms(scanId);
+            if (files.isEmpty()) { sendText(exchange, 404, "No generated POM"); return; }
+            if (files.size() == 1) {
+                Map.Entry<String, String> entry = files.entrySet().iterator().next();
+                byte[] bytes = entry.getValue().getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/xml; charset=utf-8");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"pom.xml\"");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream out = exchange.getResponseBody()) { out.write(bytes); }
+            } else {
+                ByteArrayOutputStream buf = new ByteArrayOutputStream();
+                try (ZipOutputStream zip = new ZipOutputStream(buf)) {
+                    for (Map.Entry<String, String> entry : files.entrySet()) {
+                        zip.putNextEntry(new ZipEntry(entry.getKey()));
+                        zip.write(entry.getValue().getBytes(StandardCharsets.UTF_8));
+                        zip.closeEntry();
+                    }
+                }
+                byte[] bytes = buf.toByteArray();
+                exchange.getResponseHeaders().set("Content-Type", "application/zip");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"poms.zip\"");
+                exchange.sendResponseHeaders(200, bytes.length);
+                try (OutputStream out = exchange.getResponseBody()) { out.write(bytes); }
+            }
+            return;
+        }
+
+        sendText(exchange, 405, "Method not allowed");
+    }
+
+    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates) throws Exception {
+        // rawUpdates keys are component IDs (from the client) — resolve each to its exact component
+        Map<Long, String> updateById = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : rawUpdates.entrySet()) {
+            try { updateById.put(Long.parseLong(e.getKey()), e.getValue()); } catch (NumberFormatException ignored) {}
+        }
+        Map<String, List<ScanComponent>> byFile = new LinkedHashMap<>();
+        for (ScanComponent c : report.components()) {
+            if (!c.direct() || c.snapshot() || c.sourceFilePath() == null) continue;
+            if (!updateById.containsKey(c.id())) continue;
+            byFile.computeIfAbsent(c.sourceFilePath(), k -> new ArrayList<>()).add(c);
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<String, List<ScanComponent>> entry : byFile.entrySet()) {
+            String content = sourcePoms.get(entry.getKey());
+            if (content == null) continue;
+            Map<String, String> fileUpdates = new LinkedHashMap<>();
+            for (ScanComponent c : entry.getValue()) {
+                String coord = c.coordinate().groupId() + ":" + c.coordinate().artifactId();
+                fileUpdates.put(coord, updateById.get(c.id()));
+            }
+            result.put(entry.getKey(), patchPomXml(content, fileUpdates));
+        }
+        return result;
+    }
+
+    private static String patchPomXml(String content, Map<String, String> versionUpdates) throws Exception {
+        var dbf = DocumentBuilderFactory.newInstance();
+        dbf.setNamespaceAware(false);
+        Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
+        Element root = doc.getDocumentElement();
+
+        // Find or create <properties> as a direct child of root
+        Element propertiesEl = null;
+        for (int i = 0; i < root.getChildNodes().getLength(); i++) {
+            Node n = root.getChildNodes().item(i);
+            if (n instanceof Element e && "properties".equals(e.getNodeName())) {
+                propertiesEl = e;
+                break;
+            }
+        }
+        if (propertiesEl == null) {
+            propertiesEl = doc.createElement("properties");
+            // Insert before <dependencyManagement> or <dependencies> or <build>, else append
+            Node insertBefore = null;
+            for (String anchor : List.of("dependencyManagement", "dependencies", "build")) {
+                NodeList nl = root.getElementsByTagName(anchor);
+                if (nl.getLength() > 0) { insertBefore = nl.item(0); break; }
+            }
+            if (insertBefore != null) {
+                root.insertBefore(doc.createTextNode("\n  "), insertBefore);
+                root.insertBefore(propertiesEl, insertBefore);
+            } else {
+                root.appendChild(doc.createTextNode("\n  "));
+                root.appendChild(propertiesEl);
+            }
+        }
+
+        // Pre-populate known property→version from existing <properties> children
+        Map<String, String> propToVersion = new LinkedHashMap<>();
+        for (int i = 0; i < propertiesEl.getChildNodes().getLength(); i++) {
+            Node n = propertiesEl.getChildNodes().item(i);
+            if (n instanceof Element e) propToVersion.put(e.getNodeName(), e.getTextContent().trim());
+        }
+
+        // Process every <dependency> element
+        NodeList allVersionedElements = doc.getElementsByTagName("*");
+        List<Element> patchTargets = new ArrayList<>();
+        for (int i = 0; i < allVersionedElements.getLength(); i++) {
+            Node n = allVersionedElements.item(i);
+            if (n instanceof Element e && ("dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
+                patchTargets.add(e);
+            }
+        }
+        for (Element dep : patchTargets) {
+            String g = childText(dep, "groupId");
+            String a = childText(dep, "artifactId");
+            if (g == null || a == null) continue;
+            if ("plugin".equals(dep.getNodeName()) && g.trim().isEmpty()) g = "org.apache.maven.plugins";
+            g = g.trim(); a = a.trim();
+            String coord = g + ":" + a;
+
+            // Find <version> child node
+            Node versionNode = null;
+            for (int j = 0; j < dep.getChildNodes().getLength(); j++) {
+                Node child = dep.getChildNodes().item(j);
+                if ("version".equals(child.getNodeName())) { versionNode = child; break; }
+            }
+            if (versionNode == null) {
+                // No explicit version (BOM-managed): only add one when upgrading
+                String upgrade = versionUpdates.get(coord);
+                if (upgrade != null) {
+                    String propName = a + ".version";
+                    if (propToVersion.containsKey(propName) && !propToVersion.get(propName).equals(upgrade)) {
+                        propName = g + "." + a + ".version";
+                    }
+                    setProperty(doc, propertiesEl, propName, upgrade);
+                    propToVersion.put(propName, upgrade);
+                    Element versionEl = doc.createElement("version");
+                    versionEl.setTextContent("${" + propName + "}");
+                    dep.appendChild(versionEl);
+                }
+                continue;
+            }
+            String versionText = versionNode.getTextContent().trim();
+            if (versionText.isEmpty()) continue;
+
+            String upgrade = versionUpdates.get(coord);
+
+            if (versionText.startsWith("${") && versionText.endsWith("}")) {
+                // Already a property reference — update the property value if upgrading
+                if (upgrade != null) {
+                    String propName = versionText.substring(2, versionText.length() - 1);
+                    setProperty(doc, propertiesEl, propName, upgrade);
+                    propToVersion.put(propName, upgrade);
+                }
+            } else {
+                // Literal version — normalise to a named property
+                String effectiveVersion = upgrade != null ? upgrade : versionText;
+                String propName = a + ".version";
+                // Conflict: same name already used for a different version
+                if (propToVersion.containsKey(propName) && !propToVersion.get(propName).equals(effectiveVersion)) {
+                    propName = g + "." + a + ".version";
+                }
+                setProperty(doc, propertiesEl, propName, effectiveVersion);
+                propToVersion.put(propName, effectiveVersion);
+                versionNode.setTextContent("${" + propName + "}");
+            }
+        }
+
+        stripWhitespaceNodes(doc);
+        var tf = TransformerFactory.newInstance();
+        var transformer = tf.newTransformer();
+        transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+        transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+        StringWriter sw = new StringWriter();
+        transformer.transform(new DOMSource(doc), new StreamResult(sw));
+        return sw.toString();
+    }
+
+    private static void stripWhitespaceNodes(Node node) {
+        for (int i = node.getChildNodes().getLength() - 1; i >= 0; i--) {
+            Node child = node.getChildNodes().item(i);
+            if (child.getNodeType() == Node.TEXT_NODE && child.getTextContent().isBlank()) {
+                node.removeChild(child);
+            } else if (child.getNodeType() == Node.ELEMENT_NODE) {
+                stripWhitespaceNodes(child);
+            }
+        }
+    }
+
+    private static Map<String, String> buildModuleArtifactIds(Map<String, String> sourcePoms) {
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : sourcePoms.entrySet()) {
+            String artifactId = extractArtifactId(e.getValue());
+            result.put(e.getKey(), artifactId != null ? artifactId : modulePathLabel(e.getKey()));
+        }
+        return result;
+    }
+
+    private static String modulePathLabel(String mod) {
+        if ("pom.xml".equals(mod) || "(root)".equals(mod)) return "(root)";
+        if (mod.endsWith("/pom.xml")) return mod.substring(0, mod.length() - 8);
+        return mod;
+    }
+
+    private static String extractArtifactId(String pomXml) {
+        int searchFrom = 0;
+        int parentEnd = pomXml.indexOf("</parent>");
+        if (parentEnd >= 0) searchFrom = parentEnd + 9;
+        int start = pomXml.indexOf("<artifactId>", searchFrom);
+        if (start < 0) return null;
+        int end = pomXml.indexOf("</artifactId>", start);
+        if (end < 0) return null;
+        return pomXml.substring(start + 12, end).trim();
+    }
+
+    private static void setProperty(Document doc, Element propertiesEl, String name, String value) {
+        NodeList existing = propertiesEl.getElementsByTagName(name);
+        if (existing.getLength() > 0) {
+            existing.item(0).setTextContent(value);
+        } else {
+            propertiesEl.appendChild(doc.createTextNode("\n    "));
+            Element prop = doc.createElement(name);
+            prop.setTextContent(value);
+            propertiesEl.appendChild(prop);
+        }
+    }
+
+    private static String childText(Element parent, String tagName) {
+        NodeList nl = parent.getElementsByTagName(tagName);
+        return nl.getLength() > 0 ? nl.item(0).getTextContent() : null;
+    }
+
+    private static String queryParam(String query, String name) {
+        if (query == null) return null;
+        for (String part : query.split("&")) {
+            int eq = part.indexOf('=');
+            if (eq > 0 && part.substring(0, eq).equals(name)) {
+                return URLDecoder.decode(part.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     private void handleApiUpgradePlans(HttpExchange exchange) throws IOException {
@@ -422,7 +859,7 @@ public class RedKiteServerMain {
             if (idx > 0) {
                 String key = urlDecode(pair.substring(0, idx));
                 String value = urlDecode(pair.substring(idx + 1));
-                result.merge(key, value, (left, right) -> left.isBlank() ? right : left + "," + right);
+                result.put(key, value);
             }
         }
         return result;
@@ -502,7 +939,7 @@ public class RedKiteServerMain {
             UpgradeRecommendation recommendation,
             List<VulnerabilityFinding> findings) {}
 
-    private String renderRemediationView(ScanReport report) {
+    private String renderRemediationView(ScanReport report, long scanId, boolean pomExists, Map<String, String> moduleArtifactIds) {
         ReportSummary summary = RemediationClassifier.summarize(report);
         List<ScanComponent> components = report.components();
         if (components.isEmpty()) {
@@ -543,12 +980,14 @@ public class RedKiteServerMain {
         Map<Long, ScanComponent> componentsById = new LinkedHashMap<>();
         for (ScanComponent c : unique.values()) componentsById.put(c.id(), c);
         Map<Long, List<Long>> parentIdsByChild = new LinkedHashMap<>();
+        Map<Long, List<Long>> childrenByParent = new LinkedHashMap<>();
         for (DependencyEdge edge : report.dependencyEdges()) {
             if (edge.fromComponentId() == null || edge.fromComponentId().startsWith("module:")) continue;
             try {
                 long fromId = Long.parseLong(edge.fromComponentId());
                 long toId = Long.parseLong(edge.toComponentId());
                 parentIdsByChild.computeIfAbsent(toId, k -> new ArrayList<>()).add(fromId);
+                childrenByParent.computeIfAbsent(fromId, k -> new ArrayList<>()).add(toId);
             } catch (NumberFormatException ignored) {}
         }
 
@@ -596,67 +1035,132 @@ public class RedKiteServerMain {
         html.append("</div>");
         html.append("</div>");
 
-        // Build module index (preserve urgency sort within each module)
+        // Build module index — seed from all known source POMs so empty modules still appear
         Map<String, List<ComponentView>> byModule = new LinkedHashMap<>();
+        for (String modPath : moduleArtifactIds.keySet()) {
+            byModule.put(modPath, new ArrayList<>());
+        }
         for (ComponentView v : views) {
             String mod = v.component().modulePath() == null || v.component().modulePath().isBlank()
                     ? "(root)" : v.component().modulePath();
             byModule.computeIfAbsent(mod, k -> new ArrayList<>()).add(v);
         }
 
-        // Module tabs — always one per module; never an "All" aggregate view
+        // Module dropdown
         if (byModule.size() > 1) {
-            String firstModule = byModule.keySet().iterator().next();
+            String firstModule = byModule.entrySet().stream()
+                    .filter(e -> !e.getValue().isEmpty())
+                    .map(Map.Entry::getKey)
+                    .findFirst()
+                    .orElse(byModule.keySet().iterator().next());
             html.append("<script>remModule=").append(jsString(firstModule)).append(";</script>");
-            html.append("<div class=\"rem-module-tabs\">");
-            boolean firstTab = true;
+            html.append("<select class=\"rem-module-select\" onchange=\"filterRemediationModule(this.value)\">");
             for (Map.Entry<String, List<ComponentView>> entry : byModule.entrySet()) {
                 String mod = entry.getKey();
-                html.append("<button class=\"button").append(firstTab ? " primary" : "").append(" rem-module-tab\" type=\"button\" data-module=\"").append(escape(mod))
-                        .append("\" onclick=\"filterRemediationModule('").append(escape(mod)).append("')\">")
-                        .append(escape(mod)).append(" <span class=\"tab-count\">").append(entry.getValue().size()).append("</span></button>");
-                firstTab = false;
+                String label = moduleArtifactIds.getOrDefault(mod, modulePathLabel(mod));
+                html.append("<option value=\"").append(escape(mod)).append("\"")
+                        .append(mod.equals(firstModule) ? " selected" : "").append(">")
+                        .append(escape(label)).append("</option>");
             }
-            html.append("</div>");
+            html.append("</select>");
         }
 
-        // Filter toggle: CVE | Upgrades | All
+        // Filter toggle: CVE | Snapshot | Upgrade | Transitive | Clean | All
         long cveCount = views.stream().filter(v -> v.status().hasVulnerability()).count();
-        long upgradeCount = views.stream().filter(v -> v.status().needsRemediation() && !v.status().hasVulnerability()).count();
+        long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
+        long upgradeCount = views.stream().filter(v -> v.status().needsRemediation() && !v.status().hasVulnerability() && !v.status().isSnapshot()).count();
+        long transitiveCount = views.stream().filter(v -> !v.component().direct() && !v.component().snapshot()).count();
+        long cleanCount = views.stream().filter(v -> !v.status().needsRemediation()).count();
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cve\" onclick=\"setRemediationMode('cve')\">CVE <span class=\"tab-count\">").append(cveCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgrades <span class=\"tab-count\">").append(upgradeCount).append("</span></button>");
-        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
-        html.append("<label class=\"rem-check-label\"><input type=\"checkbox\" id=\"rem-show-upgrades\" onchange=\"applyRemediationFilters()\"> Show upgrades</label>");
-        html.append("<label class=\"rem-check-label\"><input type=\"checkbox\" id=\"rem-show-transitive\" onchange=\"applyRemediationFilters()\"> Show transitive</label>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
+        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgrade <span class=\"tab-count\">").append(upgradeCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"transitive\" onclick=\"setRemediationMode('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"clean\" onclick=\"setRemediationMode('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
         html.append("</div>");
 
-        // Component cards (flat list; JS handles module + mode visibility)
+        // Apply bar
+        html.append("<div class=\"pom-actions\">");
+        html.append("<button class=\"button primary\" type=\"button\"");
+        if (!pomExists) html.append(" disabled title=\"No source POMs available for this scan\"");
+        html.append(" onclick=\"applyPomChanges()\">Apply</button>");
+        html.append("</div>");
+
+        // Emit component index + edge map for client-side tree expansion
+        html.append("<script>const rk_scanId=").append(scanId).append(";const rk_comps={");
+        boolean firstComp = true;
+        for (ComponentView v : views) {
+            if (!firstComp) html.append(",");
+            firstComp = false;
+            ScanComponent c = v.component();
+            RemediationStatus s = v.status();
+            html.append("\"").append(c.id()).append("\":{")
+                .append("\"g\":").append(jsonStr(c.coordinate().groupId())).append(",")
+                .append("\"a\":").append(jsonStr(c.coordinate().artifactId())).append(",")
+                .append("\"v\":").append(jsonStr(c.version())).append(",")
+                .append("\"icon\":").append(jsonStr(s.highestSeverity().icon())).append(",")
+                .append("\"label\":").append(jsonStr(s.highestSeverity().label())).append(",")
+                .append("\"sev\":").append(jsonStr(s.highestSeverity().name().toLowerCase())).append(",")
+                .append("\"kind\":").append(jsonStr(c.snapshot() ? "snapshot" : c.direct() ? "direct" : "transitive")).append(",")
+                .append("\"clean\":").append(!s.needsRemediation()).append(",")
+                .append("\"hasvuln\":").append(s.hasVulnerability())
+                .append("}");
+        }
+        html.append("};const rk_edges={");
+        boolean firstEdge = true;
+        for (Map.Entry<Long, List<Long>> entry : parentIdsByChild.entrySet()) {
+            if (!firstEdge) html.append(",");
+            firstEdge = false;
+            html.append("\"").append(entry.getKey()).append("\":[");
+            boolean firstChild = true;
+            for (Long cid : entry.getValue()) {
+                if (!firstChild) html.append(",");
+                firstChild = false;
+                html.append(cid);
+            }
+            html.append("]");
+        }
+        html.append("};</script>");
+
+        // Component cards
         html.append("<div class=\"rem-list\">");
         for (ComponentView view : views) {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
-            String pulledInBy = null;
-            if (!view.component().direct() && !view.component().snapshot()) {
-                List<Long> parentIds = parentIdsByChild.getOrDefault(view.component().id(), List.of());
-                List<String> parentNames = new ArrayList<>();
-                for (Long pid : parentIds) {
-                    ScanComponent parent = componentsById.get(pid);
-                    if (parent != null) {
-                        parentNames.add(parent.coordinate().groupId() + ":" + parent.coordinate().artifactId());
-                    }
-                    if (parentNames.size() == 3) break;
-                }
-                if (!parentNames.isEmpty()) pulledInBy = String.join(", ", parentNames);
-            }
-            html.append(renderComponentCard(view, mod, pulledInBy));
+            boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
+            html.append(renderComponentCard(view, mod, hasParents));
         }
         html.append("</div>");
+
+        // POM preview modal
+        html.append("<div id=\"pom-modal\" class=\"pom-modal\" style=\"display:none\">");
+        html.append("<div class=\"pom-modal-backdrop\" onclick=\"closePomModal()\"></div>");
+        html.append("<div class=\"pom-modal-box\">");
+        html.append("<div class=\"pom-modal-head\">");
+        html.append("<span id=\"pom-modal-filename\" class=\"pom-modal-filename\"></span>");
+        html.append("<div style=\"display:flex;gap:8px;flex-shrink:0\">");
+        html.append("<button class=\"button\" type=\"button\" onclick=\"copyPomContent()\">Copy</button>");
+        html.append("<button class=\"button\" type=\"button\" onclick=\"closePomModal()\">Close</button>");
+        html.append("</div></div>");
+        html.append("<div class=\"pom-modal-body\"><pre id=\"pom-modal-content\"></pre></div>");
+        html.append("</div></div>");
 
         return html.toString();
     }
 
-    private String renderComponentCard(ComponentView view, String module, String pulledInBy) {
+    private static String idsString(List<Long> ids) {
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (Long id : ids) {
+            if (n > 0) sb.append(',');
+            sb.append(id);
+            if (++n >= 10) break;
+        }
+        return sb.toString();
+    }
+
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean clean = !status.needsRemediation();
@@ -671,7 +1175,9 @@ public class RedKiteServerMain {
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
                 .append("\" data-hasvuln=\"").append(status.hasVulnerability())
-                .append("\" data-upgradeonly=\"").append(upgradeOnly).append("\">");
+                .append("\" data-upgradeonly=\"").append(upgradeOnly)
+                .append("\" data-coord=\"").append(escape(coordStr))
+                .append("\" data-comp-id=\"").append(comp.id()).append("\">");
 
         // Header: coordinate + badges
         html.append("<div class=\"rem-header\">");
@@ -698,11 +1204,6 @@ public class RedKiteServerMain {
         }
         html.append("</div>");
 
-        // Pulled in by (transitive only)
-        if (pulledInBy != null) {
-            html.append("<div class=\"rem-via\">via ").append(escape(pulledInBy)).append("</div>");
-        }
-
         // CVE identifiers
         if (status.hasVulnerability() && !view.findings().isEmpty()) {
             List<String> allCves = new ArrayList<>();
@@ -715,10 +1216,18 @@ public class RedKiteServerMain {
         }
 
         // Remediation reason chips
-        if (!status.reasons().isEmpty()) {
+        List<String> otherReasons = status.reasons().stream()
+                .filter(r -> !"Upgrade available".equals(r)).toList();
+        boolean showUpgradeBtn = view.recommendation() != null && !status.isSnapshot();
+        if (!otherReasons.isEmpty() || showUpgradeBtn) {
             html.append("<div class=\"rem-reasons\">");
-            for (String reason : status.reasons()) {
+            for (String reason : otherReasons) {
                 html.append("<span class=\"reason-chip\">").append(escape(reason)).append("</span>");
+            }
+            if (showUpgradeBtn) {
+                html.append("<button class=\"reason-chip reason-chip-btn\" type=\"button\" onclick=\"applyUpgrade(")
+                    .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
+                    .append("Upgrade available</button>");
             }
             html.append("</div>");
         }
@@ -726,15 +1235,30 @@ public class RedKiteServerMain {
         // Version selector (display-only on scan page) + planner link
         if (!clean && view.versionMetadata() != null) {
             String selectorId = "view_" + comp.id();
-            String selectedVersion = view.recommendation() != null ? view.recommendation().targetVersion() : comp.version();
+            String selectedVersion = view.recommendation() != null && comp.direct()
+                    ? view.recommendation().targetVersion() : comp.version();
             html.append("<div class=\"rem-actions\">");
             html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
                     view.versionMetadata(), view.recommendation(), view.findings(), false));
             html.append("</div>");
         }
 
+        if (hasChildren) {
+            html.append("<div class=\"card-expand-row\">");
+            html.append("<button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"").append(comp.id())
+                .append("\" onclick=\"toggleTree(this)\">+</button>");
+            html.append("</div>");
+            html.append("<div class=\"dep-tree-panel\" style=\"display:none\"></div>");
+        }
+
         html.append("</div>");
         return html.toString();
+    }
+
+    private static String jsonStr(String value) {
+        if (value == null) return "null";
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\"";
     }
 
     private String severityBadgeHtml(AdvisorySeverity severity, boolean clean) {
@@ -1063,6 +1587,7 @@ public class RedKiteServerMain {
                 + ".list { display:flex; flex-direction:column; gap:12px; }"
                 + ".list-row, .result-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 16px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
                 + ".list-row:hover, .result-row:hover { border-color: rgba(125,211,252,.45); }"
+                + ".list-row-link { flex:1; display:flex; flex-direction:column; gap:2px; min-width:0; }"
                 + ".list-title { display:block; font-weight:700; margin-bottom:4px; }"
                 + ".list-meta { display:block; color:var(--muted); font-size:.95rem; }"
                 + ".inventory-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:14px; }"
@@ -1118,10 +1643,10 @@ public class RedKiteServerMain {
                 + ".sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }"
                 + ".sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }"
                 + ".sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }"
-                + ".rem-module-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }"
+                + ".rem-module-select { padding:8px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(18,26,50,.9); color:var(--text); font-size:.9rem; cursor:pointer; outline:none; margin-bottom:12px; }"
+                + ".rem-module-select:focus { border-color:rgba(125,211,252,.55); }"
                 + ".rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }"
-                + ".rem-check-label { display:inline-flex; align-items:center; gap:6px; font-size:.9rem; color:var(--muted); cursor:pointer; padding:6px 4px; user-select:none; }"
-                + ".rem-check-label input { accent-color:var(--accent); width:15px; height:15px; cursor:pointer; }"
+                + ".pom-actions { display:flex; gap:10px; align-items:center; margin-bottom:20px; }"
                 + ".rem-list { display:flex; flex-direction:column; gap:10px; }"
                 + ".rem-card { padding:15px 18px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.02); display:flex; flex-direction:column; gap:9px; }"
                 + ".rem-card.clean { opacity:.7; }"
@@ -1131,10 +1656,18 @@ public class RedKiteServerMain {
                 + ".sev-badge { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:700; }"
                 + ".rem-meta { font-size:.93rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
                 + ".rem-meta strong { color:var(--text); }"
-                + ".rem-via { font-size:.83rem; color:var(--muted); font-style:italic; }"
+                + ".card-expand-row { display:flex; justify-content:flex-end; margin-top:8px; }"
+                + ".card-expand-btn { width:24px; height:24px; border-radius:50%; background:none; border:1px solid var(--line); color:var(--muted); cursor:pointer; font-size:.9rem; line-height:1; padding:0; transition:all .15s; }"
+                + ".card-expand-btn:hover { border-color:var(--accent); color:var(--accent); }"
+                + ".dep-tree-panel { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:8px; }"
+                + ".sub-card { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.015); }"
+                + ".card-highlight { outline:2px solid var(--accent) !important; outline-offset:3px; }"
                 + ".rem-cves { font-size:.85rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }"
                 + ".rem-reasons { display:flex; flex-wrap:wrap; gap:6px; }"
                 + ".reason-chip { padding:3px 9px; border-radius:999px; border:1px solid rgba(167,139,250,.3); background:rgba(167,139,250,.1); color:#d8c8ff; font-size:.78rem; }"
+                + ".reason-chip-btn { cursor:pointer; transition:border-color .15s,background .15s; }"
+                + ".reason-chip-btn:hover { border-color:rgba(167,139,250,.7); background:rgba(167,139,250,.22); }"
+                + ".reason-chip-btn.selected { background:rgba(167,139,250,.35); border-color:rgba(167,139,250,.8); color:#ede9fe; }"
                 + ".rem-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:2px; }"
                 + ".action-btn { display:inline-flex; align-items:center; padding:7px 15px; border-radius:12px; font-size:.86rem; font-weight:600; border:1px solid transparent; cursor:pointer; text-decoration:none; }"
                 + ".action-btn:hover { filter:brightness(1.12); }"
@@ -1151,7 +1684,22 @@ public class RedKiteServerMain {
                 + ".version-current.cve { border-color:rgba(248,113,113,.6); color:#fca5a5; }"
                 + ".version-note { font-size:.9rem; color:var(--muted); }"
                 + "@media (max-width: 700px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='all';let remModule='all';function applyRemediationFilters(){const showTransitive=document.getElementById('rem-show-transitive')?.checked??false;const showUpgrades=document.getElementById('rem-show-upgrades')?.checked??false;let cveN=0,upgradeN=0,allN=0;document.querySelectorAll('.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;const kindOk=showTransitive||card.dataset.kind!=='transitive';const upgradeOk=showUpgrades||remMode==='upgrade'||card.dataset.upgradeonly!=='true';let modeOk=true;if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='upgrade')modeOk=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true';card.style.display=modOk&&kindOk&&upgradeOk&&modeOk?'':'none';if(kindOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true')upgradeN++;if(showUpgrades||card.dataset.upgradeonly!=='true')allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='upgrade')el.textContent=upgradeN;else if(btn.dataset.mode==='all')el.textContent=allN;});document.querySelectorAll('.rem-module-tab').forEach(btn=>btn.classList.toggle('primary',btn.dataset.module===remModule));}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();});</script></head><body><div class=\"shell\">"
+                + ".scan-path-row { display:flex; gap:10px; align-items:center; }"
+                + ".scan-path-input { flex:1 1 auto; padding:10px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(8,15,30,.9); color:var(--text); font-size:.97rem; font-family:ui-monospace,monospace; outline:none; }"
+                + ".scan-path-input:focus { border-color:rgba(125,211,252,.55); }"
+                + ".scan-error { margin-top:10px; color:#fca5a5; font-size:.9rem; padding:10px 14px; border-radius:12px; background:rgba(220,38,38,.12); border:1px solid rgba(220,38,38,.3); }"
+                + ".scan-overlay { position:fixed; inset:0; background:rgba(7,11,22,.82); backdrop-filter:blur(4px); z-index:9999; display:flex; align-items:center; justify-content:center; }"
+                + ".scan-overlay-box { display:flex; flex-direction:column; gap:14px; align-items:center; padding:36px 48px; border:1px solid var(--line); border-radius:24px; background:var(--panel); font-size:1.05rem; font-weight:600; }"
+                + "@keyframes rk-spin { to { transform:rotate(360deg); } }"
+                + ".scan-spinner { width:36px; height:36px; border:3px solid rgba(125,211,252,.2); border-top-color:var(--accent); border-radius:50%; animation:rk-spin .8s linear infinite; }"
+                + ".pom-modal { position:fixed; inset:0; z-index:9990; display:flex; align-items:center; justify-content:center; }"
+                + ".pom-modal-backdrop { position:absolute; inset:0; background:rgba(7,11,22,.85); backdrop-filter:blur(6px); cursor:pointer; }"
+                + ".pom-modal-box { position:relative; z-index:1; background:var(--panel); border:1px solid var(--line); border-radius:22px; width:min(900px,92vw); max-height:85vh; display:flex; flex-direction:column; box-shadow:0 24px 80px rgba(0,0,0,.4); overflow:hidden; }"
+                + ".pom-modal-head { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line); gap:12px; flex-shrink:0; }"
+                + ".pom-modal-filename { font-family:ui-monospace,monospace; font-size:.9rem; color:var(--accent); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }"
+                + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
+                + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot')upgradeN++;if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='upgrade')el.textContent=upgradeN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{if(remModule!=='all'&&card.dataset.module!==remModule)return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp)return;const hidden=document.getElementById('view_'+compId);if(!hidden||!hidden.value||hidden.value===comp.v)return;parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(hidden.value));});if(!parts.length)return;const btn=document.querySelector('.pom-actions .button.primary');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply';btn.disabled=false;showPomModal(data);}).catch(err=>{btn.textContent='Apply';btn.disabled=false;alert(err.message||'Failed to generate POM.');});}function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;document.getElementById('pom-modal-filename').textContent=keys[0];document.getElementById('pom-modal-content').textContent=files[keys[0]];document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){var btn=document.querySelector('.pom-modal-head .button');if(btn){var orig=btn.textContent;btn.textContent='Copied!';setTimeout(function(){btn.textContent=orig;},1500);}}).catch(function(){});}function applyUpgrade(compId,version,chip){if(chip){chip.textContent='Upgrading';chip.classList.add('selected');}const selectorId='view_'+compId;const sel=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(sel){const btn=sel.querySelector('.version-choice[data-version=\"'+version+'\"]');if(btn)selectVersionChoice(btn,selectorId);sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='direct'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+comp.kind+'</span></div></div><div class=\"rem-meta\"><span>Current: <strong>'+comp.v+'</strong></span></div>'+expand+'</div>';}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-mark\" href=\"/\" aria-label=\"" + escape(brand) + "\">" + logoSvgInline() + "</a><div class=\"brand-copy\"><strong>" + escape(brand) + "</strong><span>" + escape(title) + "</span></div></div><div class=\"nav\"><a href=\"/\">Projects</a><a href=\"/upgrade-planner\">Planner</a></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
@@ -1489,16 +2037,21 @@ public class RedKiteServerMain {
         }
 
         synchronized ScanReport ingest(ScanInput input) {
+            return ingest(input, msg -> {});
+        }
+
+        synchronized ScanReport ingest(ScanInput input, Consumer<String> progress) {
             try (Connection connection = connection()) {
                 connection.setAutoCommit(false);
                 try {
                     long projectId = upsertProject(connection, input.projectName(), input.projectRootPath());
-                    ScanReport draft = buildReport(input, projectId, 0L);
+                    ScanReport draft = buildReport(input, projectId, 0L, progress);
                     long scanId = insertScan(connection, projectId, input, draft);
                     List<MetadataResult> metadataResults = draft.metadataResults().stream().map(result -> withScanId(result, scanId)).toList();
                     ScanReport finalReport = new ScanReport(scanId, projectId, draft.complete(), draft.completenessMessage(), draft.createdAt(), draft.components(), draft.dependencyEdges(), draft.vulnerabilityFindings(), draft.recommendations(), draft.snapshotDependencyRisks(), metadataResults);
                     updateScanReport(connection, scanId, finalReport);
                     persistMetadataCache(connection, finalReport);
+                    persistSourcePoms(connection, scanId, input);
                     connection.commit();
                     return finalReport;
                 } catch (RuntimeException | SQLException e) {
@@ -1643,13 +2196,18 @@ public class RedKiteServerMain {
             return null;
         }
 
-        private ScanReport buildReport(ScanInput input, long projectId, long scanId) {
+        private ScanReport buildReport(ScanInput input, long projectId, long scanId, Consumer<String> progress) {
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
             List<MetadataResult> metadata = new ArrayList<>();
             List<VulnerabilityFinding> vulnerabilityFindings = new ArrayList<>();
             boolean complete = true;
-            for (ScanComponent component : input.components()) {
+            List<ScanComponent> components = input.components();
+            int total = components.size();
+            int n = 0;
+            for (ScanComponent component : components) {
+                n++;
+                progress.accept("Checking metadata " + n + "/" + total + " — " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                 LOGGER.info(() -> "Enriching component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " version=" + component.version());
                 if (component.snapshot()) {
                     LOGGER.info(() -> "Component is SNAPSHOT; recording unverified dependency risk for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
@@ -1994,6 +2552,25 @@ public class RedKiteServerMain {
                         where latest_version is null or latest_same_major_version is null
                         """);
                 statement.executeUpdate("""
+                        create table if not exists source_poms (
+                          id bigint generated by default as identity primary key,
+                          scan_id bigint not null,
+                          file_path varchar(1024) not null,
+                          pom_xml text not null,
+                          unique (scan_id, file_path)
+                        )
+                        """);
+                statement.executeUpdate("""
+                        create table if not exists generated_poms (
+                          id bigint generated by default as identity primary key,
+                          scan_id bigint not null,
+                          file_path varchar(1024) not null,
+                          pom_xml text not null,
+                          generated_at timestamp not null default current_timestamp,
+                          unique (scan_id, file_path)
+                        )
+                        """);
+                statement.executeUpdate("""
                         create table if not exists provider_rate_limit_state (
                           provider varchar(255) primary key,
                           rate_limited_at timestamp with time zone,
@@ -2080,6 +2657,118 @@ public class RedKiteServerMain {
             ScanInput input = SerializationSupport.fromBase64(rs.getString("raw_input_json"), ScanInput.class);
             ScanReport report = SerializationSupport.fromBase64(rs.getString("report_json"), ScanReport.class);
             return new ScanEntry(rs.getLong("id"), rs.getLong("project_id"), input, report, rs.getTimestamp("created_at").toInstant());
+        }
+
+        private void persistSourcePoms(Connection connection, long scanId, ScanInput input) throws SQLException {
+            java.util.Set<String> paths = new LinkedHashSet<>();
+            // Include all discovered POM files, not just those with components
+            paths.addAll(input.fileHashes().keySet());
+            for (ScanComponent c : input.components()) {
+                if (c.sourceFilePath() != null && !c.sourceFilePath().isBlank()) {
+                    paths.add(c.sourceFilePath());
+                }
+            }
+            try (PreparedStatement del = connection.prepareStatement("delete from source_poms where scan_id = ?")) {
+                del.setLong(1, scanId);
+                del.executeUpdate();
+            }
+            try (PreparedStatement ins = connection.prepareStatement(
+                    "insert into source_poms(scan_id, file_path, pom_xml) values (?, ?, ?)")) {
+                for (String filePath : paths) {
+                    try {
+                        Path pomPath = Path.of(filePath);
+                        if (!pomPath.isAbsolute()) pomPath = Path.of(input.workingTreePath()).resolve(pomPath);
+                        String raw = Files.readString(pomPath);
+                        String normalized;
+                        try {
+                            normalized = RedKiteServerMain.patchPomXml(raw, Map.of());
+                        } catch (Exception e) {
+                            LOGGER.warning(() -> "Could not normalise POM: " + filePath + " — " + e.getMessage());
+                            normalized = raw;
+                        }
+                        ins.setLong(1, scanId);
+                        ins.setString(2, filePath);
+                        ins.setString(3, normalized);
+                        ins.executeUpdate();
+                    } catch (IOException e) {
+                        LOGGER.warning(() -> "Could not snapshot POM: " + filePath + " — " + e.getMessage());
+                    }
+                }
+            }
+        }
+
+        synchronized Map<String, String> loadSourcePoms(long scanId) {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "select file_path, pom_xml from source_poms where scan_id = ? order by file_path")) {
+                ps.setLong(1, scanId);
+                Map<String, String> result = new LinkedHashMap<>();
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) result.put(rs.getString("file_path"), rs.getString("pom_xml"));
+                }
+                return result;
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to load source POMs", e);
+            }
+        }
+
+        synchronized boolean hasSourcePoms(long scanId) {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement("select count(*) from source_poms where scan_id = ?")) {
+                ps.setLong(1, scanId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() && rs.getLong(1) > 0;
+                }
+            } catch (SQLException e) {
+                return false;
+            }
+        }
+
+        synchronized boolean hasSavedPom(long scanId) {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement("select count(*) from generated_poms where scan_id = ?")) {
+                ps.setLong(1, scanId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() && rs.getLong(1) > 0;
+                }
+            } catch (SQLException e) {
+                return false;
+            }
+        }
+
+        synchronized void savePomFiles(long scanId, Map<String, String> files) {
+            try (Connection connection = connection()) {
+                try (PreparedStatement del = connection.prepareStatement("delete from generated_poms where scan_id = ?")) {
+                    del.setLong(1, scanId);
+                    del.executeUpdate();
+                }
+                try (PreparedStatement ins = connection.prepareStatement(
+                        "insert into generated_poms(scan_id, file_path, pom_xml) values (?, ?, ?)")) {
+                    for (Map.Entry<String, String> e : files.entrySet()) {
+                        ins.setLong(1, scanId);
+                        ins.setString(2, e.getKey());
+                        ins.setString(3, e.getValue());
+                        ins.executeUpdate();
+                    }
+                }
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to save generated POMs", e);
+            }
+        }
+
+        synchronized Map<String, String> loadPomFiles(long scanId) {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "select file_path, pom_xml from generated_poms where scan_id = ? order by file_path")) {
+                ps.setLong(1, scanId);
+                Map<String, String> result = new LinkedHashMap<>();
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) result.put(rs.getString("file_path"), rs.getString("pom_xml"));
+                }
+                return result;
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to load generated POMs", e);
+            }
         }
 
         @SuppressWarnings("unchecked")
