@@ -66,9 +66,22 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         }
         MetadataStatus lastStatus = MetadataStatus.PROVIDER_ERROR;
         for (String repositoryBaseUrl : repositoryBaseUrls) {
+            // Local file: repository — read maven-metadata.xml directly from disk
+            if (repositoryBaseUrl.startsWith("file:")) {
+                try {
+                    List<String> allVersions = readLocalMetadata(repositoryBaseUrl, coordinate);
+                    if (allVersions.isEmpty()) { lastStatus = MetadataStatus.MISSING; continue; }
+                    VersionMetadata result = succeedWithVersions(allVersions, repositoryBaseUrl, coordinate, currentVersion, now, cacheKey);
+                    if (result != null) return result;
+                } catch (Exception e) {
+                    LOGGER.warning(() -> "Failed to read local Maven metadata from " + repositoryBaseUrl + ": " + e.getMessage());
+                }
+                lastStatus = MetadataStatus.PROVIDER_ERROR;
+                continue;
+            }
             boolean artif = isArtifactoryUrl(repositoryBaseUrl);
             String metadataUrl = artif
-                    ? artifactoryGavcUrl(repositoryBaseUrl, coordinate)
+                    ? artifactoryVersionsUrl(repositoryBaseUrl, coordinate)
                     : metadataUrl(repositoryBaseUrl, coordinate);
             LOGGER.info(() -> "Querying Maven repository for version metadata: " + metadataUrl);
             try {
@@ -87,34 +100,13 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 LOGGER.info(() -> "Maven repository response for " + metadataUrl + " => HTTP " + status);
                 if (status == 200) {
                     List<String> allVersions = artif
-                            ? parseGavcVersions(response.body())
+                            ? parseArtifactoryVersions(response.body())
                             : parseVersions(response.body());
-                    List<String> versions = allVersions.stream()
-                            .filter(v -> !isPreRelease(v))
-                            .collect(java.util.stream.Collectors.toList());
-                    if (versions.isEmpty()) versions = allVersions; // all pre-release? keep all
-                    String latest = versions.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
-                    if (latest == null || latest.isBlank()) {
-                        lastStatus = MetadataStatus.PROVIDER_ERROR;
-                        LOGGER.warning(() -> "Maven metadata at " + metadataUrl + " did not contain a usable latest/release version");
-                        continue;
-                    }
-                    List<String> upgradePathVersions = upgradePathVersions(versions, currentVersion);
-                    String latestSameMajor = latestSameMajorVersion(versions, currentVersion, latest);
-                    VersionMetadata metadata = new VersionMetadata(
-                            coordinate,
-                            latest,
-                            latestSameMajor,
-                            upgradePathVersions,
-                            !latest.contains("SNAPSHOT"),
-                            now,
-                            metadataUrl,
-                            true,
-                            CacheState.FRESH,
-                            MetadataStatus.FRESH);
-                    cache.put(cacheKey, CacheEntry.fresh(versions, latest, metadataUrl, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
-                    LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest);
-                    return metadata;
+                    VersionMetadata result = succeedWithVersions(allVersions, metadataUrl, coordinate, currentVersion, now, cacheKey);
+                    if (result != null) return result;
+                    lastStatus = MetadataStatus.PROVIDER_ERROR;
+                    LOGGER.warning(() -> "No usable version in metadata at " + metadataUrl);
+                    continue;
                 }
                 if (status == 404) {
                     lastStatus = MetadataStatus.MISSING;
@@ -166,6 +158,41 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return metadata;
     }
 
+    private VersionMetadata succeedWithVersions(List<String> allVersions, String source,
+            ComponentCoordinate coordinate, String currentVersion, Instant now, String cacheKey) {
+        List<String> versions = allVersions.stream()
+                .filter(v -> !isPreRelease(v))
+                .collect(java.util.stream.Collectors.toList());
+        if (versions.isEmpty()) versions = allVersions;
+        String latest = versions.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
+        if (latest == null || latest.isBlank()) return null;
+        List<String> upgradePathVersions = upgradePathVersions(versions, currentVersion);
+        String latestSameMajor = latestSameMajorVersion(versions, currentVersion, latest);
+        VersionMetadata metadata = new VersionMetadata(
+                coordinate, latest, latestSameMajor, upgradePathVersions,
+                !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
+        cache.put(cacheKey, CacheEntry.fresh(versions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
+        LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest);
+        return metadata;
+    }
+
+    private static List<String> readLocalMetadata(String fileUrl, ComponentCoordinate coordinate) throws Exception {
+        java.net.URI base = java.net.URI.create(fileUrl);
+        java.nio.file.Path metadataPath = java.nio.file.Path.of(base);
+        for (String part : coordinate.groupId().split("\\.")) {
+            metadataPath = metadataPath.resolve(part);
+        }
+        java.nio.file.Path finalPath = metadataPath.resolve(coordinate.artifactId()).resolve("maven-metadata.xml");
+        if (!java.nio.file.Files.exists(finalPath)) {
+            LOGGER.info(() -> "No local Maven metadata at " + finalPath);
+            return List.of();
+        }
+        LOGGER.info(() -> "Reading local Maven metadata from " + finalPath);
+        metadataPath = finalPath;
+        String xml = java.nio.file.Files.readString(metadataPath, StandardCharsets.UTF_8);
+        return parseVersions(xml);
+    }
+
     private static List<String> parseRepositoryBases(String baseUrl) {
         if (baseUrl == null || baseUrl.isBlank()) {
             return List.of("https://repo1.maven.org/maven2");
@@ -199,7 +226,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return url.toLowerCase().contains("/artifactory");
     }
 
-    private static String artifactoryGavcUrl(String repoUrl, ComponentCoordinate coordinate) {
+    private static String artifactoryVersionsUrl(String repoUrl, ComponentCoordinate coordinate) {
         String lower = repoUrl.toLowerCase();
         int idx = lower.indexOf("/artifactory");
         String base = idx >= 0 ? repoUrl.substring(0, idx + "/artifactory".length()) : repoUrl;
@@ -208,7 +235,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         if (after.endsWith("/")) after = after.substring(0, after.length() - 1);
         int nextSlash = after.indexOf('/');
         String repo = nextSlash >= 0 ? after.substring(0, nextSlash) : after;
-        String url = base + "/api/search/gavc?g=" + urlEncode(coordinate.groupId())
+        String url = base + "/api/search/versions?g=" + urlEncode(coordinate.groupId())
                 + "&a=" + urlEncode(coordinate.artifactId());
         if (!repo.isBlank()) url += "&repos=" + urlEncode(repo);
         return url;
@@ -223,40 +250,39 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     }
 
     /**
-     * Parses the Artifactory GAVC search JSON response.
-     * Response format: {"results":[{"uri":"https://.../artifactId/version/file.ext"},...]}
-     * Version is extracted as the second-to-last path segment in each URI.
+     * Parses the Artifactory /api/search/versions JSON response.
+     * Response format: {"results":[{"version":"1.0.0","integration":false},...]}
+     * Entries with "integration":true are SNAPSHOT/integration builds and are excluded;
+     * the downstream isPreRelease filter handles any that slip through via the version string.
      */
-    private static List<String> parseGavcVersions(String json) {
+    private static List<String> parseArtifactoryVersions(String json) {
         List<String> versions = new ArrayList<>();
         java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
         int i = 0;
         while (true) {
-            i = json.indexOf("\"uri\"", i);
+            i = json.indexOf("\"version\"", i);
             if (i < 0) break;
-            int colon = json.indexOf(':', i + 5);
+            // Locate the enclosing result object to check both fields regardless of field order
+            int objStart = json.lastIndexOf('{', i);
+            int colon = json.indexOf(':', i + 9);
             if (colon < 0) break;
             int q1 = json.indexOf('"', colon + 1);
             if (q1 < 0) break;
             int q2 = json.indexOf('"', q1 + 1);
             if (q2 < 0) break;
-            String uri = json.substring(q1 + 1, q2);
-            String version = versionFromGavcUri(uri);
-            if (version != null && !version.isBlank() && seen.add(version)) {
+            String version = json.substring(q1 + 1, q2);
+            int objEnd = json.indexOf('}', q2);
+            boolean integration = false;
+            if (objStart >= 0 && objEnd > objStart) {
+                String obj = json.substring(objStart, objEnd + 1);
+                integration = obj.contains("\"integration\":true") || obj.contains("\"integration\": true");
+            }
+            if (!version.isBlank() && !integration && seen.add(version)) {
                 versions.add(version);
             }
             i = q2 + 1;
         }
         return versions;
-    }
-
-    private static String versionFromGavcUri(String uri) {
-        String s = uri.endsWith("/") ? uri.substring(0, uri.length() - 1) : uri;
-        int last = s.lastIndexOf('/');
-        if (last <= 0) return null;
-        int prev = s.lastIndexOf('/', last - 1);
-        if (prev < 0) return null;
-        return s.substring(prev + 1, last);
     }
 
     private static List<String> parseVersions(String xml) throws Exception {
