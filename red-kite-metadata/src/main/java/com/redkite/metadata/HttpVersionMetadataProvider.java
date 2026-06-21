@@ -83,7 +83,6 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             String metadataUrl = artif
                     ? artifactoryVersionsUrl(repositoryBaseUrl, coordinate)
                     : metadataUrl(repositoryBaseUrl, coordinate);
-            LOGGER.info(() -> "Querying Maven repository for version metadata: " + metadataUrl);
             try {
                 var requestBuilder = java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
                         .GET()
@@ -97,23 +96,37 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 java.net.http.HttpRequest request = requestBuilder.build();
                 java.net.http.HttpResponse<String> response = CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 int status = response.statusCode();
-                LOGGER.info(() -> "Maven repository response for " + metadataUrl + " => HTTP " + status);
                 if (status == 200) {
                     List<String> allVersions = artif
                             ? parseArtifactoryVersions(response.body())
                             : parseVersions(response.body());
+                    if (allVersions.isEmpty()) {
+                        String body = response.body();
+                        LOGGER.warning(() -> "0 versions returned for "
+                                + coordinate.groupId() + ":" + coordinate.artifactId()
+                                + " — URI: " + metadataUrl
+                                + " — body: " + (body.length() > 800 ? body.substring(0, 800) + "…" : body));
+                        lastStatus = MetadataStatus.MISSING;
+                        continue;
+                    }
                     VersionMetadata result = succeedWithVersions(allVersions, metadataUrl, coordinate, currentVersion, now, cacheKey);
                     if (result != null) return result;
+                    // Had versions but none passed the stable filter
+                    int count = allVersions.size();
+                    LOGGER.warning(() -> count + " versions found for "
+                            + coordinate.groupId() + ":" + coordinate.artifactId()
+                            + " but none are stable releases — URI: " + metadataUrl
+                            + " — versions: " + allVersions.subList(0, Math.min(10, count)));
                     lastStatus = MetadataStatus.PROVIDER_ERROR;
-                    LOGGER.warning(() -> "No usable version in metadata at " + metadataUrl);
                     continue;
                 }
                 if (status == 404) {
+                    LOGGER.info(() -> "404 not found — URI: " + metadataUrl);
                     lastStatus = MetadataStatus.MISSING;
                     continue;
                 }
                 if (status == 429) {
-                    LOGGER.warning(() -> "Maven metadata request rate-limited by " + metadataUrl);
+                    LOGGER.warning(() -> "Rate-limited — URI: " + metadataUrl);
                     VersionMetadata metadata = new VersionMetadata(
                             coordinate,
                             "unknown",
@@ -128,9 +141,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                     cache.put(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl, now.plus(NEGATIVE_TTL), MetadataStatus.RATE_LIMITED, false));
                     return metadata;
                 }
+                LOGGER.warning(() -> "Unexpected HTTP " + status + " — URI: " + metadataUrl);
                 lastStatus = MetadataStatus.PROVIDER_ERROR;
             } catch (Exception e) {
-                LOGGER.warning(() -> "Maven metadata fetch failed for " + metadataUrl + ": " + e.getMessage());
+                LOGGER.warning(() -> "Request failed — URI: " + metadataUrl + " — " + e.getMessage());
                 lastStatus = MetadataStatus.PROVIDER_ERROR;
             }
         }
