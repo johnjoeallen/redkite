@@ -10,6 +10,6 @@ public record ReportSummary(
         int lowCount,
         int unknownCount,
         int snapshotCount,
-        int directVersionWarningCount,
+        int declaredVersionWarningCount,
         int staleMetadataCount) {
 }

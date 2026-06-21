@@ -66,14 +66,14 @@ class RemediationClassifierTest {
         ScanComponent comp = component(1L, false, true, VersionSource.LITERAL);
         RemediationStatus status = RemediationClassifier.classify(comp, List.of(), List.of(), List.of());
         assertTrue(status.needsRemediation());
-        assertTrue(status.hasDirectVersionDeclaration());
+        assertTrue(status.hasDeclaredVersionDeclaration());
     }
 
     @Test
     void transitiveInlineVersionIsNotFlagged() {
         ScanComponent comp = component(1L, false, false, VersionSource.LITERAL);
         RemediationStatus status = RemediationClassifier.classify(comp, List.of(), List.of(), List.of());
-        assertFalse(status.hasDirectVersionDeclaration());
+        assertFalse(status.hasDeclaredVersionDeclaration());
     }
 
     @Test
@@ -131,7 +131,7 @@ class RemediationClassifierTest {
                 comp, List.of(), List.of(), List.of(freshMetadata(1L)));
         assertFalse(status.needsRemediation());
         assertFalse(status.isSnapshot());
-        assertFalse(status.hasDirectVersionDeclaration());
+        assertFalse(status.hasDeclaredVersionDeclaration());
         assertFalse(status.hasVulnerability());
         assertFalse(status.hasUpgradeRecommendation());
         assertFalse(status.hasStaleMetadata());

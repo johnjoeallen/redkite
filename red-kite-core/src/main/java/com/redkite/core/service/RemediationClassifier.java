@@ -21,9 +21,9 @@ public final class RemediationClassifier {
         boolean isSnapshot = component.snapshot();
         if (isSnapshot) reasons.add("Snapshot dependency");
 
-        boolean hasDirectVersion = component.direct()
+        boolean hasDeclaredVersion = component.direct()
                 && component.versionSource() == VersionSource.LITERAL;
-        if (hasDirectVersion) reasons.add("Direct inline version declaration");
+        if (hasDeclaredVersion) reasons.add("Declared inline version");
 
         List<VulnerabilityFinding> componentFindings = findingsFor(component, allFindings);
         boolean hasVulnerability = !componentFindings.isEmpty();
@@ -40,11 +40,11 @@ public final class RemediationClassifier {
         boolean hasStaleMetadata = hasStaleMetadataFor(component, allMetadata);
         if (hasStaleMetadata) reasons.add("Stale or incomplete metadata");
 
-        boolean needsRemediation = isSnapshot || hasDirectVersion || hasVulnerability
+        boolean needsRemediation = isSnapshot || hasDeclaredVersion || hasVulnerability
                 || hasRecommendation || hasStaleMetadata;
 
         return new RemediationStatus(component.id(), needsRemediation, isSnapshot,
-                hasDirectVersion, hasVulnerability, hasRecommendation, hasStaleMetadata,
+                hasDeclaredVersion, hasVulnerability, hasRecommendation, hasStaleMetadata,
                 highestSeverity, componentFindings.size(), List.copyOf(reasons));
     }
 
@@ -53,7 +53,7 @@ public final class RemediationClassifier {
         int total = 0;
         int needsRemediationCount = 0;
         int snapshotCount = 0;
-        int directVersionCount = 0;
+        int declaredVersionCount = 0;
         int staleMetadataCount = 0;
 
         for (ScanComponent component : report.components()) {
@@ -66,7 +66,7 @@ public final class RemediationClassifier {
                     report.metadataResults());
             if (status.needsRemediation()) needsRemediationCount++;
             if (status.isSnapshot()) snapshotCount++;
-            if (status.hasDirectVersionDeclaration()) directVersionCount++;
+            if (status.hasDeclaredVersionDeclaration()) declaredVersionCount++;
             if (status.hasStaleMetadata()) staleMetadataCount++;
         }
 
@@ -85,7 +85,7 @@ public final class RemediationClassifier {
 
         return new ReportSummary(total, needsRemediationCount, total - needsRemediationCount,
                 criticalCount, highCount, mediumCount, lowCount, unknownCount,
-                snapshotCount, directVersionCount, staleMetadataCount);
+                snapshotCount, declaredVersionCount, staleMetadataCount);
     }
 
     private static List<VulnerabilityFinding> findingsFor(

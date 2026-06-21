@@ -233,6 +233,47 @@ public class MavenProjectScanner {
                 }
             }
         }
+        // If this dep appears only as transitive in the tree but is already declared
+        // directly in any POM (same module or parent), use that direct component.
+        // This handles: (a) BOM-managed deps with no version in the POM, and (b) deps
+        // declared in a parent POM whose depth-1 tree entry was omitted by conflict resolution.
+        // Same-module declarations take priority; cross-module ones are used as fallback.
+        if (!direct) {
+            ScanComponent sameModule = null;
+            ScanComponent anyModule = null;
+            for (ScanComponent component : componentsByKey.values()) {
+                if (!component.direct()) continue;
+                if (!component.coordinate().groupId().equals(node.groupId())) continue;
+                if (!component.coordinate().artifactId().equals(node.artifactId())) continue;
+                if (sourceFile.equals(component.sourceFilePath())) {
+                    sameModule = component;
+                    break;
+                }
+                if (anyModule == null) anyModule = component;
+            }
+            ScanComponent match = sameModule != null ? sameModule : anyModule;
+            if (match != null) {
+                if (!isUnknownVersion(node.version()) && isUnknownVersion(match.version())) {
+                    ScanComponent resolved = new ScanComponent(
+                            match.id(),
+                            match.coordinate(),
+                            node.version(),
+                            match.scope(),
+                            true,
+                            match.versionSource(),
+                            match.sourceFilePath(),
+                            match.declarationPath(),
+                            match.properties(),
+                            node.version().contains("SNAPSHOT"),
+                            match.owningVersionControlPoint(),
+                            match.modulePath());
+                    replaceComponent(componentsByKey, match, resolved);
+                    LOGGER.info(() -> "Resolved version for declared dependency " + node.groupId() + ":" + node.artifactId() + " from transitive tree entry: " + node.version());
+                    return resolved;
+                }
+                return match;
+            }
+        }
         String key = direct ? directKey(sourceFile, node.groupId(), node.artifactId()) : componentKey(sourceFile, node.groupId(), node.artifactId(), node.version(), false);
         ScanComponent existing = componentsByKey.get(key);
         if (existing != null) {

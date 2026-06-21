@@ -32,9 +32,17 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     private final List<String> repositoryBaseUrls;
     private final Map<String, CacheEntry> cache = new LinkedHashMap<>();
+    private final String username;
+    private final String password;
 
     public HttpVersionMetadataProvider(String baseUrl) {
+        this(baseUrl, null, null);
+    }
+
+    public HttpVersionMetadataProvider(String baseUrl, String username, String password) {
         this.repositoryBaseUrls = parseRepositoryBases(baseUrl);
+        this.username = username;
+        this.password = password;
     }
 
     @Override
@@ -58,19 +66,29 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         }
         MetadataStatus lastStatus = MetadataStatus.PROVIDER_ERROR;
         for (String repositoryBaseUrl : repositoryBaseUrls) {
-            String metadataUrl = metadataUrl(repositoryBaseUrl, coordinate);
+            boolean artif = isArtifactoryUrl(repositoryBaseUrl);
+            String metadataUrl = artif
+                    ? artifactoryGavcUrl(repositoryBaseUrl, coordinate)
+                    : metadataUrl(repositoryBaseUrl, coordinate);
             LOGGER.info(() -> "Querying Maven repository for version metadata: " + metadataUrl);
             try {
-                java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
+                var requestBuilder = java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
                         .GET()
-                        .header("Accept", "application/xml,text/xml,*/*")
-                        .timeout(java.time.Duration.ofSeconds(20))
-                        .build();
+                        .header("Accept", artif ? "application/json" : "application/xml,text/xml,*/*")
+                        .timeout(java.time.Duration.ofSeconds(20));
+                if (username != null && !username.isBlank()) {
+                    String encoded = java.util.Base64.getEncoder().encodeToString(
+                            (username + ":" + (password != null ? password : "")).getBytes(StandardCharsets.UTF_8));
+                    requestBuilder.header("Authorization", "Basic " + encoded);
+                }
+                java.net.http.HttpRequest request = requestBuilder.build();
                 java.net.http.HttpResponse<String> response = CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 int status = response.statusCode();
                 LOGGER.info(() -> "Maven repository response for " + metadataUrl + " => HTTP " + status);
                 if (status == 200) {
-                    List<String> allVersions = parseVersions(response.body());
+                    List<String> allVersions = artif
+                            ? parseGavcVersions(response.body())
+                            : parseVersions(response.body());
                     List<String> versions = allVersions.stream()
                             .filter(v -> !isPreRelease(v))
                             .collect(java.util.stream.Collectors.toList());
@@ -175,6 +193,70 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     private static String metadataUrl(String repositoryBaseUrl, ComponentCoordinate coordinate) {
         String groupPath = coordinate.groupId().replace('.', '/');
         return repositoryBaseUrl + "/" + groupPath + "/" + coordinate.artifactId() + "/maven-metadata.xml";
+    }
+
+    private static boolean isArtifactoryUrl(String url) {
+        return url.toLowerCase().contains("/artifactory");
+    }
+
+    private static String artifactoryGavcUrl(String repoUrl, ComponentCoordinate coordinate) {
+        String lower = repoUrl.toLowerCase();
+        int idx = lower.indexOf("/artifactory");
+        String base = idx >= 0 ? repoUrl.substring(0, idx + "/artifactory".length()) : repoUrl;
+        String after = idx >= 0 ? repoUrl.substring(idx + "/artifactory".length()) : "";
+        if (after.startsWith("/")) after = after.substring(1);
+        if (after.endsWith("/")) after = after.substring(0, after.length() - 1);
+        int nextSlash = after.indexOf('/');
+        String repo = nextSlash >= 0 ? after.substring(0, nextSlash) : after;
+        String url = base + "/api/search/gavc?g=" + urlEncode(coordinate.groupId())
+                + "&a=" + urlEncode(coordinate.artifactId());
+        if (!repo.isBlank()) url += "&repos=" + urlEncode(repo);
+        return url;
+    }
+
+    private static String urlEncode(String s) {
+        try {
+            return java.net.URLEncoder.encode(s, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return s;
+        }
+    }
+
+    /**
+     * Parses the Artifactory GAVC search JSON response.
+     * Response format: {"results":[{"uri":"https://.../artifactId/version/file.ext"},...]}
+     * Version is extracted as the second-to-last path segment in each URI.
+     */
+    private static List<String> parseGavcVersions(String json) {
+        List<String> versions = new ArrayList<>();
+        java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+        int i = 0;
+        while (true) {
+            i = json.indexOf("\"uri\"", i);
+            if (i < 0) break;
+            int colon = json.indexOf(':', i + 5);
+            if (colon < 0) break;
+            int q1 = json.indexOf('"', colon + 1);
+            if (q1 < 0) break;
+            int q2 = json.indexOf('"', q1 + 1);
+            if (q2 < 0) break;
+            String uri = json.substring(q1 + 1, q2);
+            String version = versionFromGavcUri(uri);
+            if (version != null && !version.isBlank() && seen.add(version)) {
+                versions.add(version);
+            }
+            i = q2 + 1;
+        }
+        return versions;
+    }
+
+    private static String versionFromGavcUri(String uri) {
+        String s = uri.endsWith("/") ? uri.substring(0, uri.length() - 1) : uri;
+        int last = s.lastIndexOf('/');
+        if (last <= 0) return null;
+        int prev = s.lastIndexOf('/', last - 1);
+        if (prev < 0) return null;
+        return s.substring(prev + 1, last);
     }
 
     private static List<String> parseVersions(String xml) throws Exception {

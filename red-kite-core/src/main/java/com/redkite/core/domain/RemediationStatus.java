@@ -6,7 +6,7 @@ public record RemediationStatus(
         long componentId,
         boolean needsRemediation,
         boolean isSnapshot,
-        boolean hasDirectVersionDeclaration,
+        boolean hasDeclaredVersionDeclaration,
         boolean hasVulnerability,
         boolean hasUpgradeRecommendation,
         boolean hasStaleMetadata,

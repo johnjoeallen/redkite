@@ -3,6 +3,7 @@ package com.redkite.server;
 import com.redkite.core.domain.*;
 import com.redkite.core.service.SerializationSupport;
 import com.redkite.maven.MavenProjectScanner;
+import com.redkite.maven.MavenSettingsReader;
 import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
@@ -747,7 +748,8 @@ public class RedKiteServerMain {
             RemediationStatus status,
             MetadataResult versionMetadata,
             UpgradeRecommendation recommendation,
-            List<VulnerabilityFinding> findings) {}
+            List<VulnerabilityFinding> findings,
+            boolean canUpgradeViaDirect) {}
 
     private String renderRemediationView(ScanReport report, long scanId, boolean pomExists, Map<String, String> moduleArtifactIds) {
         ReportSummary summary = RemediationClassifier.summarize(report);
@@ -809,7 +811,20 @@ public class RedKiteServerMain {
             UpgradeRecommendation rec = recByComponent.get(c.id());
             List<VulnerabilityFinding> vulns = vulnsByKey.getOrDefault(
                     c.coordinate().groupId() + ":" + c.coordinate().artifactId() + "@" + c.version(), List.of());
-            views.add(new ComponentView(c, status, versionMeta, rec, vulns));
+            boolean canUpgradeViaDirect = false;
+            if (!c.direct() && rec != null) {
+                for (long parentId : parentIdsByChild.getOrDefault(c.id(), List.of())) {
+                    ScanComponent parent = componentsById.get(parentId);
+                    if (parent != null && parent.direct()) {
+                        UpgradeRecommendation parentRec = recByComponent.get(parentId);
+                        if (parentRec != null && sameMajor(parent.version(), parentRec.targetVersion())) {
+                            canUpgradeViaDirect = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect));
         }
 
         // Sort: CRITICAL → HIGH → MEDIUM → LOW → UNKNOWN advisory → SNAPSHOT → STALE → VERSION_MGMT → UPGRADE → CLEAN
@@ -856,17 +871,22 @@ public class RedKiteServerMain {
             byModule.computeIfAbsent(mod, k -> new ArrayList<>()).add(v);
         }
 
-        // Module dropdown
+        // Module dropdown — root POM (shallowest path, typically "pom.xml") listed first
         if (byModule.size() > 1) {
-            String firstModule = byModule.entrySet().stream()
-                    .filter(e -> !e.getValue().isEmpty())
-                    .map(Map.Entry::getKey)
+            List<String> moduleOrder = new ArrayList<>(byModule.keySet());
+            moduleOrder.sort((a, b) -> {
+                int depthA = a.equals("(root)") ? 0 : (int) a.chars().filter(c -> c == '/').count();
+                int depthB = b.equals("(root)") ? 0 : (int) b.chars().filter(c -> c == '/').count();
+                if (depthA != depthB) return Integer.compare(depthA, depthB);
+                return a.compareTo(b);
+            });
+            String firstModule = moduleOrder.stream()
+                    .filter(m -> !byModule.getOrDefault(m, List.of()).isEmpty())
                     .findFirst()
-                    .orElse(byModule.keySet().iterator().next());
+                    .orElse(moduleOrder.get(0));
             html.append("<script>remModule=").append(jsString(firstModule)).append(";</script>");
             html.append("<select class=\"rem-module-select\" onchange=\"filterRemediationModule(this.value)\">");
-            for (Map.Entry<String, List<ComponentView>> entry : byModule.entrySet()) {
-                String mod = entry.getKey();
+            for (String mod : moduleOrder) {
                 String label = moduleArtifactIds.getOrDefault(mod, modulePathLabel(mod));
                 html.append("<option value=\"").append(escape(mod)).append("\"")
                         .append(mod.equals(firstModule) ? " selected" : "").append(">")
@@ -980,7 +1000,7 @@ public class RedKiteServerMain {
         String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "direct" : "transitive";
         boolean upgradeOnly = status.hasUpgradeRecommendation()
                 && !status.hasVulnerability() && !status.isSnapshot()
-                && !status.hasDirectVersionDeclaration() && !status.hasStaleMetadata();
+                && !status.hasDeclaredVersionDeclaration() && !status.hasStaleMetadata();
         html.append("<div class=\"rem-card").append(clean ? " clean" : "").append("\" data-clean=\"").append(clean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
@@ -1040,7 +1060,8 @@ public class RedKiteServerMain {
                         .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
                         .append("Upgrade available</button>");
                 } else {
-                    html.append("<span class=\"reason-chip\">Upgradable via direct</span>");
+                    String transitiveChip = view.canUpgradeViaDirect() ? "Upgradable via direct" : "Needs major bump on direct";
+                    html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");
                 }
             }
             html.append("</div>");
@@ -1097,7 +1118,7 @@ public class RedKiteServerMain {
         }
         if (status.isSnapshot()) return 50;
         if (status.hasStaleMetadata()) return 60;
-        if (status.hasDirectVersionDeclaration()) return 70;
+        if (status.hasDeclaredVersionDeclaration()) return 70;
         if (status.hasUpgradeRecommendation()) return 80;
         return 90;
     }
@@ -1141,17 +1162,17 @@ public class RedKiteServerMain {
         String recommendedVersion = recommendation != null ? recommendation.targetVersion() : null;
         String latestVersion = versionMetadata != null ? versionMetadata.latestVersion() : null;
         String latestSameMajor = versionMetadata != null ? versionMetadata.latestSameMajorVersion() : null;
-        String effectiveSelected = selectedVersion != null ? selectedVersion : recommendedVersion;
 
         String nameAttr = includeNameAttr ? " name=\"" + escape(selectorId) + "\"" : "";
-        html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr).append(">");
+        html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr)
+                .append(" onchange=\"this.dataset.chosen='true'\">");
+        // Blank placeholder — dep is only included in Apply when the user explicitly picks a version
+        html.append("<option value=\"\" selected>Select version…</option>");
         for (String version : ordered) {
-            boolean isSelected = version.equals(effectiveSelected);
             boolean hasCve = hasCveForVersion(coordinate, version, vulnFindings);
             String label = buildVersionOptionLabel(version, recommendedVersion, latestVersion, latestSameMajor,
                     recommendation != null ? recommendation.reason() : null, hasCve, currentVersion);
             html.append("<option value=\"").append(escape(version)).append("\"")
-                    .append(isSelected ? " selected" : "")
                     .append(">").append(escape(label)).append("</option>");
         }
         html.append("</select>");
@@ -1182,6 +1203,13 @@ public class RedKiteServerMain {
         String[] p1 = v1.split("\\.", 3);
         String[] p2 = v2.split("\\.", 3);
         return p1.length >= 2 && p2.length >= 2 && p1[0].equals(p2[0]) && p1[1].equals(p2[1]);
+    }
+
+    private boolean sameMajor(String v1, String v2) {
+        if (v1 == null || v2 == null) return false;
+        String[] p1 = v1.split("[.\\-]", 2);
+        String[] p2 = v2.split("[.\\-]", 2);
+        return p1.length >= 1 && p2.length >= 1 && !p1[0].isBlank() && p1[0].equals(p2[0]);
     }
 
     private String renderDependencyInventory(ScanReport report) {
@@ -1732,7 +1760,24 @@ public class RedKiteServerMain {
             this.jdbcUrl = jdbcUrl;
             this.dbUser = dbUser;
             this.dbPassword = dbPassword;
-            this.versionProvider = new HttpVersionMetadataProvider(System.getProperty("redkite.maven.repositories", "https://repo1.maven.org/maven2"));
+            String mavenRepos = System.getProperty("redkite.maven.repositories");
+            if (mavenRepos != null) {
+                this.versionProvider = new HttpVersionMetadataProvider(mavenRepos);
+            } else {
+                List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs();
+                String urls = repoConfigs.stream()
+                        .map(MavenSettingsReader.RepoConfig::url)
+                        .collect(java.util.stream.Collectors.joining(","));
+                String repoUser = null, repoPass = null;
+                for (MavenSettingsReader.RepoConfig cfg : repoConfigs) {
+                    if (cfg.username() != null && !cfg.username().isBlank()) {
+                        repoUser = cfg.username();
+                        repoPass = cfg.password();
+                        break;
+                    }
+                }
+                this.versionProvider = new HttpVersionMetadataProvider(urls, repoUser, repoPass);
+            }
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
             initializeSchema();
         }
