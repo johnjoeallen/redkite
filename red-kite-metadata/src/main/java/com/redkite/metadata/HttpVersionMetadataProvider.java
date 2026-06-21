@@ -160,18 +160,24 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     private VersionMetadata succeedWithVersions(List<String> allVersions, String source,
             ComponentCoordinate coordinate, String currentVersion, Instant now, String cacheKey) {
-        List<String> versions = allVersions.stream()
-                .filter(v -> !isPreRelease(v))
+        // Only plain numeric releases are eligible as recommendation targets.
+        // Timestamped snapshots, qualifiers (-alpha, -RC, etc.) are excluded here even
+        // if the version comparator would rank them above the current version.
+        List<String> stableVersions = allVersions.stream()
+                .filter(HttpVersionMetadataProvider::isStableVersion)
                 .collect(java.util.stream.Collectors.toList());
-        if (versions.isEmpty()) versions = allVersions;
-        String latest = versions.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
+        // Fall back to all if the library publishes only non-stable versions (edge case).
+        List<String> versionsForRec = stableVersions.isEmpty() ? allVersions : stableVersions;
+        String latest = versionsForRec.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
         if (latest == null || latest.isBlank()) return null;
-        List<String> upgradePathVersions = upgradePathVersions(versions, currentVersion);
-        String latestSameMajor = latestSameMajorVersion(versions, currentVersion, latest);
+        String latestSameMajor = latestSameMajorVersion(versionsForRec, currentVersion, latest);
+        // Dropdown retains all versions (including non-stable) for manual selection.
+        List<String> upgradePathVersions = upgradePathVersions(allVersions, currentVersion);
         VersionMetadata metadata = new VersionMetadata(
                 coordinate, latest, latestSameMajor, upgradePathVersions,
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
-        cache.put(cacheKey, CacheEntry.fresh(versions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
+        // Cache stores all versions so the dropdown stays complete on cache hit.
+        cache.put(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
         LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest);
         return metadata;
     }
@@ -207,6 +213,19 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return bases.isEmpty() ? List.of("https://repo1.maven.org/maven2") : List.copyOf(bases);
     }
 
+    private static final java.util.regex.Pattern STABLE_VERSION_PATTERN =
+            java.util.regex.Pattern.compile("^\\d+(?:\\.\\d+){1,3}$");
+
+    /**
+     * Returns true only for plain numeric releases: 1, 1.2, 1.2.3, or 1.2.3.4.
+     * Any qualifier (SNAPSHOT, -RC1, -alpha, timestamped builds like
+     * 3.18.1-20250709.213312-1, .Final, .RELEASE, etc.) returns false.
+     */
+    static boolean isStableVersion(String version) {
+        if (version == null || version.isBlank()) return false;
+        return STABLE_VERSION_PATTERN.matcher(version.trim()).matches();
+    }
+
     static boolean isPreRelease(String version) {
         if (version == null || version.isBlank()) return false;
         String v = version.toLowerCase();
@@ -230,15 +249,11 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         String lower = repoUrl.toLowerCase();
         int idx = lower.indexOf("/artifactory");
         String base = idx >= 0 ? repoUrl.substring(0, idx + "/artifactory".length()) : repoUrl;
-        String after = idx >= 0 ? repoUrl.substring(idx + "/artifactory".length()) : "";
-        if (after.startsWith("/")) after = after.substring(1);
-        if (after.endsWith("/")) after = after.substring(0, after.length() - 1);
-        int nextSlash = after.indexOf('/');
-        String repo = nextSlash >= 0 ? after.substring(0, nextSlash) : after;
-        String url = base + "/api/search/versions?g=" + urlEncode(coordinate.groupId())
+        // Omit repos= so the search covers all accessible repositories — both internal
+        // and external cached ones. Passing a virtual repo name (e.g. maven-all) restricts
+        // results to that repo's index and misses internal artifacts not present in it.
+        return base + "/api/search/versions?g=" + urlEncode(coordinate.groupId())
                 + "&a=" + urlEncode(coordinate.artifactId());
-        if (!repo.isBlank()) url += "&repos=" + urlEncode(repo);
-        return url;
     }
 
     private static String urlEncode(String s) {
@@ -252,8 +267,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     /**
      * Parses the Artifactory /api/search/versions JSON response.
      * Response format: {"results":[{"version":"1.0.0","integration":false},...]}
-     * Entries with "integration":true are SNAPSHOT/integration builds and are excluded;
-     * the downstream isPreRelease filter handles any that slip through via the version string.
+     * Entries with "integration":true are SNAPSHOT/integration builds and are excluded here;
+     * the downstream isStableVersion filter handles any remaining non-stable strings.
      */
     private static List<String> parseArtifactoryVersions(String json) {
         List<String> versions = new ArrayList<>();
@@ -492,14 +507,19 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         }
 
         VersionMetadata toMetadata(ComponentCoordinate coordinate, String currentVersion, Instant now) {
-            String latestSameMajor = latestSameMajorVersion(versions, currentVersion, latestVersion);
+            // Re-apply stable filter for recommendation — cache stores all versions
+            List<String> stable = versions.stream()
+                    .filter(HttpVersionMetadataProvider::isStableVersion)
+                    .collect(java.util.stream.Collectors.toList());
+            List<String> forRec = stable.isEmpty() ? versions : stable;
             String resolvedLatest = latestVersion == null || latestVersion.isBlank() ? "unknown" : latestVersion;
+            String latestSameMajor = latestSameMajorVersion(forRec, currentVersion, resolvedLatest);
             return new VersionMetadata(
                     coordinate,
                     resolvedLatest,
                     latestSameMajor,
-                    upgradePathVersions(versions, currentVersion),
-                    resolvedLatest.contains("SNAPSHOT") ? false : true,
+                    upgradePathVersions(versions, currentVersion), // all versions for dropdown
+                    !resolvedLatest.contains("SNAPSHOT"),
                     now,
                     source,
                     complete,
