@@ -34,19 +34,19 @@ class RemediationClassifierTest {
     }
 
     private static MetadataResult freshMetadata(long componentId) {
-        return new MetadataResult(1L, componentId, MetadataType.VERSION, "maven",
+        return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
                 "1.0.0", "2.0.0", "1.9.9", List.of(), true,
                 MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, "ok");
     }
 
     private static MetadataResult staleMetadata(long componentId) {
-        return new MetadataResult(1L, componentId, MetadataType.VERSION, "maven",
+        return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
                 "1.0.0", "unknown", "unknown", List.of(), false,
                 MetadataStatus.STALE_USED, CacheState.STALE, Instant.now(), null, Instant.now(), null, "stale");
     }
 
     private static MetadataResult rateLimitedMetadata(long componentId) {
-        return new MetadataResult(1L, componentId, MetadataType.VERSION, "maven",
+        return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
                 "1.0.0", "unknown", "unknown", List.of(), false,
                 MetadataStatus.RATE_LIMITED, CacheState.MISSING, null, null, Instant.now(), null, "rate limited");
     }
@@ -144,7 +144,7 @@ class RemediationClassifierTest {
             List<VulnerabilityFinding> findings,
             List<UpgradeRecommendation> recs,
             List<MetadataResult> metadata) {
-        return new ScanReport(1L, 1L, true, "ok", Instant.now(),
+        return new ScanReport("test-scan", "test-project", true, "ok", Instant.now(),
                 components, List.of(), findings, recs, List.of(), metadata, List.of());
     }
 

@@ -181,7 +181,16 @@ public class MavenProjectScanner {
             int exit = process.waitFor();
             if (exit != 0) {
                 LOGGER.warning(() -> "mvn dependency:tree failed for " + root.relativize(pom) + " with exit " + exit + "\n" + output);
-                return List.of();
+                List<String> errors = new ArrayList<>();
+                errors.add("[BUILD_FAILED] dependency:tree failed (exit " + exit + ") for " + root.relativize(pom));
+                for (String line : output.split("\n")) {
+                    String s = line.strip();
+                    if (s.startsWith("[ERROR]") && !s.contains("[Help ") && !s.equals("[ERROR]")) {
+                        String msg = s.substring(7).strip();
+                        if (!msg.isBlank()) errors.add(msg);
+                    }
+                }
+                return errors;
             }
             TreeParseResult parseResult = parseDependencyTreeOutput(output);
             List<ParsedTreeNode> nodes = parseResult.nodes();

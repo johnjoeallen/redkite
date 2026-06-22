@@ -20,7 +20,7 @@ public class CacheAwareMetadataService {
         this.vulnerabilityProvider = vulnerabilityProvider;
     }
 
-    public List<MetadataResult> evaluateVersionMetadata(long scanId, List<ScanComponent> components, boolean offlineMode) {
+    public List<MetadataResult> evaluateVersionMetadata(String scanId, List<ScanComponent> components, boolean offlineMode) {
         List<MetadataResult> results = new ArrayList<>();
         Instant now = Instant.now();
         for (ScanComponent component : components) {
@@ -38,7 +38,7 @@ public class CacheAwareMetadataService {
         return results;
     }
 
-    public List<MetadataResult> evaluateVulnerabilities(long scanId, List<ScanComponent> components, boolean offlineMode) {
+    public List<MetadataResult> evaluateVulnerabilities(String scanId, List<ScanComponent> components, boolean offlineMode) {
         List<MetadataResult> results = new ArrayList<>();
         Instant now = Instant.now();
         for (ScanComponent component : components) {

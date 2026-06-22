@@ -27,3 +27,6 @@ replay_pid*
 .redkite-docker/
 .idea/
 data/
+target/
+**/target/
+dependency-reduced-pom.xml

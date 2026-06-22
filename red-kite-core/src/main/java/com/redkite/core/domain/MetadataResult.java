@@ -5,7 +5,7 @@ import java.time.Instant;
 import java.util.List;
 
 public record MetadataResult(
-        long scanId,
+        String scanId,
         long componentId,
         MetadataType metadataType,
         String provider,

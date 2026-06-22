@@ -2,19 +2,19 @@
 
 RedKite is a local Maven dependency scanner and upgrade assistant for checked-out Java repositories.
 
-It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and copy a ready-to-paste updated POM.
+It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
 
 ![RedKite scan report](images/screenshot.png)
 
 ## What It Does
 
 - scans Maven multi-module projects (dependencies, dependency management, and build plugins)
-- shows direct and transitive dependencies with scope and version source
+- shows declared (direct) and transitive dependencies with scope and version source
 - highlights SNAPSHOT dependencies as unverified risks
 - fetches and caches version metadata from Maven Central
 - fetches and caches vulnerability data from OSV.dev
 - recommends upgrades grouped by module with per-component version selectors
-- generates an updated POM preview in-browser — copy and paste it into the file on disk
+- generates an updated POM preview in-browser — all declared dependencies are normalised to `${artifactId.version}` property references, with upgraded versions set to the selected value
 - keeps all data on the developer machine
 
 ## Requirements
@@ -57,7 +57,9 @@ You can also click the **Scan** button next to any previously-scanned project, o
 
 ## Apply Upgrades
 
-In the scan report, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply**. A popup shows the updated POM XML. Click **Copy** and paste it into the file on disk.
+In the scan report, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply selected**. A popup shows the updated POM XML — click **Copy** to put it on the clipboard or **Write to file** to overwrite the file directly.
+
+The generated POM normalises all declared dependencies that have an explicit literal version to `${artifactId.version}` property references. Dependencies being upgraded are set to the selected version; all other declared versions are extracted as-is into properties. This keeps the applied change minimal and reviewable while moving the project towards consistent property-based version management.
 
 ## Configuration
 

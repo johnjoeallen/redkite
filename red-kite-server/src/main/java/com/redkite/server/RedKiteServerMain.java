@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -66,23 +67,56 @@ public class RedKiteServerMain {
         void handle(HttpExchange exchange) throws IOException;
     }
 
+    private static final Set<String> VALID_THEMES = Set.of("dark", "light", "ocean", "dusk", "forest", "ember");
+
     private final Store store;
     private final HttpServer server;
     private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
+    private final java.nio.file.Path prefsFile;
+    private volatile String theme = "dark";
 
     private static final class ScanJob {
         enum Status { RUNNING, DONE, ERROR }
         volatile Status status = Status.RUNNING;
         volatile String message = "Starting…";
-        volatile long scanId;
+        volatile String scanId;
         volatile String errorMessage;
     }
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
         this.store = Store.connect(jdbcUrl, dbUser, dbPassword);
+        this.prefsFile = java.nio.file.Path.of(System.getProperty("redkite.prefs.file", "./data/preferences.properties"));
+        this.theme = loadTheme();
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         this.server.setExecutor(Executors.newCachedThreadPool());
         registerContexts();
+    }
+
+    private String loadTheme() {
+        try {
+            if (!java.nio.file.Files.exists(prefsFile)) return "dark";
+            java.util.Properties p = new java.util.Properties();
+            try (var r = java.nio.file.Files.newBufferedReader(prefsFile)) { p.load(r); }
+            String t = p.getProperty("theme", "dark");
+            return VALID_THEMES.contains(t) ? t : "dark";
+        } catch (IOException e) {
+            return "dark";
+        }
+    }
+
+    private void saveTheme(String t) {
+        try {
+            java.nio.file.Files.createDirectories(prefsFile.getParent());
+            java.util.Properties p = new java.util.Properties();
+            if (java.nio.file.Files.exists(prefsFile)) {
+                try (var r = java.nio.file.Files.newBufferedReader(prefsFile)) { p.load(r); }
+            }
+            p.setProperty("theme", t);
+            try (var w = java.nio.file.Files.newBufferedWriter(prefsFile)) { p.store(w, "RedKite preferences"); }
+            this.theme = t;
+        } catch (IOException e) {
+            LOGGER.warning("Failed to save theme preference: " + e.getMessage());
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -111,6 +145,7 @@ public class RedKiteServerMain {
         server.createContext("/api/scans/pom", exchange -> safeHandle(exchange, this::handleApiScanPom));
         server.createContext("/api/scans/pom/write", exchange -> safeHandle(exchange, this::handleApiScanPomWrite));
         server.createContext("/api/metadata/clear", exchange -> safeHandle(exchange, this::handleApiMetadataClear));
+        server.createContext("/api/prefs", exchange -> safeHandle(exchange, this::handleApiPrefs));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -142,11 +177,6 @@ public class RedKiteServerMain {
         }
         StringBuilder html = new StringBuilder();
         html.append(pageShellStart(BRAND, "Projects", "Local Maven dependency scans, version checks, and upgrade planning."));
-        html.append("<div class=\"hero\">");
-        html.append("<div><h1>RedKite</h1><p>Local dependency reporting and upgrade planning for checked-out Maven repositories.</p></div>");
-        html.append("<div class=\"hero-actions\"><a class=\"button primary\" href=\"/projects\">Projects</a></div>");
-        html.append("</div>");
-
         // Scan new project section
         html.append("<section class=\"card\" style=\"margin-bottom:18px\">");
         html.append("<h2>Scan project</h2>");
@@ -208,37 +238,89 @@ public class RedKiteServerMain {
         URI uri = exchange.getRequestURI();
         String[] parts = uri.getPath().split("/");
         if (parts.length == 3) {
-            long projectId = Long.parseLong(parts[2]);
+            String projectId = parts[2];
             if (!"GET".equals(exchange.getRequestMethod())) {
                 sendText(exchange, 405, "Method not allowed");
                 return;
             }
             ProjectEntry project = store.getProject(projectId);
-            ScanEntry scan = store.latestScanForProject(projectId);
+            List<ScanEntry> scans = store.listScansForProject(projectId);
+            ScanEntry latestScan = scans.isEmpty() ? null : scans.get(scans.size() - 1);
+            java.nio.file.Path projectRoot = java.nio.file.Path.of(project.rootPath());
+            java.nio.file.Path settingsPath = MavenSettingsReader.resolveSettingsFile(projectRoot);
+            List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs(projectRoot);
+            java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
             StringBuilder html = new StringBuilder();
             html.append(pageShellStart(BRAND, project.name(), "Project dashboard"));
             html.append("<div class=\"page-grid\">");
-            html.append("<section class=\"card span-2\"><h1>").append(escape(project.name())).append("</h1><p class=\"muted\">").append(escape(project.rootPath())).append("</p></section>");
-            html.append("<section class=\"card\">");
-            html.append("<h2>Actions</h2>");
-            if (scan != null) {
-                html.append("<a class=\"button primary\" href=\"/scans/").append(scan.id()).append("\">View latest scan</a>");
+
+            // Header panel — name, path, scan button, settings, repos
+            html.append("<section class=\"card span-2\">");
+            html.append("<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap\">");
+            html.append("<div><h1>").append(escape(project.name())).append("</h1>");
+            html.append("<p class=\"muted\" style=\"margin:2px 0 0\">").append(escape(project.rootPath())).append("</p></div>");
+            html.append("<button class=\"button primary\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(project.rootPath()))).append(")\">Scan</button>");
+            html.append("</div>");
+            html.append("<div class=\"proj-meta\">");
+            html.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Settings</span>");
+            if (settingsPath != null) {
+                html.append("<code class=\"proj-meta-val\">").append(escape(settingsPath.toAbsolutePath().toString())).append("</code>");
             } else {
-                html.append("<p class=\"muted\">No scans yet.</p>");
+                html.append("<span class=\"proj-meta-val muted\">none (using Maven Central)</span>");
             }
+            html.append("</div>");
+            html.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Repositories</span>");
+            html.append("<div class=\"proj-meta-repos\">");
+            for (MavenSettingsReader.RepoConfig repo : repoConfigs) {
+                html.append("<code class=\"proj-meta-val\">").append(escape(repo.url())).append("</code>");
+            }
+            html.append("</div></div>");
+            html.append("</div>");
             html.append("</section>");
-            if (scan != null) {
-                ScanReport report = scan.report();
+
+            if (latestScan != null) {
+                ScanReport report = latestScan.report();
                 html.append("<section class=\"card\"><h2>Latest scan</h2>");
+                html.append("<p class=\"proj-meta-val muted\" style=\"margin-bottom:10px\">").append(fmt.format(latestScan.createdAt())).append("</p>");
                 html.append(statGrid(
-                        statCard("Scan", String.valueOf(scan.id())),
                         statCard("Components", String.valueOf(report.components().size())),
                         statCard("Recommendations", String.valueOf(report.recommendations().size())),
-                        statCard("Metadata", report.complete() ? "Complete" : "Incomplete")));
+                        statCard("Status", report.complete() ? "Complete" : isBuildFailed(report) ? "Failed" : "Incomplete")));
                 html.append("<p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
                 html.append("</section>");
             }
+            html.append("<section class=\"card\"><h2>Scan history</h2>");
+            if (scans.isEmpty()) {
+                html.append("<p class=\"muted\">No scans yet.</p>");
+            } else {
+                html.append("<div class=\"scan-history-list\">");
+                for (int i = scans.size() - 1; i >= 0; i--) {
+                    ScanEntry s = scans.get(i);
+                    ScanReport r = s.report();
+                    boolean failed = isBuildFailed(r);
+                    String statusLabel = r.complete() ? "Complete" : failed ? "Failed" : "Incomplete";
+                    String statusClass = r.complete() ? "success" : failed ? "scan-failed" : "warn";
+                    html.append("<a class=\"scan-history-row\" href=\"/scans/").append(s.id()).append("\">");
+                    html.append("<span class=\"scan-history-ts\">").append(fmt.format(s.createdAt())).append("</span>");
+                    html.append("<span class=\"badge ").append(statusClass).append("\">").append(statusLabel).append("</span>");
+                    if (i == scans.size() - 1) html.append("<span class=\"scan-history-latest\">latest</span>");
+                    html.append("</a>");
+                }
+                html.append("</div>");
+            }
+            html.append("</section>");
             html.append("</div>");
+
+            // Scan overlay
+            html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\">");
+            html.append("<div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div>");
+            html.append("<span>Scanning&hellip;</span>");
+            html.append("<span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span>");
+            html.append("</div></div>");
+            html.append("<script>");
+            html.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
+            html.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
+            html.append("</script>");
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
             return;
@@ -250,7 +332,7 @@ public class RedKiteServerMain {
         URI uri = exchange.getRequestURI();
         String[] parts = uri.getPath().split("/");
         if (parts.length == 3) {
-            long scanId = Long.parseLong(parts[2]);
+            String scanId = parts[2];
             ScanEntry scanEntry = store.getScan(scanId);
             ScanReport report = scanEntry.report();
             String projectPath = scanEntry.input().workingTreePath();
@@ -273,38 +355,21 @@ public class RedKiteServerMain {
             html.append("<div class=\"page-grid\">");
             html.append("<section class=\"card span-2\"><div class=\"headline\">");
             html.append("<div><p class=\"eyebrow\">Scan ").append(report.scanId()).append("</p><h1>Scan report</h1></div>");
-            html.append("<div style=\"display:flex;align-items:center;gap:10px\">");
-            html.append(report.complete() ? "<span class=\"badge success\">Complete</span>" : "<span class=\"badge warn\">Incomplete</span>");
-            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Rescan</button>");
-            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerFreshScan(").append(escape(jsString(projectPath))).append(")\" title=\"Clear version metadata cache then rescan\">Rescan (clear cache)</button>");
+            html.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");
+            html.append(report.complete() ? "<span class=\"badge success\">Complete</span>"
+                    : isBuildFailed(report) ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;cursor:pointer\" title=\"View report log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Failed</span>"
+                    : "<span class=\"badge warn\" style=\"cursor:pointer\" title=\"View report log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Incomplete</span>");
+            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Scan</button>");
+            html.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
             html.append("</div>");
             html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
-            html.append("<details style=\"margin-top:8px;font-size:.85rem\"><summary style=\"color:var(--muted);cursor:pointer\">Maven repositories</summary>");
-            if (store.mavenSettingsPath != null) {
-                html.append("<p style=\"margin:6px 0 2px;color:var(--muted);font-family:monospace\">").append(escape(store.mavenSettingsPath)).append("</p>");
-            }
-            html.append("<ul style=\"margin:4px 0 0 1.2em;padding:0\">");
-            for (String repo : store.effectiveMavenRepos) {
-                html.append("<li style=\"font-family:monospace\">").append(escape(repo)).append("</li>");
-            }
-            html.append("</ul></details>");
-            List<String> parseWarnings = report.treeParseWarnings() != null ? report.treeParseWarnings() : List.of();
-            if (!parseWarnings.isEmpty()) {
-                html.append("<details open style=\"margin-top:12px;background:var(--warn-bg,rgba(255,180,0,.08));border:1px solid var(--warn-line,rgba(255,180,0,.3));border-radius:8px;padding:10px 14px;font-size:.85rem\">");
-                html.append("<summary style=\"cursor:pointer;font-weight:600;color:var(--warn-text,#c97b00)\">&#9888; ").append(parseWarnings.size()).append(" unparseable dependency tree line(s) — scan is incomplete</summary>");
-                html.append("<p style=\"margin:6px 0 4px;color:var(--muted)\">These lines were returned by <code>mvn dependency:tree</code> but could not be interpreted as valid dependency coordinates. Fix the underlying POM issues and rescan.</p>");
-                html.append("<ul style=\"margin:4px 0 0 1.2em;padding:0\">");
-                for (String line : parseWarnings) {
-                    html.append("<li style=\"font-family:monospace;white-space:pre-wrap;word-break:break-all\">").append(escape(line)).append("</li>");
-                }
-                html.append("</ul></details>");
-            }
             html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
             html.append("</section>");
             html.append("<section class=\"card span-2\">");
-            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds));
+            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms));
             html.append("</section>");
             html.append("</div>");
+            html.append(renderLogModal(report, scanId));
             html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\"><div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div><span>Scanning&hellip;</span><span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span></div></div>");
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
@@ -364,7 +429,7 @@ public class RedKiteServerMain {
             case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"message\":" + jsonStr(job.message) + "}");
             case DONE -> {
                 scanJobs.remove(jobId);
-                sendJson(exchange, 200, "{\"status\":\"done\",\"scanId\":" + job.scanId + "}");
+                sendJson(exchange, 200, "{\"status\":\"done\",\"scanId\":\"" + job.scanId + "\"}");
             }
             case ERROR -> {
                 scanJobs.remove(jobId);
@@ -380,6 +445,23 @@ public class RedKiteServerMain {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
+    }
+
+    private static String parseJsonField(String json, String field) {
+        if (json == null) return null;
+        int idx = json.indexOf("\"" + field + "\"");
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + field.length() + 2);
+        if (colon < 0) return null;
+        int q1 = json.indexOf('"', colon + 1);
+        if (q1 < 0) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = q1 + 1; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '"') break;
+            sb.append(c);
+        }
+        return sb.toString();
     }
 
     private static String parseJsonPath(String json) {
@@ -410,6 +492,20 @@ public class RedKiteServerMain {
         return sb.toString();
     }
 
+    private void handleApiPrefs(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        String t = parseJsonField(readBody(exchange), "theme");
+        if (t == null || !VALID_THEMES.contains(t)) {
+            sendText(exchange, 400, "Invalid theme");
+            return;
+        }
+        saveTheme(t);
+        sendJson(exchange, 200, "{\"theme\":" + jsonStr(t) + "}");
+    }
+
     private void handleApiMetadataClear(HttpExchange exchange) throws IOException {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendText(exchange, 405, "Method not allowed");
@@ -423,8 +519,7 @@ public class RedKiteServerMain {
     private void handleApiScanPom(HttpExchange exchange) throws IOException {
         String scanIdParam = queryParam(exchange.getRequestURI().getQuery(), "scanId");
         if (scanIdParam == null) { sendText(exchange, 400, "Missing scanId"); return; }
-        long scanId;
-        try { scanId = Long.parseLong(scanIdParam); } catch (NumberFormatException e) { sendText(exchange, 400, "Bad scanId"); return; }
+        String scanId = scanIdParam;
 
         if ("POST".equals(exchange.getRequestMethod())) {
             Map<String, String> updates = parseForm(readBody(exchange));
@@ -486,8 +581,7 @@ public class RedKiteServerMain {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) { sendText(exchange, 405, "Method not allowed"); return; }
         String scanIdParam = queryParam(exchange.getRequestURI().getQuery(), "scanId");
         if (scanIdParam == null) { sendText(exchange, 400, "Missing scanId"); return; }
-        long scanId;
-        try { scanId = Long.parseLong(scanIdParam); } catch (NumberFormatException e) { sendText(exchange, 400, "Bad scanId"); return; }
+        String scanId = scanIdParam;
         String body = readBody(exchange);
         try {
             ScanEntry scan = store.getScan(scanId);
@@ -550,100 +644,90 @@ public class RedKiteServerMain {
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
         Element root = doc.getDocumentElement();
 
-        // Find or create <properties> as a direct child of root
-        Element propertiesEl = null;
-        for (int i = 0; i < root.getChildNodes().getLength(); i++) {
-            Node n = root.getChildNodes().item(i);
-            if (n instanceof Element e && "properties".equals(e.getNodeName())) {
-                propertiesEl = e;
-                break;
-            }
-        }
-        if (propertiesEl == null) {
-            propertiesEl = doc.createElement("properties");
-            // Insert before <dependencyManagement> or <dependencies> or <build>, else append
-            Node insertBefore = null;
-            for (String anchor : List.of("dependencyManagement", "dependencies", "build")) {
-                NodeList nl = root.getElementsByTagName(anchor);
-                if (nl.getLength() > 0) { insertBefore = nl.item(0); break; }
-            }
-            if (insertBefore != null) {
-                root.insertBefore(doc.createTextNode("\n  "), insertBefore);
-                root.insertBefore(propertiesEl, insertBefore);
-            } else {
-                root.appendChild(doc.createTextNode("\n  "));
-                root.appendChild(propertiesEl);
-            }
-        }
-
-        // Pre-populate known property→version from existing <properties> children
-        Map<String, String> propToVersion = new LinkedHashMap<>();
-        for (int i = 0; i < propertiesEl.getChildNodes().getLength(); i++) {
-            Node n = propertiesEl.getChildNodes().item(i);
-            if (n instanceof Element e) propToVersion.put(e.getNodeName(), e.getTextContent().trim());
-        }
-
-        // Process every <dependency> element
-        NodeList allVersionedElements = doc.getElementsByTagName("*");
+        // Collect <dependency> and <plugin> elements
+        NodeList allElements = doc.getElementsByTagName("*");
         List<Element> patchTargets = new ArrayList<>();
-        for (int i = 0; i < allVersionedElements.getLength(); i++) {
-            Node n = allVersionedElements.item(i);
+        for (int i = 0; i < allElements.getLength(); i++) {
+            Node n = allElements.item(i);
             if (n instanceof Element e && ("dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
                 patchTargets.add(e);
             }
         }
+
+        // Pass 1: register property names already claimed by existing property references,
+        // so literal-to-property normalisation in pass 2 doesn't collide with them.
+        Map<String, String> propNameForCoord = new LinkedHashMap<>();
         for (Element dep : patchTargets) {
-            String g = childText(dep, "groupId");
-            String a = childText(dep, "artifactId");
+            String g = childText(dep, "groupId"), a = childText(dep, "artifactId");
+            if (g == null || a == null) continue;
+            if ("plugin".equals(dep.getNodeName()) && g.trim().isEmpty()) g = "org.apache.maven.plugins";
+            g = g.trim(); a = a.trim();
+            Node vn = directChildVersion(dep);
+            if (vn == null) continue;
+            String vt = vn.getTextContent().trim();
+            if (vt.startsWith("${") && vt.endsWith("}"))
+                propNameForCoord.put(g + ":" + a, vt.substring(2, vt.length() - 1));
+        }
+
+        // Pass 2: apply patches.
+        // Every dependency or plugin with a literal <version> is normalised to a ${prop} reference.
+        // Deps with existing property references just have their property value updated (if upgrading).
+        // BOM-managed deps (no <version>) only get an explicit version added when upgrading.
+        // propUpgradeTo tracks what each property is being set to, so we can detect the case where
+        // two deps share a property ref but the user chose different upgrade targets for them.
+        Map<String, String> propUpgradeTo = new LinkedHashMap<>();
+        for (Element dep : patchTargets) {
+            String g = childText(dep, "groupId"), a = childText(dep, "artifactId");
             if (g == null || a == null) continue;
             if ("plugin".equals(dep.getNodeName()) && g.trim().isEmpty()) g = "org.apache.maven.plugins";
             g = g.trim(); a = a.trim();
             String coord = g + ":" + a;
+            String upgrade = versionUpdates.get(coord);
+            Node versionNode = directChildVersion(dep);
 
-            // Find <version> child node
-            Node versionNode = null;
-            for (int j = 0; j < dep.getChildNodes().getLength(); j++) {
-                Node child = dep.getChildNodes().item(j);
-                if ("version".equals(child.getNodeName())) { versionNode = child; break; }
-            }
             if (versionNode == null) {
-                // No explicit version (BOM-managed): only add one when upgrading
-                String upgrade = versionUpdates.get(coord);
+                // BOM-managed: add explicit <version> only when upgrading
                 if (upgrade != null) {
-                    String propName = a + ".version";
-                    if (propToVersion.containsKey(propName) && !propToVersion.get(propName).equals(upgrade)) {
-                        propName = g + "." + a + ".version";
-                    }
-                    setProperty(doc, propertiesEl, propName, upgrade);
-                    propToVersion.put(propName, upgrade);
                     Element versionEl = doc.createElement("version");
-                    versionEl.setTextContent("${" + propName + "}");
+                    versionEl.setTextContent(upgrade);
                     dep.appendChild(versionEl);
                 }
                 continue;
             }
+
             String versionText = versionNode.getTextContent().trim();
             if (versionText.isEmpty()) continue;
 
-            String upgrade = versionUpdates.get(coord);
-
             if (versionText.startsWith("${") && versionText.endsWith("}")) {
-                // Already a property reference — update the property value if upgrading
+                // Existing property reference: update the property value when upgrading.
+                // If two deps share the same property ref but target different versions,
+                // give the second dep its own independent property rather than silently
+                // overwriting the shared one.
                 if (upgrade != null) {
                     String propName = versionText.substring(2, versionText.length() - 1);
-                    setProperty(doc, propertiesEl, propName, upgrade);
-                    propToVersion.put(propName, upgrade);
+                    String alreadySetTo = propUpgradeTo.get(propName);
+                    if (alreadySetTo != null && !alreadySetTo.equals(upgrade)) {
+                        // Conflict: create an independent property for this dep
+                        String newPropName = assignPropName(a, g, propNameForCoord);
+                        propNameForCoord.put(coord, newPropName);
+                        setProperty(doc, findOrCreateProperties(doc, root), newPropName, upgrade);
+                        versionNode.setTextContent("${" + newPropName + "}");
+                        propUpgradeTo.put(newPropName, upgrade);
+                    } else {
+                        setProperty(doc, findOrCreateProperties(doc, root), propName, upgrade);
+                        propUpgradeTo.put(propName, upgrade);
+                    }
                 }
             } else {
-                // Literal version — normalise to a named property
+                // Literal version: normalise to a property reference.
+                // Use the upgrade version if selected, otherwise keep the current version.
                 String effectiveVersion = upgrade != null ? upgrade : versionText;
-                String propName = a + ".version";
-                // Conflict: same name already used for a different version
-                if (propToVersion.containsKey(propName) && !propToVersion.get(propName).equals(effectiveVersion)) {
-                    propName = g + "." + a + ".version";
+                String propName = propNameForCoord.get(coord);
+                if (propName == null) {
+                    propName = assignPropName(a, g, propNameForCoord);
+                    propNameForCoord.put(coord, propName);
                 }
-                setProperty(doc, propertiesEl, propName, effectiveVersion);
-                propToVersion.put(propName, effectiveVersion);
+                setProperty(doc, findOrCreateProperties(doc, root), propName, effectiveVersion);
                 versionNode.setTextContent("${" + propName + "}");
             }
         }
@@ -657,6 +741,41 @@ public class RedKiteServerMain {
         StringWriter sw = new StringWriter();
         transformer.transform(new DOMSource(doc), new StreamResult(sw));
         return sw.toString();
+    }
+
+    private static Node directChildVersion(Element dep) {
+        for (int j = 0; j < dep.getChildNodes().getLength(); j++) {
+            Node child = dep.getChildNodes().item(j);
+            if ("version".equals(child.getNodeName())) return child;
+        }
+        return null;
+    }
+
+    private static String assignPropName(String a, String g, Map<String, String> propNameForCoord) {
+        String shortName = a + ".version";
+        if (!propNameForCoord.containsValue(shortName)) return shortName;
+        return g + "." + a + ".version";
+    }
+
+    private static Element findOrCreateProperties(Document doc, Element root) {
+        for (int i = 0; i < root.getChildNodes().getLength(); i++) {
+            Node n = root.getChildNodes().item(i);
+            if (n instanceof Element e && "properties".equals(e.getNodeName())) return e;
+        }
+        Element propertiesEl = doc.createElement("properties");
+        Node insertBefore = null;
+        for (String anchor : List.of("dependencyManagement", "dependencies", "build")) {
+            NodeList nl = root.getElementsByTagName(anchor);
+            if (nl.getLength() > 0) { insertBefore = nl.item(0); break; }
+        }
+        if (insertBefore != null) {
+            root.insertBefore(doc.createTextNode("\n  "), insertBefore);
+            root.insertBefore(propertiesEl, insertBefore);
+        } else {
+            root.appendChild(doc.createTextNode("\n  "));
+            root.appendChild(propertiesEl);
+        }
+        return propertiesEl;
     }
 
     private static void stripWhitespaceNodes(Node node) {
@@ -865,7 +984,7 @@ public class RedKiteServerMain {
             List<VulnerabilityFinding> findings,
             boolean canUpgradeViaDirect) {}
 
-    private String renderRemediationView(ScanReport report, long scanId, boolean pomExists, Map<String, String> moduleArtifactIds) {
+    private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms) {
         ReportSummary summary = RemediationClassifier.summarize(report);
         List<ScanComponent> components = report.components();
         if (components.isEmpty()) {
@@ -1037,7 +1156,7 @@ public class RedKiteServerMain {
         html.append("</div>");
 
         // Emit component index + edge map for client-side tree expansion
-        html.append("<script>const rk_scanId=").append(scanId).append(";const rk_comps={");
+        html.append("<script>const rk_scanId=").append(jsonStr(scanId)).append(";const rk_comps={");
         boolean firstComp = true;
         for (ComponentView v : views) {
             if (!firstComp) html.append(",");
@@ -1051,7 +1170,7 @@ public class RedKiteServerMain {
                 .append("\"icon\":").append(jsonStr(s.highestSeverity().icon())).append(",")
                 .append("\"label\":").append(jsonStr(s.highestSeverity().label())).append(",")
                 .append("\"sev\":").append(jsonStr(s.highestSeverity().name().toLowerCase())).append(",")
-                .append("\"kind\":").append(jsonStr(c.snapshot() ? "snapshot" : c.direct() ? "direct" : "transitive")).append(",")
+                .append("\"kind\":").append(jsonStr(c.snapshot() ? "snapshot" : c.direct() ? "declared" : "transitive")).append(",")
                 .append("\"clean\":").append(!s.needsRemediation()).append(",")
                 .append("\"hasvuln\":").append(s.hasVulnerability());
             if (v.recommendation() != null && v.recommendation().targetVersion() != null) {
@@ -1080,7 +1199,71 @@ public class RedKiteServerMain {
             }
             html.append("]");
         }
-        html.append("};</script>");
+        html.append("};");
+
+        // Build rk_propGroups: "filePath:propName" → [compId, ...] for shared property references.
+        // rk_compPropKey: compId → "filePath:propName" (only for comps in a shared-prop group).
+        // Used client-side to sync sibling dropdowns when the user changes a version.
+        {
+            Map<String, Long> coordFileKey = new LinkedHashMap<>();
+            for (ScanComponent c : report.components()) {
+                if (!c.direct() || c.sourceFilePath() == null) continue;
+                coordFileKey.put(c.sourceFilePath() + "|" + c.coordinate().groupId() + ":" + c.coordinate().artifactId(), c.id());
+            }
+            Map<String, List<Long>> propGroups = new LinkedHashMap<>();
+            Map<Long, String> compPropKey = new LinkedHashMap<>();
+            for (Map.Entry<String, String> pomEntry : sourcePoms.entrySet()) {
+                String filePath = pomEntry.getKey();
+                try {
+                    var dbf2 = DocumentBuilderFactory.newInstance();
+                    dbf2.setNamespaceAware(false);
+                    Document pdoc = dbf2.newDocumentBuilder().parse(new InputSource(new StringReader(pomEntry.getValue())));
+                    NodeList nl = pdoc.getElementsByTagName("*");
+                    for (int i = 0; i < nl.getLength(); i++) {
+                        if (!(nl.item(i) instanceof Element de)) continue;
+                        if (!"dependency".equals(de.getNodeName()) && !"plugin".equals(de.getNodeName())) continue;
+                        String pg = childText(de, "groupId"), pa = childText(de, "artifactId");
+                        if (pg == null || pa == null) continue;
+                        if ("plugin".equals(de.getNodeName()) && pg.trim().isEmpty()) pg = "org.apache.maven.plugins";
+                        pg = pg.trim(); pa = pa.trim();
+                        Node pvn = directChildVersion(de);
+                        if (pvn == null) continue;
+                        String pvt = pvn.getTextContent().trim();
+                        if (!pvt.startsWith("${") || !pvt.endsWith("}")) continue;
+                        String propName = pvt.substring(2, pvt.length() - 1);
+                        Long cid = coordFileKey.get(filePath + "|" + pg + ":" + pa);
+                        if (cid == null) continue;
+                        String groupKey = filePath + ":" + propName;
+                        propGroups.computeIfAbsent(groupKey, k -> new ArrayList<>()).add(cid);
+                        compPropKey.put(cid, groupKey);
+                    }
+                } catch (Exception ignored) {}
+            }
+            // Only emit groups with 2+ members; single-member groups need no syncing
+            html.append("const rk_propGroups={");
+            boolean fg = true;
+            for (Map.Entry<String, List<Long>> e : propGroups.entrySet()) {
+                if (e.getValue().size() < 2) continue;
+                if (!fg) html.append(",");
+                fg = false;
+                html.append(jsonStr(e.getKey())).append(":[");
+                for (int i = 0; i < e.getValue().size(); i++) {
+                    if (i > 0) html.append(",");
+                    html.append(e.getValue().get(i));
+                }
+                html.append("]");
+            }
+            html.append("};const rk_compPropKey={");
+            boolean fk = true;
+            for (Map.Entry<Long, String> e : compPropKey.entrySet()) {
+                if (!propGroups.containsKey(e.getValue()) || propGroups.get(e.getValue()).size() < 2) continue;
+                if (!fk) html.append(",");
+                fk = false;
+                html.append("\"").append(e.getKey()).append("\":").append(jsonStr(e.getValue()));
+            }
+            html.append("};");
+        }
+        html.append("</script>");
 
         // Component cards
         html.append("<div class=\"rem-list\">");
@@ -1109,6 +1292,19 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
+    private static boolean isBuildFailed(ScanReport report) {
+        List<String> w = report.treeParseWarnings();
+        return w != null && w.stream().anyMatch(s -> s.startsWith("[BUILD_FAILED]"));
+    }
+
+    private static String scopeLabel(DependencyScope scope) {
+        if (scope == null) return "unknown";
+        return switch (scope) {
+            case PLUGIN_BUILD -> "plugin build";
+            default -> scope.name().toLowerCase();
+        };
+    }
+
     private static String idsString(List<Long> ids) {
         StringBuilder sb = new StringBuilder();
         int n = 0;
@@ -1127,7 +1323,7 @@ public class RedKiteServerMain {
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
 
         StringBuilder html = new StringBuilder();
-        String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "direct" : "transitive";
+        String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
         boolean upgradeOnly = status.hasUpgradeRecommendation()
                 && !status.hasVulnerability() && !status.isSnapshot()
                 && !status.hasDeclaredVersionDeclaration() && !status.hasStaleMetadata();
@@ -1145,9 +1341,9 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-badges\">");
         html.append(severityBadgeHtml(status.highestSeverity(), clean));
         String kindClass = comp.snapshot() ? "warn" : comp.direct() ? "success" : "neutral";
-        String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "direct" : "transitive";
+        String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
         html.append("<span class=\"badge ").append(kindClass).append("\">").append(kindLabel).append("</span>");
-        html.append("<span class=\"badge neutral\">").append(comp.scope().name().toLowerCase()).append("</span>");
+        html.append("<span class=\"badge neutral\">").append(scopeLabel(comp.scope())).append("</span>");
         html.append("</div>");
         html.append("</div>");
 
@@ -1404,7 +1600,7 @@ public class RedKiteServerMain {
         html.append("</div>");
         html.append("<div class=\"inventory-tabs span-2 kind-tabs\">");
         html.append("<button class=\"button primary inventory-tab active\" type=\"button\" data-kind=\"all\" onclick=\"filterInventoryKind('all')\">All <span class=\"tab-count\">").append(unique.size()).append("</span></button>");
-        html.append("<button class=\"button inventory-tab\" type=\"button\" data-kind=\"direct\" onclick=\"filterInventoryKind('direct')\">Direct <span class=\"tab-count\">").append(directCount).append("</span></button>");
+        html.append("<button class=\"button inventory-tab\" type=\"button\" data-kind=\"declared\" onclick=\"filterInventoryKind('declared')\">Declared <span class=\"tab-count\">").append(directCount).append("</span></button>");
         html.append("<button class=\"button inventory-tab\" type=\"button\" data-kind=\"transitive\" onclick=\"filterInventoryKind('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
         html.append("<button class=\"button inventory-tab\" type=\"button\" data-kind=\"snapshot\" onclick=\"filterInventoryKind('snapshot')\">Snapshots <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
         html.append("</div>");
@@ -1423,7 +1619,7 @@ public class RedKiteServerMain {
             for (ScanComponent component : sourceComponents) {
                 UpgradeRecommendation recommendation = recommendationByComponent.get(component.id());
                 MetadataResult versionMetadata = versionMetadataByComponent.get(component.id());
-                String kind = component.snapshot() ? "snapshot" : (component.direct() ? "direct" : "transitive");
+                String kind = component.snapshot() ? "snapshot" : (component.direct() ? "declared" : "transitive");
                 html.append("<div class=\"inventory-row\" data-kind=\"").append(kind).append("\">");
                 html.append("<div class=\"inventory-main\">");
                 html.append("<div class=\"inventory-title\">").append(escape(component.coordinate().groupId() + ":" + component.coordinate().artifactId())).append("</div>");
@@ -1432,7 +1628,7 @@ public class RedKiteServerMain {
                 html.append("</div>");
                 html.append("<div class=\"inventory-badges\">");
                 html.append("<span class=\"badge ").append(component.snapshot() ? "warn" : component.direct() ? "success" : "neutral").append("\">");
-                html.append(component.snapshot() ? "snapshot" : component.direct() ? "direct" : "transitive");
+                html.append(component.snapshot() ? "snapshot" : component.direct() ? "declared" : "transitive");
                 html.append("</span>");
                 if (recommendation != null) {
                     html.append("<span class=\"badge\">").append(escape(reasonLabel(recommendation.reason()))).append("</span>");
@@ -1494,7 +1690,7 @@ public class RedKiteServerMain {
         html.append("<div class=\"muted mono\">").append(escape(component.version())).append("</div>");
         html.append("</div>");
         html.append("<div class=\"badge ").append(component.direct() ? "success" : "neutral").append("\">");
-        html.append(component.direct() ? "direct" : "transitive");
+        html.append(component.direct() ? "declared" : "transitive");
         html.append("</div>");
         html.append("</div>");
         html.append("<div class=\"tree-meta\">");
@@ -1537,34 +1733,39 @@ public class RedKiteServerMain {
     }
 
     private String pageShellStart(String brand, String title, String subtitle) {
-        return "<html><head><meta charset=\"utf-8\"/>"
+        return "<html data-theme=\"" + theme + "\"><head><meta charset=\"utf-8\"/>"
                 + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
-                + "<title>" + escape(brand) + " - " + escape(title) + "</title>"
+                + "<title>RedKite - Maven Dependency Assistant</title>"
                 + "<style>"
-                + ":root { color-scheme: dark; --bg:#0b1020; --panel:#121a32; --panel-2:#18213d; --text:#eef2ff; --muted:#a7b0d4; --line:#263252; --accent:#7dd3fc; --accent-2:#a78bfa; --good:#34d399; --warn:#fbbf24; }"
+                + "html { color-scheme:dark; --bg:#0f0f11; --panel:#1c1c1f; --panel-2:#252528; --text:#f2f2f4; --muted:#9090a0; --line:#38383d; --accent:#818cf8; --accent-2:#c084fc; --good:#34d399; --warn:#fbbf24; --surf-nav:rgba(28,28,31,.8); --surf-hero:linear-gradient(135deg,rgba(28,28,31,.95),rgba(15,15,17,.95)); --surf-card:linear-gradient(180deg,rgba(28,28,31,.92),rgba(15,15,17,.92)); --surf-input:rgba(10,10,12,.9); --body-top:#090909; --accent-glow:rgba(129,140,248,.12); }"
+                + "[data-theme=ocean] { color-scheme:dark; --bg:#0b1020; --panel:#121a32; --panel-2:#18213d; --text:#eef2ff; --muted:#a7b0d4; --line:#263252; --accent:#7dd3fc; --accent-2:#a78bfa; --surf-nav:rgba(18,26,50,.72); --surf-hero:linear-gradient(135deg,rgba(18,26,50,.95),rgba(15,22,41,.95)); --surf-card:linear-gradient(180deg,rgba(18,26,50,.92),rgba(13,20,39,.92)); --surf-input:rgba(8,15,30,.9); --body-top:#070b16; --accent-glow:rgba(125,211,252,.15); }"
+                + "[data-theme=light] { color-scheme:light; --bg:#f0f4ff; --panel:#ffffff; --panel-2:#e8edf8; --text:#1e2550; --muted:#6270a8; --line:#cfd8f0; --accent:#3b6bec; --accent-2:#7c3aed; --surf-nav:rgba(255,255,255,.85); --surf-hero:linear-gradient(135deg,rgba(255,255,255,.97),rgba(232,237,248,.97)); --surf-card:linear-gradient(180deg,rgba(255,255,255,.97),rgba(240,244,255,.95)); --surf-input:#ffffff; --body-top:#dce5ff; --accent-glow:rgba(59,107,236,.1); }"
+                + "[data-theme=dusk] { color-scheme:dark; --bg:#13091e; --panel:#1c0f2e; --panel-2:#261541; --text:#f5eeff; --muted:#b89fd8; --line:#3d2060; --accent:#e879f9; --accent-2:#fb7185; --surf-nav:rgba(28,15,46,.72); --surf-hero:linear-gradient(135deg,rgba(28,15,46,.95),rgba(19,9,30,.95)); --surf-card:linear-gradient(180deg,rgba(28,15,46,.92),rgba(19,9,30,.92)); --surf-input:rgba(13,5,22,.9); --body-top:#0d0415; --accent-glow:rgba(232,121,249,.15); }"
+                + "[data-theme=forest] { color-scheme:dark; --bg:#061210; --panel:#0c1f1a; --panel-2:#122b24; --text:#ecfdf5; --muted:#7dd4a8; --line:#1a4535; --accent:#34d399; --accent-2:#38bdf8; --surf-nav:rgba(12,31,26,.72); --surf-hero:linear-gradient(135deg,rgba(12,31,26,.95),rgba(6,18,16,.95)); --surf-card:linear-gradient(180deg,rgba(12,31,26,.92),rgba(6,18,16,.92)); --surf-input:rgba(4,12,10,.9); --body-top:#030a08; --accent-glow:rgba(52,211,153,.15); }"
+                + "[data-theme=ember] { color-scheme:dark; --bg:#110d03; --panel:#1c1605; --panel-2:#281f07; --text:#fffbeb; --muted:#d4a72c; --line:#3d2e07; --accent:#fbbf24; --accent-2:#fb923c; --surf-nav:rgba(28,22,5,.72); --surf-hero:linear-gradient(135deg,rgba(28,22,5,.95),rgba(17,13,3,.95)); --surf-card:linear-gradient(180deg,rgba(28,22,5,.92),rgba(17,13,3,.92)); --surf-input:rgba(10,7,0,.9); --body-top:#090601; --accent-glow:rgba(251,191,36,.15); }"
                 + "* { box-sizing:border-box; }"
-                + "body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, rgba(125,211,252,.15), transparent 28%), linear-gradient(180deg, #070b16, var(--bg)); color:var(--text); }"
+                + "body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, var(--accent-glow), transparent 28%), linear-gradient(180deg, var(--body-top), var(--bg)); color:var(--text); }"
                 + "a { color:inherit; text-decoration:none; }"
                 + ".shell { width: 100%; max-width: 1400px; margin: 0 auto; padding: 28px 32px 48px; box-sizing: border-box; }"
                 + ".topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; gap:20px; }"
-                + ".brand { display:flex; align-items:center; gap:12px; }"
-                + ".brand-mark { width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; border-radius:14px; background: rgba(255,255,255,.04); border:1px solid var(--line); overflow:hidden; flex:0 0 auto; }"
-                + ".brand-mark img { width:100%; height:100%; display:block; }"
-                + ".brand-copy { display:flex; flex-direction:column; gap:4px; }"
-                + ".brand-copy strong { letter-spacing:.12em; text-transform:uppercase; font-size:.76rem; color:var(--accent); }"
-                + ".brand-copy span { font-size:1.15rem; color:var(--text); }"
+                + ".brand { display:flex; align-items:center; }"
+                + ".brand-logo { text-decoration:none; display:flex; flex-direction:row; align-items:center; gap:10px; }"
+                + ".brand-icon { height:42px; width:auto; display:block; }"
+                + ".brand-text { display:flex; flex-direction:column; gap:2px; }"
+                + ".brand-logo-name { font-size:1.1rem; font-weight:700; color:var(--accent); letter-spacing:-.01em; line-height:1.2; }"
+                + ".brand-logo-tag { font-size:.72rem; color:var(--muted); line-height:1.3; }"
                 + ".nav { display:flex; gap:12px; flex-wrap:wrap; }"
-                + ".nav a, .button { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background: rgba(18,26,50,.72); }"
+                + ".nav a, .button { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background: var(--surf-nav); }"
                 + ".nav a:hover, .button:hover { border-color: rgba(125,211,252,.5); transform: translateY(-1px); }"
                 + ".button:disabled { opacity:.35; cursor:not-allowed; pointer-events:none; }"
                 + ".button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color:#08111f; font-weight:700; border-color: transparent; }"
-                + ".hero { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin:18px 0 28px; padding:28px; border:1px solid var(--line); border-radius:24px; background: linear-gradient(135deg, rgba(18,26,50,.95), rgba(15,22,41,.95)); box-shadow: 0 18px 60px rgba(0,0,0,.25); }"
+                + ".hero { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin:18px 0 28px; padding:28px; border:1px solid var(--line); border-radius:24px; background: var(--surf-hero); box-shadow: 0 18px 60px rgba(0,0,0,.25); }"
                 + ".hero h1, h1 { margin:0; font-size: clamp(2rem, 3vw, 3.5rem); }"
                 + ".hero p, p { line-height:1.6; color:var(--muted); }"
                 + ".hero-actions { display:flex; gap:12px; flex-wrap:wrap; }"
                 + ".page-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:18px; }"
                 + ".span-2 { grid-column: span 2; }"
-                + ".card { padding:20px; border:1px solid var(--line); border-radius:22px; background: linear-gradient(180deg, rgba(18,26,50,.92), rgba(13,20,39,.92)); box-shadow: 0 12px 40px rgba(0,0,0,.18); }"
+                + ".card { padding:20px; border:1px solid var(--line); border-radius:22px; background: var(--surf-card); box-shadow: 0 12px 40px rgba(0,0,0,.18); }"
                 + ".card h2 { margin-top:0; font-size:1rem; letter-spacing:.04em; text-transform:uppercase; color:var(--accent); }"
                 + ".headline { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px; }"
                 + ".eyebrow { margin:0 0 6px; color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:.72rem; }"
@@ -1597,6 +1798,17 @@ public class RedKiteServerMain {
                 + ".badge { display:inline-flex; align-items:center; justify-content:center; padding:6px 10px; border-radius:999px; border:1px solid var(--line); background: rgba(255,255,255,.04); font-size:.78rem; letter-spacing:.06em; text-transform:uppercase; }"
                 + ".badge.success { background: rgba(52,211,153,.16); border-color: rgba(52,211,153,.35); color: #9ef2c8; }"
                 + ".badge.warn { background: rgba(251,191,36,.16); border-color: rgba(251,191,36,.35); color: #fde68a; }"
+                + ".badge.scan-failed { background:rgba(220,38,38,.16); border-color:rgba(220,38,38,.4); color:#fca5a5; }"
+                + ".proj-meta { display:flex; flex-direction:column; gap:8px; margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }"
+                + ".proj-meta-row { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }"
+                + ".proj-meta-label { font-size:.75rem; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); min-width:90px; flex-shrink:0; }"
+                + ".proj-meta-val { font-family:ui-monospace,monospace; font-size:.82rem; color:var(--text); }"
+                + ".proj-meta-repos { display:flex; flex-direction:column; gap:3px; }"
+                + ".scan-history-list { display:flex; flex-direction:column; gap:6px; }"
+                + ".scan-history-row { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.02); text-decoration:none; color:var(--text); transition:border-color .15s,background .15s; }"
+                + ".scan-history-row:hover { border-color:rgba(129,140,248,.4); background:rgba(129,140,248,.06); }"
+                + ".scan-history-ts { font-family:ui-monospace,monospace; font-size:.82rem; color:var(--muted); flex:1; }"
+                + ".scan-history-latest { font-size:.75rem; color:var(--accent); opacity:.7; }"
                 + ".badge.neutral { background: rgba(167,139,250,.12); border-color: rgba(167,139,250,.25); color: #d8c8ff; }"
                 + ".stat-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; }"
                 + ".stat { padding:14px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
@@ -1609,7 +1821,7 @@ public class RedKiteServerMain {
                 + ".selectable input { transform: translateY(1px); margin-right:8px; }"
                 + ".selectable-target { display:flex; flex-direction:column; gap:6px; flex: 1 1 auto; }"
                 + ".upgrade-choice { display:flex; flex-direction:column; gap:8px; min-width: 13rem; }"
-                + ".upgrade-choice select { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background: rgba(8,15,30,.9); color: var(--text); }"
+                + ".upgrade-choice select { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background: var(--surf-input); color: var(--text); }"
                 + ".version-selector { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }"
                 + ".version-label { color:var(--muted); font-size:.85rem; text-transform:uppercase; letter-spacing:.08em; }"
                 + ".version-choice { display:inline-flex; align-items:center; gap:6px; padding:7px 10px; border-radius:999px; border:1px solid var(--line); background: rgba(255,255,255,.04); color:var(--text); }"
@@ -1631,7 +1843,7 @@ public class RedKiteServerMain {
                 + ".sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }"
                 + ".sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }"
                 + ".sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }"
-                + ".rem-module-select { padding:8px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(18,26,50,.9); color:var(--text); font-size:.9rem; cursor:pointer; outline:none; margin-bottom:12px; }"
+                + ".rem-module-select { padding:8px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surf-nav); color:var(--text); font-size:.9rem; cursor:pointer; outline:none; margin-bottom:12px; }"
                 + ".rem-module-select:focus { border-color:rgba(125,211,252,.55); }"
                 + ".rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }"
                 + ".pom-actions { display:flex; gap:10px; align-items:center; margin-bottom:20px; }"
@@ -1667,13 +1879,13 @@ public class RedKiteServerMain {
                 + ".action-btn.sev-none { background:rgba(52,211,153,.14); color:#6ee7b7; border-color:rgba(52,211,153,.3); }"
                 + ".action-btn.sev-snap { background:rgba(139,92,246,.2); color:#c4b5fd; border-color:rgba(139,92,246,.4); }"
                 + ".version-sel-wrap { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }"
-                + ".version-sel { padding:7px 10px; border-radius:12px; border:1px solid var(--line); background:rgba(8,15,30,.9); color:var(--text); font-size:.88rem; min-width:200px; max-width:100%; }"
+                + ".version-sel { padding:7px 10px; border-radius:12px; border:1px solid var(--line); background:var(--surf-input); color:var(--text); font-size:.88rem; min-width:200px; max-width:100%; }"
                 + ".version-current { padding:4px 10px; border-radius:999px; border:1px solid var(--line); font-size:.86rem; color:var(--muted); display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }"
                 + ".version-current.cve { border-color:rgba(248,113,113,.6); color:#fca5a5; }"
                 + ".version-note { font-size:.9rem; color:var(--muted); }"
                 + "@media (max-width: 700px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
                 + ".scan-path-row { display:flex; gap:10px; align-items:center; }"
-                + ".scan-path-input { flex:1 1 auto; padding:10px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(8,15,30,.9); color:var(--text); font-size:.97rem; font-family:ui-monospace,monospace; outline:none; }"
+                + ".scan-path-input { flex:1 1 auto; padding:10px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surf-input); color:var(--text); font-size:.97rem; font-family:ui-monospace,monospace; outline:none; }"
                 + ".scan-path-input:focus { border-color:rgba(125,211,252,.55); }"
                 + ".scan-error { margin-top:10px; color:#fca5a5; font-size:.9rem; padding:10px 14px; border-radius:12px; background:rgba(220,38,38,.12); border:1px solid rgba(220,38,38,.3); }"
                 + ".scan-overlay { position:fixed; inset:0; background:rgba(7,11,22,.82); backdrop-filter:blur(4px); z-index:9999; display:flex; align-items:center; justify-content:center; }"
@@ -1687,13 +1899,124 @@ public class RedKiteServerMain {
                 + ".pom-modal-filename { font-family:ui-monospace,monospace; font-size:.9rem; color:var(--accent); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }"
                 + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
                 + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(isUpgrade){if(card.dataset.kind==='direct')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card)return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp||comp.kind==='transitive')return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='direct'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='direct'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='direct'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='direct'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+comp.kind+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');var comp=rk_comps[card&&card.dataset.compId];if(comp&&comp.kind!=='transitive'&&s.value!==comp.v)any=true;});btn.disabled=!any;}window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function triggerFreshScan(path){fetch('/api/metadata/clear',{method:'POST'}).catch(function(){}).finally(function(){triggerScan(path);});}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}</script></head><body><div class=\"shell\">"
-                + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-mark\" href=\"/\" aria-label=\"" + escape(brand) + "\">" + logoSvgInline() + "</a><div class=\"brand-copy\"><strong>" + escape(brand) + "</strong><span>" + escape(title) + "</span></div></div><div class=\"nav\"><a href=\"/\">Projects</a></div></div>"
+                + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp||comp.kind==='transitive')return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(comp&&comp.kind!=='transitive'&&s.value!==comp.v)any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}</script></head><body><div class=\"shell\">"
+                + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-logo\" href=\"/\"><img class=\"brand-icon\" src=\"/logo.svg\" alt=\"RedKite logo\"><div class=\"brand-text\"><span class=\"brand-logo-name\">" + escape(brand) + "</span><span class=\"brand-logo-tag\">Maven Dependency Assistant &mdash; local dependency reporting and upgrade planning for checked-out Maven repositories.</span></div></a></div><div class=\"nav\"><div class=\"theme-picker\" id=\"theme-picker\"><button class=\"button theme-btn\" type=\"button\" onclick=\"toggleThemePicker()\" title=\"Change theme\" aria-label=\"Change theme\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><circle cx=\"4\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"10\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"7\" cy=\"3.5\" r=\"2.5\"/></svg></button><div class=\"theme-swatches\" id=\"theme-swatches\"><button class=\"swatch\" data-theme=\"dark\" onclick=\"setTheme('dark')\" title=\"Dark\" style=\"background:#818cf8\"></button><button class=\"swatch\" data-theme=\"light\" onclick=\"setTheme('light')\" title=\"Light\" style=\"background:#3b6bec\"></button><button class=\"swatch\" data-theme=\"ocean\" onclick=\"setTheme('ocean')\" title=\"Ocean\" style=\"background:#7dd3fc\"></button><button class=\"swatch\" data-theme=\"dusk\" onclick=\"setTheme('dusk')\" title=\"Dusk\" style=\"background:#e879f9\"></button><button class=\"swatch\" data-theme=\"forest\" onclick=\"setTheme('forest')\" title=\"Forest\" style=\"background:#34d399\"></button><button class=\"swatch\" data-theme=\"ember\" onclick=\"setTheme('ember')\" title=\"Ember\" style=\"background:#fbbf24\"></button></div></div></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
 
+    private String renderLogModal(ScanReport report, String scanId) {
+        Map<Long, ScanComponent> byId = new LinkedHashMap<>();
+        for (ScanComponent c : report.components()) byId.put(c.id(), c);
+
+        List<String> parseWarnings = report.treeParseWarnings() != null ? report.treeParseWarnings() : List.of();
+        List<MetadataResult> issues = new ArrayList<>();
+        for (MetadataResult r : report.metadataResults()) {
+            if (!r.complete() || (r.status() != MetadataStatus.FRESH && r.status() != MetadataStatus.NOT_APPLICABLE)) {
+                issues.add(r);
+            }
+        }
+
+        StringBuilder html = new StringBuilder();
+        html.append("<div id=\"log-modal\" class=\"pom-modal\" style=\"display:none\">");
+        html.append("<div class=\"pom-modal-backdrop\" onclick=\"closeLogModal()\"></div>");
+        html.append("<div class=\"pom-modal-box log-modal-box\">");
+        html.append("<div class=\"pom-modal-head\">");
+        html.append("<span class=\"pom-modal-filename\">Report log &mdash; scan #").append(scanId).append("</span>");
+        html.append("<button class=\"button\" type=\"button\" onclick=\"closeLogModal()\">Close</button>");
+        html.append("</div>");
+        html.append("<div class=\"log-body\">");
+
+        // Overview
+        html.append("<div class=\"log-section\">");
+        html.append("<div class=\"log-section-title\">Overview</div>");
+        boolean buildFailed = isBuildFailed(report);
+        html.append("<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:10px\">");
+        html.append(report.complete() ? "<span class=\"badge success\">Complete</span>"
+                : buildFailed ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\">Failed</span>"
+                : "<span class=\"badge warn\">Incomplete</span>");
+        html.append("</div>");
+        html.append("<p class=\"log-text\">").append(escape(report.completenessMessage())).append("</p>");
+        if (report.createdAt() != null) {
+            html.append("<p class=\"log-meta-text\">Scanned: ").append(escape(report.createdAt().toString())).append("</p>");
+        }
+        html.append("</div>");
+
+        // Dependency tree warnings
+        if (!parseWarnings.isEmpty()) {
+            html.append("<div class=\"log-section log-section-warn\">");
+            if (buildFailed) {
+                html.append("<div class=\"log-section-title\" style=\"color:#e05050\">&#10005; Build failure &nbsp;<span class=\"tab-count\">").append(parseWarnings.size() - 1).append(" error(s)</span></div>");
+                html.append("<p class=\"log-text\">Maven could not resolve the project model. Fix the errors below and rescan.</p>");
+            } else {
+                html.append("<div class=\"log-section-title log-title-warn\">&#9888; Dependency tree issues &nbsp;<span class=\"tab-count\">").append(parseWarnings.size()).append("</span></div>");
+                html.append("<p class=\"log-text\">Lines returned by <code>mvn dependency:tree</code> that could not be parsed as valid coordinates. Fix the underlying POM issues and rescan.</p>");
+            }
+            html.append("<div class=\"log-code-list\">");
+            for (String line : parseWarnings) {
+                String display = line.startsWith("[BUILD_FAILED] ") ? line.substring(15) : line;
+                html.append("<div class=\"log-code-line\">").append(escape(display)).append("</div>");
+            }
+            html.append("</div>");
+            html.append("</div>");
+        }
+
+        // Metadata issues
+        if (!issues.isEmpty()) {
+            html.append("<div class=\"log-section\">");
+            html.append("<div class=\"log-section-title\">Metadata issues &nbsp;<span class=\"tab-count\">").append(issues.size()).append("</span></div>");
+            html.append("<div class=\"log-issue-list\">");
+            for (MetadataResult r : issues) {
+                ScanComponent comp = byId.get(r.componentId());
+                String name = comp != null
+                        ? comp.coordinate().groupId() + ":" + comp.coordinate().artifactId()
+                        : "component #" + r.componentId();
+                String statusStr = r.status().name().toLowerCase().replace('_', ' ');
+                String cacheStr = r.cacheState().name().toLowerCase().replace('_', ' ');
+                boolean isError = r.status() == MetadataStatus.RATE_LIMITED || r.status() == MetadataStatus.PROVIDER_ERROR
+                        || r.status() == MetadataStatus.OFFLINE_MISSING || r.status() == MetadataStatus.MISSING;
+                html.append("<div class=\"log-issue-row\">");
+                html.append("<div class=\"log-issue-name\">").append(escape(name)).append("</div>");
+                html.append("<div class=\"log-issue-badges\">");
+                html.append("<span class=\"badge ").append(isError ? "warn" : "neutral").append("\">").append(escape(statusStr)).append("</span>");
+                html.append("<span class=\"badge neutral\">cache: ").append(escape(cacheStr)).append("</span>");
+                html.append("</div>");
+                if (r.message() != null && !r.message().isBlank()) {
+                    html.append("<div class=\"log-issue-msg\">").append(escape(r.message())).append("</div>");
+                }
+                html.append("</div>");
+            }
+            html.append("</div>");
+            html.append("</div>");
+        }
+
+        if (report.complete() && parseWarnings.isEmpty() && issues.isEmpty()) {
+            html.append("<div class=\"log-section\">");
+            html.append("<p class=\"log-text\">No issues. All metadata resolved successfully.</p>");
+            html.append("</div>");
+        }
+
+        // Maven repositories
+        html.append("<div class=\"log-section\">");
+        html.append("<div class=\"log-section-title\">Maven repositories</div>");
+        if (store.mavenSettingsPath != null) {
+            html.append("<p class=\"log-meta-text\">Settings: <code>").append(escape(store.mavenSettingsPath)).append("</code></p>");
+        }
+        html.append("<div class=\"log-code-list\">");
+        for (String repo : store.effectiveMavenRepos) {
+            html.append("<div class=\"log-code-line\">").append(escape(repo)).append("</div>");
+        }
+        html.append("</div>");
+        html.append("</div>");
+
+        html.append("</div>"); // log-body
+        html.append("</div>"); // pom-modal-box
+        html.append("</div>"); // log-modal
+        return html.toString();
+    }
+
     private String pageShellEnd() {
-        return "<div class=\"footer\">RedKite local dependency reporting</div></div></body></html>";
+        return "<div class=\"footer\">RedKite &mdash; Maven Dependency Assistant</div></div></body></html>";
     }
 
     private void handleLogo(HttpExchange exchange) throws IOException {
@@ -1710,6 +2033,10 @@ public class RedKiteServerMain {
     }
 
     private String logoSvgInline() {
+        try (var stream = getClass().getResourceAsStream("/redkite-icon.svg")) {
+            if (stream != null) return new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception ignored) {}
+        // fallback geometric icon
         return "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 128 128\" role=\"img\" aria-label=\"RedKite logo\">"
                 + "<defs><linearGradient id=\"rk\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#ff6b6b\"/><stop offset=\"100%\" stop-color=\"#e11d48\"/></linearGradient></defs>"
                 + "<rect width=\"128\" height=\"128\" rx=\"28\" fill=\"#0f172a\"/>"
@@ -1981,13 +2308,13 @@ public class RedKiteServerMain {
                  PreparedStatement statement = connection.prepareStatement("""
                          select id, name, root_path, created_at, updated_at
                          from projects
-                         order by id desc
+                         order by updated_at desc
                          """);
                  ResultSet rs = statement.executeQuery()) {
                 List<ProjectEntry> projects = new ArrayList<>();
                 while (rs.next()) {
                     projects.add(new ProjectEntry(
-                            rs.getLong("id"),
+                            rs.getString("id"),
                             rs.getString("name"),
                             rs.getString("root_path"),
                             rs.getTimestamp("created_at").toInstant(),
@@ -1999,20 +2326,20 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized ProjectEntry getProject(long id) {
+        synchronized ProjectEntry getProject(String id) {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
                          select id, name, root_path, created_at, updated_at
                          from projects
                          where id = ?
                          """)) {
-                statement.setLong(1, id);
+                statement.setString(1, id);
                 try (ResultSet rs = statement.executeQuery()) {
                     if (!rs.next()) {
                         throw new IllegalArgumentException("project not found");
                     }
                     return new ProjectEntry(
-                            rs.getLong("id"),
+                            rs.getString("id"),
                             rs.getString("name"),
                             rs.getString("root_path"),
                             rs.getTimestamp("created_at").toInstant(),
@@ -2023,16 +2350,16 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized ScanEntry latestScanForProject(long projectId) {
+        synchronized ScanEntry latestScanForProject(String projectId) {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
                          select id, project_id, raw_input_json, report_json, created_at
                          from scans
                          where project_id = ?
-                         order by id desc
+                         order by created_at desc
                          fetch first 1 row only
                          """)) {
-                statement.setLong(1, projectId);
+                statement.setString(1, projectId);
                 try (ResultSet rs = statement.executeQuery()) {
                     if (!rs.next()) {
                         return null;
@@ -2044,14 +2371,33 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized ScanEntry getScan(long scanId) {
+        synchronized List<ScanEntry> listScansForProject(String projectId) {
+            try (Connection connection = connection();
+                 PreparedStatement statement = connection.prepareStatement("""
+                         select id, project_id, raw_input_json, report_json, created_at
+                         from scans
+                         where project_id = ?
+                         order by created_at asc
+                         """)) {
+                statement.setString(1, projectId);
+                List<ScanEntry> scans = new ArrayList<>();
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) scans.add(scanFromRow(rs));
+                }
+                return scans;
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to list scans for project", e);
+            }
+        }
+
+        synchronized ScanEntry getScan(String scanId) {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
                          select id, project_id, raw_input_json, report_json, created_at
                          from scans
                          where id = ?
                          """)) {
-                statement.setLong(1, scanId);
+                statement.setString(1, scanId);
                 try (ResultSet rs = statement.executeQuery()) {
                     if (!rs.next()) {
                         throw new IllegalArgumentException("scan not found");
@@ -2071,9 +2417,9 @@ public class RedKiteServerMain {
             try (Connection connection = connection()) {
                 connection.setAutoCommit(false);
                 try {
-                    long projectId = upsertProject(connection, input.projectName(), input.projectRootPath());
-                    ScanReport draft = buildReport(input, projectId, 0L, progress);
-                    long scanId = insertScan(connection, projectId, input, draft);
+                    String projectId = upsertProject(connection, input.projectName(), input.projectRootPath());
+                    ScanReport draft = buildReport(input, projectId, null, progress);
+                    String scanId = insertScan(connection, projectId, input, draft);
                     List<MetadataResult> metadataResults = draft.metadataResults().stream().map(result -> withScanId(result, scanId)).toList();
                     ScanReport finalReport = new ScanReport(scanId, projectId, draft.complete(), draft.completenessMessage(), draft.createdAt(), draft.components(), draft.dependencyEdges(), draft.vulnerabilityFindings(), draft.recommendations(), draft.snapshotDependencyRisks(), metadataResults, draft.treeParseWarnings());
                     updateScanReport(connection, scanId, finalReport);
@@ -2090,7 +2436,7 @@ public class RedKiteServerMain {
             }
         }
 
-        private MetadataResult withScanId(MetadataResult result, long scanId) {
+        private MetadataResult withScanId(MetadataResult result, String scanId) {
             return new MetadataResult(scanId, result.componentId(), result.metadataType(), result.provider(), result.currentVersion(), result.latestVersion(), result.latestSameMajorVersion(), result.upgradePathVersions(), result.complete(), result.status(), result.cacheState(), result.lastSuccessfulCheckAt(), result.cacheExpiryAt(), result.attemptedRefreshAt(), result.suggestedRetryAt(), result.message());
         }
 
@@ -2109,7 +2455,7 @@ public class RedKiteServerMain {
                         continue;
                     }
                     ScanComponent component = componentById(report.components(), result.componentId());
-                    insert.setLong(1, result.scanId());
+                    insert.setString(1, result.scanId());
                     insert.setLong(2, result.componentId());
                     insert.setString(3, result.metadataType().name());
                     insert.setString(4, result.provider());
@@ -2141,7 +2487,7 @@ public class RedKiteServerMain {
             return null;
         }
 
-        private ScanReport buildReport(ScanInput input, long projectId, long scanId, Consumer<String> progress) {
+        private ScanReport buildReport(ScanInput input, String projectId, String scanId, Consumer<String> progress) {
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
             List<MetadataResult> metadata = new ArrayList<>();
@@ -2207,9 +2553,12 @@ public class RedKiteServerMain {
             }
             List<String> treeWarnings = input.treeParseWarnings() != null ? input.treeParseWarnings() : List.of();
             if (!treeWarnings.isEmpty()) complete = false;
+            boolean buildFailed = treeWarnings.stream().anyMatch(w -> w.startsWith("[BUILD_FAILED]"));
             String message;
             if (complete) {
                 message = "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache.";
+            } else if (buildFailed) {
+                message = "Build failed. Maven could not resolve the project model — check the report log for details and rescan after fixing the POM.";
             } else if (!treeWarnings.isEmpty()) {
                 message = "Report incomplete. " + treeWarnings.size() + " dependency tree line(s) could not be parsed. Rescan after resolving the issues listed below.";
             } else {
@@ -2377,8 +2726,24 @@ public class RedKiteServerMain {
             try (Connection connection = connection();
                  Statement statement = connection.createStatement()) {
                 statement.executeUpdate("""
+                        create table if not exists rk_schema_version (version int primary key)
+                        """);
+                boolean needsMigration;
+                try (ResultSet vrs = statement.executeQuery("select version from rk_schema_version")) {
+                    needsMigration = !vrs.next() || vrs.getInt("version") < 2;
+                }
+                if (needsMigration) {
+                    LOGGER.info("Migrating schema to v2 (UUID primary keys)");
+                    statement.executeUpdate("drop table if exists generated_poms");
+                    statement.executeUpdate("drop table if exists source_poms");
+                    statement.executeUpdate("drop table if exists metadata_cache_entries");
+                    statement.executeUpdate("drop table if exists scans");
+                    statement.executeUpdate("drop table if exists projects");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (2)");
+                }
+                statement.executeUpdate("""
                         create table if not exists projects (
-                          id bigint generated by default as identity primary key,
+                          id uuid primary key,
                           name varchar(255) not null,
                           root_path varchar(1024) not null unique,
                           created_at timestamp not null default current_timestamp,
@@ -2387,8 +2752,8 @@ public class RedKiteServerMain {
                         """);
                 statement.executeUpdate("""
                         create table if not exists scans (
-                          id bigint generated by default as identity primary key,
-                          project_id bigint not null,
+                          id uuid primary key,
+                          project_id uuid not null,
                           project_name varchar(255) not null,
                           repo_path varchar(1024) not null,
                           branch_name varchar(255) not null,
@@ -2398,13 +2763,14 @@ public class RedKiteServerMain {
                           report_json text not null,
                           complete boolean not null,
                           completeness_message text not null,
-                          created_at timestamp not null default current_timestamp
+                          created_at timestamp not null default current_timestamp,
+                          foreign key (project_id) references projects(id) on delete cascade
                         )
                         """);
                 statement.executeUpdate("""
                         create table if not exists metadata_cache_entries (
-                          id bigint generated by default as identity primary key,
-                          scan_id bigint not null,
+                          id uuid default random_uuid() primary key,
+                          scan_id uuid not null,
                           component_id bigint not null,
                           metadata_type varchar(32) not null,
                           provider varchar(255) not null,
@@ -2423,40 +2789,29 @@ public class RedKiteServerMain {
                           message text not null,
                           created_at timestamp with time zone not null default current_timestamp,
                           updated_at timestamp with time zone not null default current_timestamp,
-                          unique (scan_id, component_id, metadata_type)
+                          unique (scan_id, component_id, metadata_type),
+                          foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
                 statement.executeUpdate("""
-                        alter table metadata_cache_entries
-                        add column if not exists latest_version varchar(255)
-                        """);
-                statement.executeUpdate("""
-                        alter table metadata_cache_entries
-                        add column if not exists latest_same_major_version varchar(255)
-                        """);
-                statement.executeUpdate("""
-                        update metadata_cache_entries
-                        set latest_version = coalesce(latest_version, component_version),
-                            latest_same_major_version = coalesce(latest_same_major_version, component_version)
-                        where latest_version is null or latest_same_major_version is null
-                        """);
-                statement.executeUpdate("""
                         create table if not exists source_poms (
-                          id bigint generated by default as identity primary key,
-                          scan_id bigint not null,
+                          id uuid default random_uuid() primary key,
+                          scan_id uuid not null,
                           file_path varchar(1024) not null,
                           pom_xml text not null,
-                          unique (scan_id, file_path)
+                          unique (scan_id, file_path),
+                          foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
                 statement.executeUpdate("""
                         create table if not exists generated_poms (
-                          id bigint generated by default as identity primary key,
-                          scan_id bigint not null,
+                          id uuid default random_uuid() primary key,
+                          scan_id uuid not null,
                           file_path varchar(1024) not null,
                           pom_xml text not null,
                           generated_at timestamp not null default current_timestamp,
-                          unique (scan_id, file_path)
+                          unique (scan_id, file_path),
+                          foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
                 statement.executeUpdate("""
@@ -2491,65 +2846,72 @@ public class RedKiteServerMain {
             return DriverManager.getConnection(jdbcUrl, dbUser, dbPassword);
         }
 
-        private long upsertProject(Connection connection, String name, String rootPath) throws SQLException {
+        private String upsertProject(Connection connection, String name, String rootPath) throws SQLException {
             try (PreparedStatement select = connection.prepareStatement("select id from projects where root_path = ?")) {
                 select.setString(1, rootPath);
                 try (ResultSet rs = select.executeQuery()) {
                     if (rs.next()) {
-                        long id = rs.getLong(1);
+                        String id = rs.getString(1);
                         try (PreparedStatement update = connection.prepareStatement("update projects set name = ?, updated_at = current_timestamp where id = ?")) {
                             update.setString(1, name);
-                            update.setLong(2, id);
+                            update.setString(2, id);
                             update.executeUpdate();
                         }
                         return id;
                     }
                 }
             }
-            try (PreparedStatement insert = connection.prepareStatement("insert into projects(name, root_path) values (?, ?)", Statement.RETURN_GENERATED_KEYS)) {
-                insert.setString(1, name);
-                insert.setString(2, rootPath);
+            String id = java.util.UUID.randomUUID().toString();
+            try (PreparedStatement insert = connection.prepareStatement("insert into projects(id, name, root_path) values (?, ?, ?)")) {
+                insert.setString(1, id);
+                insert.setString(2, name);
+                insert.setString(3, rootPath);
                 insert.executeUpdate();
-                try (ResultSet keys = insert.getGeneratedKeys()) {
-                    if (keys.next()) {
-                        return keys.getLong(1);
-                    }
-                }
             }
-            throw new IllegalStateException("failed to upsert project");
+            return id;
         }
 
-        private long insertScan(Connection connection, long projectId, ScanInput input, ScanReport report) throws SQLException {
+        private String insertScan(Connection connection, String projectId, ScanInput input, ScanReport report) throws SQLException {
+            String scanId = java.util.UUID.randomUUID().toString();
             try (PreparedStatement insert = connection.prepareStatement("""
-                    insert into scans(project_id, project_name, repo_path, branch_name, head_commit, working_tree_clean, raw_input_json, report_json, complete, completeness_message)
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, Statement.RETURN_GENERATED_KEYS)) {
-                insert.setLong(1, projectId);
-                insert.setString(2, input.projectName());
-                insert.setString(3, input.projectRootPath());
-                insert.setString(4, input.currentBranch());
-                insert.setString(5, input.currentHeadCommit());
-                insert.setBoolean(6, input.workingTreeClean());
-                insert.setString(7, SerializationSupport.toBase64(input));
-                insert.setString(8, SerializationSupport.toBase64(report));
-                insert.setBoolean(9, report.complete());
-                insert.setString(10, report.completenessMessage());
+                    insert into scans(id, project_id, project_name, repo_path, branch_name, head_commit, working_tree_clean, raw_input_json, report_json, complete, completeness_message)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """)) {
+                insert.setString(1, scanId);
+                insert.setString(2, projectId);
+                insert.setString(3, input.projectName());
+                insert.setString(4, input.projectRootPath());
+                insert.setString(5, input.currentBranch());
+                insert.setString(6, input.currentHeadCommit());
+                insert.setBoolean(7, input.workingTreeClean());
+                insert.setString(8, SerializationSupport.toBase64(input));
+                insert.setString(9, SerializationSupport.toBase64(report));
+                insert.setBoolean(10, report.complete());
+                insert.setString(11, report.completenessMessage());
                 insert.executeUpdate();
-                try (ResultSet keys = insert.getGeneratedKeys()) {
-                    if (keys.next()) {
-                        return keys.getLong(1);
-                    }
-                }
             }
-            throw new IllegalStateException("failed to insert scan");
+            pruneScanHistory(connection, projectId);
+            return scanId;
         }
 
-        private void updateScanReport(Connection connection, long scanId, ScanReport report) throws SQLException {
+        private void pruneScanHistory(Connection connection, String projectId) throws SQLException {
+            try (PreparedStatement stmt = connection.prepareStatement("""
+                    delete from scans where project_id = ? and id not in (
+                      select id from (select id from scans where project_id = ? order by created_at desc limit 7) as t
+                    )
+                    """)) {
+                stmt.setString(1, projectId);
+                stmt.setString(2, projectId);
+                stmt.executeUpdate();
+            }
+        }
+
+        private void updateScanReport(Connection connection, String scanId, ScanReport report) throws SQLException {
             try (PreparedStatement update = connection.prepareStatement("update scans set report_json = ?, complete = ?, completeness_message = ? where id = ?")) {
                 update.setString(1, SerializationSupport.toBase64(report));
                 update.setBoolean(2, report.complete());
                 update.setString(3, report.completenessMessage());
-                update.setLong(4, scanId);
+                update.setString(4, scanId);
                 update.executeUpdate();
             }
         }
@@ -2557,10 +2919,10 @@ public class RedKiteServerMain {
         private ScanEntry scanFromRow(ResultSet rs) throws SQLException {
             ScanInput input = SerializationSupport.fromBase64(rs.getString("raw_input_json"), ScanInput.class);
             ScanReport report = SerializationSupport.fromBase64(rs.getString("report_json"), ScanReport.class);
-            return new ScanEntry(rs.getLong("id"), rs.getLong("project_id"), input, report, rs.getTimestamp("created_at").toInstant());
+            return new ScanEntry(rs.getString("id"), rs.getString("project_id"), input, report, rs.getTimestamp("created_at").toInstant());
         }
 
-        private void persistSourcePoms(Connection connection, long scanId, ScanInput input) throws SQLException {
+        private void persistSourcePoms(Connection connection, String scanId, ScanInput input) throws SQLException {
             java.util.Set<String> paths = new LinkedHashSet<>();
             // Include all discovered POM files, not just those with components
             paths.addAll(input.fileHashes().keySet());
@@ -2570,7 +2932,7 @@ public class RedKiteServerMain {
                 }
             }
             try (PreparedStatement del = connection.prepareStatement("delete from source_poms where scan_id = ?")) {
-                del.setLong(1, scanId);
+                del.setString(1, scanId);
                 del.executeUpdate();
             }
             try (PreparedStatement ins = connection.prepareStatement(
@@ -2580,16 +2942,9 @@ public class RedKiteServerMain {
                         Path pomPath = Path.of(filePath);
                         if (!pomPath.isAbsolute()) pomPath = Path.of(input.workingTreePath()).resolve(pomPath);
                         String raw = Files.readString(pomPath);
-                        String normalized;
-                        try {
-                            normalized = RedKiteServerMain.patchPomXml(raw, Map.of());
-                        } catch (Exception e) {
-                            LOGGER.warning(() -> "Could not normalise POM: " + filePath + " — " + e.getMessage());
-                            normalized = raw;
-                        }
-                        ins.setLong(1, scanId);
+                        ins.setString(1, scanId);
                         ins.setString(2, filePath);
-                        ins.setString(3, normalized);
+                        ins.setString(3, raw);
                         ins.executeUpdate();
                     } catch (IOException e) {
                         LOGGER.warning(() -> "Could not snapshot POM: " + filePath + " — " + e.getMessage());
@@ -2598,11 +2953,11 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized Map<String, String> loadSourcePoms(long scanId) {
+        synchronized Map<String, String> loadSourcePoms(String scanId) {
             try (Connection connection = connection();
                  PreparedStatement ps = connection.prepareStatement(
                          "select file_path, pom_xml from source_poms where scan_id = ? order by file_path")) {
-                ps.setLong(1, scanId);
+                ps.setString(1, scanId);
                 Map<String, String> result = new LinkedHashMap<>();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) result.put(rs.getString("file_path"), rs.getString("pom_xml"));
@@ -2613,10 +2968,10 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized boolean hasSourcePoms(long scanId) {
+        synchronized boolean hasSourcePoms(String scanId) {
             try (Connection connection = connection();
                  PreparedStatement ps = connection.prepareStatement("select count(*) from source_poms where scan_id = ?")) {
-                ps.setLong(1, scanId);
+                ps.setString(1, scanId);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() && rs.getLong(1) > 0;
                 }
@@ -2625,10 +2980,10 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized boolean hasSavedPom(long scanId) {
+        synchronized boolean hasSavedPom(String scanId) {
             try (Connection connection = connection();
                  PreparedStatement ps = connection.prepareStatement("select count(*) from generated_poms where scan_id = ?")) {
-                ps.setLong(1, scanId);
+                ps.setString(1, scanId);
                 try (ResultSet rs = ps.executeQuery()) {
                     return rs.next() && rs.getLong(1) > 0;
                 }
@@ -2637,16 +2992,16 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized void savePomFiles(long scanId, Map<String, String> files) {
+        synchronized void savePomFiles(String scanId, Map<String, String> files) {
             try (Connection connection = connection()) {
                 try (PreparedStatement del = connection.prepareStatement("delete from generated_poms where scan_id = ?")) {
-                    del.setLong(1, scanId);
+                    del.setString(1, scanId);
                     del.executeUpdate();
                 }
                 try (PreparedStatement ins = connection.prepareStatement(
                         "insert into generated_poms(scan_id, file_path, pom_xml) values (?, ?, ?)")) {
                     for (Map.Entry<String, String> e : files.entrySet()) {
-                        ins.setLong(1, scanId);
+                        ins.setString(1, scanId);
                         ins.setString(2, e.getKey());
                         ins.setString(3, e.getValue());
                         ins.executeUpdate();
@@ -2657,11 +3012,11 @@ public class RedKiteServerMain {
             }
         }
 
-        synchronized Map<String, String> loadPomFiles(long scanId) {
+        synchronized Map<String, String> loadPomFiles(String scanId) {
             try (Connection connection = connection();
                  PreparedStatement ps = connection.prepareStatement(
                          "select file_path, pom_xml from generated_poms where scan_id = ? order by file_path")) {
-                ps.setLong(1, scanId);
+                ps.setString(1, scanId);
                 Map<String, String> result = new LinkedHashMap<>();
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) result.put(rs.getString("file_path"), rs.getString("pom_xml"));
@@ -2674,9 +3029,9 @@ public class RedKiteServerMain {
 
     }
 
-    record ProjectEntry(long id, String name, String rootPath, Instant createdAt, Instant updatedAt) implements java.io.Serializable {
+    record ProjectEntry(String id, String name, String rootPath, Instant createdAt, Instant updatedAt) implements java.io.Serializable {
     }
 
-    record ScanEntry(long id, long projectId, ScanInput input, ScanReport report, Instant createdAt) implements java.io.Serializable {
+    record ScanEntry(String id, String projectId, ScanInput input, ScanReport report, Instant createdAt) implements java.io.Serializable {
     }
 }

@@ -5,8 +5,8 @@ import java.time.Instant;
 import java.util.List;
 
 public record ScanReport(
-        long scanId,
-        long projectId,
+        String scanId,
+        String projectId,
         boolean complete,
         String completenessMessage,
         Instant createdAt,
