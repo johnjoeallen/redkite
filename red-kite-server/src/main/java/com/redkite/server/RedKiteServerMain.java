@@ -1166,7 +1166,7 @@ public class RedKiteServerMain {
 
         // Remediation reason chips
         List<String> otherReasons = status.reasons().stream()
-                .filter(r -> !"Upgrade available".equals(r)).toList();
+                .filter(r -> !"Upgrade recommended".equals(r)).toList();
         boolean showUpgradeBtn = view.recommendation() != null && !status.isSnapshot();
         if (!otherReasons.isEmpty() || showUpgradeBtn) {
             html.append("<div class=\"rem-reasons\">");
@@ -1177,7 +1177,7 @@ public class RedKiteServerMain {
                 if (comp.direct()) {
                     html.append("<button class=\"reason-chip reason-chip-btn\" type=\"button\" onclick=\"applyUpgrade(")
                         .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
-                        .append("Upgrade available</button>");
+                        .append("Upgrade recommended</button>");
                 } else {
                     String transitiveChip = view.canUpgradeViaDirect() ? "Upgradable via direct" : "Needs major bump on direct";
                     html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");

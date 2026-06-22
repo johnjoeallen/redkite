@@ -34,7 +34,7 @@ public final class RemediationClassifier {
 
         boolean hasRecommendation = hasRecommendationFor(component, allRecommendations);
         if (hasRecommendation && !hasVulnerability && !isSnapshot) {
-            reasons.add("Upgrade available");
+            reasons.add("Upgrade recommended");
         }
 
         boolean hasStaleMetadata = hasStaleMetadataFor(component, allMetadata);
