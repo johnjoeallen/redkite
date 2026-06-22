@@ -150,6 +150,7 @@ public class RedKiteServerMain {
         server.createContext("/api/scans/pom", exchange -> safeHandle(exchange, this::handleApiScanPom));
         server.createContext("/api/scans/pom/write", exchange -> safeHandle(exchange, this::handleApiScanPomWrite));
         server.createContext("/api/metadata/clear", exchange -> safeHandle(exchange, this::handleApiMetadataClear));
+        server.createContext("/api/projects", exchange -> safeHandle(exchange, this::handleApiProjects));
         server.createContext("/api/prefs", exchange -> safeHandle(exchange, this::handleApiPrefs));
     }
 
@@ -264,7 +265,10 @@ public class RedKiteServerMain {
             html.append("<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap\">");
             html.append("<div><h1>").append(escape(project.name())).append("</h1>");
             html.append("<p class=\"muted\" style=\"margin:2px 0 0\">").append(escape(project.rootPath())).append("</p></div>");
+            html.append("<div style=\"display:flex;gap:8px;flex-wrap:wrap\">");
             html.append("<button class=\"button primary\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(project.rootPath()))).append(")\">Analyse</button>");
+            html.append("<button class=\"button danger\" type=\"button\" onclick=\"deleteProject(").append(escape(jsString(project.id()))).append(",").append(escape(jsString(project.name()))).append(")\">Delete project</button>");
+            html.append("</div>");
             html.append("</div>");
             html.append("<div class=\"proj-meta\">");
             html.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Settings</span>");
@@ -325,6 +329,7 @@ public class RedKiteServerMain {
             html.append("<script>");
             html.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
             html.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
+            html.append("function deleteProject(id,name){if(!confirm('Delete project \"'+name+'\" and all its analyses?\\n\\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}");
             html.append("</script>");
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
@@ -529,6 +534,17 @@ public class RedKiteServerMain {
         store.versionProvider.clearAll();
         store.clearVersionCache();
         sendJson(exchange, 200, "{\"cleared\":true}");
+    }
+
+    private void handleApiProjects(HttpExchange exchange) throws IOException {
+        String[] parts = exchange.getRequestURI().getPath().split("/");
+        if (parts.length == 3 && "DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
+            String projectId = parts[2];
+            store.deleteProject(projectId);
+            sendJson(exchange, 200, "{\"deleted\":true}");
+            return;
+        }
+        sendText(exchange, 405, "Method not allowed");
     }
 
     private void handleApiScanPom(HttpExchange exchange) throws IOException {
@@ -1774,6 +1790,7 @@ public class RedKiteServerMain {
                 + ".nav a:hover, .button:hover { border-color: rgba(125,211,252,.5); transform: translateY(-1px); }"
                 + ".button:disabled { opacity:.35; cursor:not-allowed; pointer-events:none; }"
                 + ".button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color:#08111f; font-weight:700; border-color: transparent; }"
+                + ".button.danger { border-color:rgba(220,38,38,.4); color:#fca5a5; } .button.danger:hover { border-color:rgba(220,38,38,.7); background:rgba(220,38,38,.12); }"
                 + ".hero { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin:18px 0 28px; padding:28px; border:1px solid var(--line); border-radius:24px; background: var(--surf-hero); box-shadow: 0 18px 60px rgba(0,0,0,.25); }"
                 + ".hero h1, h1 { margin:0; font-size: clamp(2rem, 3vw, 3.5rem); }"
                 + ".hero p, p { line-height:1.6; color:var(--muted); }"
@@ -2362,6 +2379,16 @@ public class RedKiteServerMain {
                 }
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to fetch project", e);
+            }
+        }
+
+        synchronized void deleteProject(String id) {
+            try (Connection connection = connection();
+                 PreparedStatement statement = connection.prepareStatement("delete from projects where id = ?")) {
+                statement.setString(1, id);
+                statement.executeUpdate();
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to delete project", e);
             }
         }
 
