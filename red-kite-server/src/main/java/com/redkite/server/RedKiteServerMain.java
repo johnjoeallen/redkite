@@ -2204,14 +2204,14 @@ public class RedKiteServerMain {
                 return null;
             }
             String sameMajor = versionMetadata.latestSameMajorVersion();
-            if (isUpgradeable(currentVersion, sameMajor)) {
+            if (!isPreRelease(sameMajor) && isUpgradeable(currentVersion, sameMajor)) {
                 return sameMajor;
             }
             if (versionMetadata.upgradePathVersions() == null || versionMetadata.upgradePathVersions().isEmpty()) {
                 return versionMetadata == null ? null : versionMetadata.latestVersion();
             }
             for (String candidate : versionMetadata.upgradePathVersions()) {
-                if (candidate == null || candidate.isBlank()) {
+                if (candidate == null || candidate.isBlank() || isPreRelease(candidate)) {
                     continue;
                 }
                 if (!isUpgradeable(currentVersion, candidate)) {
@@ -2225,7 +2225,7 @@ public class RedKiteServerMain {
                 }
             }
             for (String candidate : versionMetadata.upgradePathVersions()) {
-                if (candidate == null || candidate.isBlank()) {
+                if (candidate == null || candidate.isBlank() || isPreRelease(candidate)) {
                     continue;
                 }
                 if (!isUpgradeable(currentVersion, candidate)) {
@@ -2233,8 +2233,9 @@ public class RedKiteServerMain {
                 }
                 return candidate;
             }
-            if (isUpgradeable(currentVersion, versionMetadata.latestVersion())) {
-                return versionMetadata.latestVersion();
+            String latest = versionMetadata.latestVersion();
+            if (!isPreRelease(latest) && isUpgradeable(currentVersion, latest)) {
+                return latest;
             }
             return null;
         }
