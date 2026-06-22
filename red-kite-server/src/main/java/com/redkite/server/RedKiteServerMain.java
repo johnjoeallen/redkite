@@ -936,7 +936,7 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cve\" onclick=\"setRemediationMode('cve')\">CVE <span class=\"tab-count\">").append(cveCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
-        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgrade <span class=\"tab-count\">").append(upgradeCount).append("</span></button>");
+        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable <span class=\"tab-count\">").append(upgradeCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"transitive\" onclick=\"setRemediationMode('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"clean\" onclick=\"setRemediationMode('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
@@ -944,7 +944,7 @@ public class RedKiteServerMain {
 
         // Apply bar
         html.append("<div class=\"pom-actions\">");
-        html.append("<button class=\"button\" type=\"button\" id=\"upgrade-rec-btn\" onclick=\"selectAllRecommended()\">Upgrade Recommended</button>");
+        html.append("<button class=\"button\" type=\"button\" id=\"upgrade-rec-btn\" onclick=\"selectAllRecommended()\">Accept recommendations</button>");
         html.append("<button class=\"button primary\" type=\"button\" id=\"apply-btn\"");
         if (!pomExists) {
             html.append(" disabled data-nopom=\"true\" title=\"No source POMs available for this scan\"");
@@ -1207,7 +1207,6 @@ public class RedKiteServerMain {
         String nameAttr = includeNameAttr ? " name=\"" + escape(selectorId) + "\"" : "";
         html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr)
                 .append(" onchange=\"this.dataset.chosen='true';updateApplyButton()\"");
-        if (hasPreSelection) html.append(" data-chosen=\"true\"");
         if (recommendedVersion != null && !recommendedVersion.isBlank()) {
             html.append(" data-recommended=\"").append(escape(recommendedVersion)).append("\"");
         }
