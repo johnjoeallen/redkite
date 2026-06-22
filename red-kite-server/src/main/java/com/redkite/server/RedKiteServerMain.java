@@ -538,8 +538,8 @@ public class RedKiteServerMain {
 
     private void handleApiProjects(HttpExchange exchange) throws IOException {
         String[] parts = exchange.getRequestURI().getPath().split("/");
-        if (parts.length == 3 && "DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
-            String projectId = parts[2];
+        if (parts.length == 4 && "DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
+            String projectId = parts[3];
             store.deleteProject(projectId);
             sendJson(exchange, 200, "{\"deleted\":true}");
             return;
