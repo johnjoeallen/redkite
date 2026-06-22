@@ -276,7 +276,11 @@ public class RedKiteServerMain {
             html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Rescan</button>");
             html.append("</div>");
             html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
-            html.append("<details style=\"margin-top:8px;font-size:.85rem\"><summary style=\"color:var(--muted);cursor:pointer\">Maven repositories</summary><ul style=\"margin:6px 0 0 1.2em;padding:0\">");
+            html.append("<details style=\"margin-top:8px;font-size:.85rem\"><summary style=\"color:var(--muted);cursor:pointer\">Maven repositories</summary>");
+            if (store.mavenSettingsPath != null) {
+                html.append("<p style=\"margin:6px 0 2px;color:var(--muted);font-family:monospace\">").append(escape(store.mavenSettingsPath)).append("</p>");
+            }
+            html.append("<ul style=\"margin:4px 0 0 1.2em;padding:0\">");
             for (String repo : store.effectiveMavenRepos) {
                 html.append("<li style=\"font-family:monospace\">").append(escape(repo)).append("</li>");
             }
@@ -1761,14 +1765,17 @@ public class RedKiteServerMain {
         private final HttpVersionMetadataProvider versionProvider;
         private final HttpVulnerabilityProvider vulnerabilityProvider;
         private final List<String> effectiveMavenRepos;
+        private final String mavenSettingsPath;
 
         private Store(String jdbcUrl, String dbUser, String dbPassword) {
             this.jdbcUrl = jdbcUrl;
             this.dbUser = dbUser;
             this.dbPassword = dbPassword;
             String mavenRepos = System.getProperty("redkite.maven.repositories");
+            java.nio.file.Path settingsPath = java.nio.file.Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
             if (mavenRepos != null) {
                 this.versionProvider = new HttpVersionMetadataProvider(mavenRepos);
+                this.mavenSettingsPath = null;
             } else {
                 List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs();
                 String urls = repoConfigs.stream()
@@ -1783,8 +1790,11 @@ public class RedKiteServerMain {
                     }
                 }
                 this.versionProvider = new HttpVersionMetadataProvider(urls, repoUser, repoPass);
+                this.mavenSettingsPath = java.nio.file.Files.exists(settingsPath)
+                        ? settingsPath.toAbsolutePath().toString() : null;
             }
             this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
+            LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none, using system property)"));
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
             initializeSchema();

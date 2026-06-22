@@ -47,19 +47,19 @@ public class MavenSettingsReader {
     public static List<RepoConfig> discoverRepositoryConfigs() {
         Path settingsFile = Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
         if (!Files.exists(settingsFile)) {
-            LOGGER.info(() -> "No ~/.m2/settings.xml found; using Maven Central");
+            LOGGER.info(() -> "No settings.xml found at " + settingsFile.toAbsolutePath() + "; using Maven Central");
             return List.of(new RepoConfig(CENTRAL, null, null));
         }
         try {
             List<RepoConfig> configs = parseConfigs(settingsFile);
             if (configs.isEmpty()) {
-                LOGGER.info(() -> "~/.m2/settings.xml contained no usable entries; using Maven Central");
+                LOGGER.info(() -> settingsFile.toAbsolutePath() + " contained no usable entries; using Maven Central");
                 return List.of(new RepoConfig(CENTRAL, null, null));
             }
-            LOGGER.info(() -> "Discovered " + configs.size() + " repository config(s) from ~/.m2/settings.xml");
+            LOGGER.info(() -> "Discovered " + configs.size() + " repository config(s) from " + settingsFile.toAbsolutePath());
             return configs;
         } catch (Exception e) {
-            LOGGER.warning(() -> "Failed to parse ~/.m2/settings.xml: " + e.getMessage() + "; using Maven Central");
+            LOGGER.warning(() -> "Failed to parse " + settingsFile.toAbsolutePath() + ": " + e.getMessage() + "; using Maven Central");
             return List.of(new RepoConfig(CENTRAL, null, null));
         }
     }
@@ -72,20 +72,20 @@ public class MavenSettingsReader {
     public static String discoverRepositoryUrls() {
         Path settingsFile = Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
         if (!Files.exists(settingsFile)) {
-            LOGGER.info(() -> "No ~/.m2/settings.xml found; using Maven Central");
+            LOGGER.info(() -> "No settings.xml found at " + settingsFile.toAbsolutePath() + "; using Maven Central");
             return CENTRAL;
         }
         try {
             List<String> urls = parse(settingsFile);
             if (urls.isEmpty()) {
-                LOGGER.info(() -> "~/.m2/settings.xml contained no usable repository entries; using Maven Central");
+                LOGGER.info(() -> settingsFile.toAbsolutePath() + " contained no usable repository entries; using Maven Central");
                 return CENTRAL;
             }
             String result = String.join(",", urls);
-            LOGGER.info(() -> "Discovered Maven repository URLs from ~/.m2/settings.xml: " + result);
+            LOGGER.info(() -> "Discovered Maven repository URLs from " + settingsFile.toAbsolutePath() + ": " + result);
             return result;
         } catch (Exception e) {
-            LOGGER.warning(() -> "Failed to parse ~/.m2/settings.xml: " + e.getMessage() + "; using Maven Central");
+            LOGGER.warning(() -> "Failed to parse " + settingsFile.toAbsolutePath() + ": " + e.getMessage() + "; using Maven Central");
             return CENTRAL;
         }
     }
