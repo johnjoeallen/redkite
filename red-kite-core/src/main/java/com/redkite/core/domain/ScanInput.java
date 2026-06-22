@@ -16,5 +16,6 @@ public record ScanInput(
         Instant scannedAt,
         List<ScanComponent> components,
         List<DependencyEdge> dependencyEdges,
-        Map<String, String> fileHashes) implements Serializable {
+        Map<String, String> fileHashes,
+        List<String> treeParseWarnings) implements Serializable {
 }

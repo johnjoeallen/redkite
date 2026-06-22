@@ -145,7 +145,7 @@ class RemediationClassifierTest {
             List<UpgradeRecommendation> recs,
             List<MetadataResult> metadata) {
         return new ScanReport(1L, 1L, true, "ok", Instant.now(),
-                components, List.of(), findings, recs, List.of(), metadata);
+                components, List.of(), findings, recs, List.of(), metadata, List.of());
     }
 
     private static ScanComponent componentAt(long id, String artifactId, boolean snapshot, boolean direct, VersionSource source) {

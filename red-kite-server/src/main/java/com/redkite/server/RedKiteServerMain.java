@@ -287,6 +287,17 @@ public class RedKiteServerMain {
                 html.append("<li style=\"font-family:monospace\">").append(escape(repo)).append("</li>");
             }
             html.append("</ul></details>");
+            List<String> parseWarnings = report.treeParseWarnings() != null ? report.treeParseWarnings() : List.of();
+            if (!parseWarnings.isEmpty()) {
+                html.append("<details open style=\"margin-top:12px;background:var(--warn-bg,rgba(255,180,0,.08));border:1px solid var(--warn-line,rgba(255,180,0,.3));border-radius:8px;padding:10px 14px;font-size:.85rem\">");
+                html.append("<summary style=\"cursor:pointer;font-weight:600;color:var(--warn-text,#c97b00)\">&#9888; ").append(parseWarnings.size()).append(" unparseable dependency tree line(s) — scan is incomplete</summary>");
+                html.append("<p style=\"margin:6px 0 4px;color:var(--muted)\">These lines were returned by <code>mvn dependency:tree</code> but could not be interpreted as valid dependency coordinates. Fix the underlying POM issues and rescan.</p>");
+                html.append("<ul style=\"margin:4px 0 0 1.2em;padding:0\">");
+                for (String line : parseWarnings) {
+                    html.append("<li style=\"font-family:monospace;white-space:pre-wrap;word-break:break-all\">").append(escape(line)).append("</li>");
+                }
+                html.append("</ul></details>");
+            }
             html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
             html.append("</section>");
             html.append("<section class=\"card span-2\">");
@@ -1938,7 +1949,7 @@ public class RedKiteServerMain {
                     ScanReport draft = buildReport(input, projectId, 0L, progress);
                     long scanId = insertScan(connection, projectId, input, draft);
                     List<MetadataResult> metadataResults = draft.metadataResults().stream().map(result -> withScanId(result, scanId)).toList();
-                    ScanReport finalReport = new ScanReport(scanId, projectId, draft.complete(), draft.completenessMessage(), draft.createdAt(), draft.components(), draft.dependencyEdges(), draft.vulnerabilityFindings(), draft.recommendations(), draft.snapshotDependencyRisks(), metadataResults);
+                    ScanReport finalReport = new ScanReport(scanId, projectId, draft.complete(), draft.completenessMessage(), draft.createdAt(), draft.components(), draft.dependencyEdges(), draft.vulnerabilityFindings(), draft.recommendations(), draft.snapshotDependencyRisks(), metadataResults, draft.treeParseWarnings());
                     updateScanReport(connection, scanId, finalReport);
                     persistMetadataCache(connection, finalReport);
                     persistSourcePoms(connection, scanId, input);
@@ -2068,13 +2079,17 @@ public class RedKiteServerMain {
                     }
                 }
             }
+            List<String> treeWarnings = input.treeParseWarnings() != null ? input.treeParseWarnings() : List.of();
+            if (!treeWarnings.isEmpty()) complete = false;
             String message;
             if (complete) {
                 message = "Report complete. Dependency and vulnerability metadata was checked using fresh provider data or fresh cache.";
+            } else if (!treeWarnings.isEmpty()) {
+                message = "Report incomplete. " + treeWarnings.size() + " dependency tree line(s) could not be parsed. Rescan after resolving the issues listed below.";
             } else {
                 message = "Report incomplete. Some Maven metadata could not be refreshed or was unavailable. The report is still shown with unknown metadata and rescan is suggested.";
             }
-            return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.copyOf(vulnerabilityFindings), recs, snapshotRisks, metadata);
+            return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.copyOf(vulnerabilityFindings), recs, snapshotRisks, metadata, treeWarnings);
         }
 
         private String reasonMessage(RecommendationReason reason, String target) {

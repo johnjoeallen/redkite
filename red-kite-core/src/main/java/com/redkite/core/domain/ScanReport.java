@@ -15,5 +15,6 @@ public record ScanReport(
         List<VulnerabilityFinding> vulnerabilityFindings,
         List<UpgradeRecommendation> recommendations,
         List<SnapshotDependencyRisk> snapshotDependencyRisks,
-        List<MetadataResult> metadataResults) implements Serializable {
+        List<MetadataResult> metadataResults,
+        List<String> treeParseWarnings) implements Serializable {
 }

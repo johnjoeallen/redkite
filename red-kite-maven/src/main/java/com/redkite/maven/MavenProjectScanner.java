@@ -49,6 +49,7 @@ public class MavenProjectScanner {
             Map<String, String> hashes = new LinkedHashMap<>();
             Map<String, ScanComponent> componentsByKey = new LinkedHashMap<>();
             List<DependencyEdge> edges = new ArrayList<>();
+            List<String> treeParseWarnings = new ArrayList<>();
 
             AtomicLong nextId = new AtomicLong(1L);
             for (Path pom : pomFiles) {
@@ -133,7 +134,7 @@ public class MavenProjectScanner {
                     }
                 } else {
                     progress.accept("Running dependency:tree for " + relativePom + "…");
-                    collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId);
+                    treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId));
                 }
             }
 
@@ -157,13 +158,13 @@ public class MavenProjectScanner {
             List<ScanComponent> components = new ArrayList<>(componentsByKey.values());
             LOGGER.info(() -> "Scan completed with " + components.size() + " component(s), " + edges.size() + " dependency edge(s), and " + hashes.size() + " editable file hash(es)");
             progress.accept("Dependency scan complete — found " + components.size() + " component(s)");
-            return new ScanInput(root.getFileName().toString(), root.toString(), root.toString(), gitMetadata.branch(), gitMetadata.head(), gitMetadata.clean(), allowMajorUpgrades, Instant.now(), components, edges, hashes);
+            return new ScanInput(root.getFileName().toString(), root.toString(), root.toString(), gitMetadata.branch(), gitMetadata.head(), gitMetadata.clean(), allowMajorUpgrades, Instant.now(), components, edges, hashes, List.copyOf(treeParseWarnings));
         } catch (Exception e) {
             throw new IllegalStateException("Failed to scan Maven project", e);
         }
     }
 
-    private void collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId) {
+    private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId) {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
             String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
@@ -180,9 +181,13 @@ public class MavenProjectScanner {
             int exit = process.waitFor();
             if (exit != 0) {
                 LOGGER.warning(() -> "mvn dependency:tree failed for " + root.relativize(pom) + " with exit " + exit + "\n" + output);
-                return;
+                return List.of();
             }
-            List<ParsedTreeNode> nodes = parseDependencyTreeOutput(output);
+            TreeParseResult parseResult = parseDependencyTreeOutput(output);
+            List<ParsedTreeNode> nodes = parseResult.nodes();
+            if (!parseResult.unparsedLines().isEmpty()) {
+                LOGGER.warning(() -> "Unparseable dependency tree lines for " + root.relativize(pom) + ": " + parseResult.unparsedLines());
+            }
             LOGGER.info(() -> "Parsed " + nodes.size() + " dependency tree node(s) from " + root.relativize(pom));
             String moduleNodeId = "module:" + sourceFile;
             List<String> ancestry = new ArrayList<>();
@@ -202,8 +207,10 @@ public class MavenProjectScanner {
                 edges.add(new DependencyEdge(parentId, String.valueOf(component.id()), parseScope(node.scope()), direct));
                 LOGGER.fine(() -> "Dependency tree edge: " + parentId + " -> " + component.id() + " (" + node.groupId() + ":" + node.artifactId() + ":" + node.version() + ")");
             }
+            return parseResult.unparsedLines();
         } catch (Exception e) {
             LOGGER.warning(() -> "Unable to run mvn dependency:tree for " + root.relativize(pom) + ": " + e.getMessage());
+            return List.of();
         }
     }
 
@@ -320,20 +327,22 @@ public class MavenProjectScanner {
         return version == null || version.isBlank() || "unknown".equalsIgnoreCase(version.trim());
     }
 
-    private List<ParsedTreeNode> parseDependencyTreeOutput(String output) {
+    private TreeParseResult parseDependencyTreeOutput(String output) {
         List<ParsedTreeNode> nodes = new ArrayList<>();
+        List<String> unparsed = new ArrayList<>();
         for (String rawLine : output.split("\\R")) {
             String line = rawLine.stripTrailing();
-            if (line.isBlank()) {
-                continue;
-            }
-            line = stripMavenLogPrefix(line);
-            ParsedTreeNode node = parseDependencyTreeLine(line);
+            if (line.isBlank()) continue;
+            String stripped = stripMavenLogPrefix(line);
+            boolean looksLikeDep = branchStart(stripped) >= 0 && stripped.contains(":");
+            ParsedTreeNode node = parseDependencyTreeLine(stripped);
             if (node != null) {
                 nodes.add(node);
+            } else if (looksLikeDep && !stripped.contains("(omitted")) {
+                unparsed.add(rawLine);
             }
         }
-        return nodes;
+        return new TreeParseResult(nodes, unparsed);
     }
 
     private String stripMavenLogPrefix(String line) {
@@ -435,8 +444,8 @@ public class MavenProjectScanner {
         return Objects.equals(leftGroupId, rightGroupId) && Objects.equals(leftArtifactId, rightArtifactId);
     }
 
-    private record ParsedTreeNode(int depth, String groupId, String artifactId, String version, String scope) {
-    }
+    private record ParsedTreeNode(int depth, String groupId, String artifactId, String version, String scope) {}
+    private record TreeParseResult(List<ParsedTreeNode> nodes, List<String> unparsedLines) {}
 
     private GitMetadata readGitMetadata(Path root) {
         try {
