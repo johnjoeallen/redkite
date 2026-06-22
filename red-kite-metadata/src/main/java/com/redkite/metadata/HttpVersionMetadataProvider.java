@@ -12,6 +12,9 @@ import org.w3c.dom.NodeList;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Instant;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -19,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 public class HttpVersionMetadataProvider implements VersionMetadataProvider {
@@ -34,15 +38,23 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     private final Map<String, CacheEntry> cache = new LinkedHashMap<>();
     private final String username;
     private final String password;
+    /** Nullable — when null, no persistent DB cache is used. */
+    private final Supplier<Connection> dbConnectionFactory;
 
     public HttpVersionMetadataProvider(String baseUrl) {
-        this(baseUrl, null, null);
+        this(baseUrl, null, null, null);
     }
 
     public HttpVersionMetadataProvider(String baseUrl, String username, String password) {
+        this(baseUrl, username, password, null);
+    }
+
+    public HttpVersionMetadataProvider(String baseUrl, String username, String password,
+                                       Supplier<Connection> dbConnectionFactory) {
         this.repositoryBaseUrls = parseRepositoryBases(baseUrl);
         this.username = username;
         this.password = password;
+        this.dbConnectionFactory = dbConnectionFactory;
     }
 
     public List<String> getRepositoryBaseUrls() {
@@ -55,12 +67,102 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             MetadataStatus s = e.getValue().status();
             return s == MetadataStatus.PROVIDER_ERROR || s == MetadataStatus.MISSING;
         });
+        dbDeleteErrors();
     }
 
     /** Clear the entire version metadata cache, forcing a full re-fetch on the next scan. */
     public synchronized void clearAll() {
         cache.clear();
+        dbDeleteAll();
         LOGGER.info("Version metadata cache cleared");
+    }
+
+    // ---- persistent cache helpers ----
+
+    private void putCache(String cacheKey, CacheEntry entry) {
+        cache.put(cacheKey, entry);
+        dbWrite(cacheKey, entry);
+    }
+
+    private CacheEntry tryLoadFromDb(String cacheKey) {
+        if (dbConnectionFactory == null) return null;
+        try (Connection c = dbConnectionFactory.get();
+             PreparedStatement ps = c.prepareStatement(
+                     "select all_versions, latest_version, source, expires_at_epoch_ms, status, complete " +
+                     "from rk_version_cache where cache_key = ?")) {
+            ps.setString(1, cacheKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                List<String> versions = csvToVersions(rs.getString("all_versions"));
+                String latestVersion = rs.getString("latest_version");
+                String source = rs.getString("source");
+                Instant expiresAt = Instant.ofEpochMilli(rs.getLong("expires_at_epoch_ms"));
+                MetadataStatus status = parseStatus(rs.getString("status"));
+                boolean complete = rs.getBoolean("complete");
+                return new CacheEntry(versions, latestVersion, source, expiresAt, status, complete);
+            }
+        } catch (Exception e) {
+            LOGGER.warning(() -> "DB version cache read failed for " + cacheKey + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void dbWrite(String cacheKey, CacheEntry entry) {
+        if (dbConnectionFactory == null) return;
+        try (Connection c = dbConnectionFactory.get();
+             PreparedStatement ps = c.prepareStatement(
+                     "merge into rk_version_cache (cache_key, all_versions, latest_version, source, " +
+                     "expires_at_epoch_ms, status, complete, updated_at) " +
+                     "key (cache_key) values (?, ?, ?, ?, ?, ?, ?, current_timestamp)")) {
+            ps.setString(1, cacheKey);
+            ps.setString(2, versionsToCsv(entry.versions()));
+            ps.setString(3, entry.latestVersion());
+            ps.setString(4, entry.source());
+            ps.setLong(5, entry.expiresAt().toEpochMilli());
+            ps.setString(6, entry.status().name());
+            ps.setBoolean(7, entry.complete());
+            ps.executeUpdate();
+        } catch (Exception e) {
+            LOGGER.warning(() -> "DB version cache write failed for " + cacheKey + ": " + e.getMessage());
+        }
+    }
+
+    private void dbDeleteAll() {
+        if (dbConnectionFactory == null) return;
+        try (Connection c = dbConnectionFactory.get();
+             PreparedStatement ps = c.prepareStatement("delete from rk_version_cache")) {
+            ps.executeUpdate();
+        } catch (Exception e) {
+            LOGGER.warning(() -> "DB version cache clear failed: " + e.getMessage());
+        }
+    }
+
+    private void dbDeleteErrors() {
+        if (dbConnectionFactory == null) return;
+        try (Connection c = dbConnectionFactory.get();
+             PreparedStatement ps = c.prepareStatement(
+                     "delete from rk_version_cache where status in ('PROVIDER_ERROR', 'MISSING')")) {
+            ps.executeUpdate();
+        } catch (Exception e) {
+            LOGGER.warning(() -> "DB version cache error-clear failed: " + e.getMessage());
+        }
+    }
+
+    private static String versionsToCsv(List<String> versions) {
+        return versions == null ? "" : String.join(",", versions);
+    }
+
+    private static List<String> csvToVersions(String csv) {
+        List<String> result = new ArrayList<>();
+        if (csv == null || csv.isBlank()) return result;
+        for (String v : csv.split(",")) {
+            if (!v.isBlank()) result.add(v);
+        }
+        return result;
+    }
+
+    private static MetadataStatus parseStatus(String s) {
+        try { return MetadataStatus.valueOf(s); } catch (Exception e) { return MetadataStatus.PROVIDER_ERROR; }
     }
 
     @Override
@@ -72,7 +174,16 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     public VersionMetadata latestVersion(ComponentCoordinate coordinate, String currentVersion) {
         Instant now = Instant.now();
         String cacheKey = coordinate.groupId() + ":" + coordinate.artifactId();
-        CacheEntry cached = cache.get(cacheKey);
+        CacheEntry memCached = cache.get(cacheKey);
+        if (memCached == null) {
+            CacheEntry dbCached = tryLoadFromDb(cacheKey);
+            if (dbCached != null) {
+                cache.put(cacheKey, dbCached);
+                LOGGER.info(() -> "Version metadata DB cache hit for " + cacheKey + " status=" + dbCached.status() + " expires=" + dbCached.expiresAt());
+                memCached = dbCached;
+            }
+        }
+        CacheEntry cached = memCached;
         if (cached != null) {
             LOGGER.info(() -> "Version metadata cache hit for " + cacheKey + " from " + cached.source() + " status=" + cached.status() + " complete=" + cached.complete());
             if (cached.isFresh(now)) {
@@ -168,7 +279,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                             false,
                             CacheState.MISSING,
                             MetadataStatus.RATE_LIMITED);
-                    cache.put(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl, now.plus(NEGATIVE_TTL), MetadataStatus.RATE_LIMITED, false));
+                    putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl, now.plus(NEGATIVE_TTL), MetadataStatus.RATE_LIMITED, false));
                     return metadata;
                 }
                 LOGGER.warning(() -> "Unexpected HTTP " + status + " — URI: " + metadataUrl);
@@ -192,11 +303,11 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 CacheState.MISSING,
                 lastStatus);
         if (lastStatus == MetadataStatus.MISSING) {
-            cache.put(cacheKey, CacheEntry.negative(List.of(), "unknown", source, now.plus(NEGATIVE_TTL), lastStatus, false));
+            putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", source, now.plus(NEGATIVE_TTL), lastStatus, false));
             LOGGER.info(() -> "Stored negative Maven version cache entry for " + cacheKey + " from " + source);
         } else {
             MetadataStatus errorStatus = lastStatus;
-            cache.put(cacheKey, CacheEntry.error(List.of(), "unknown", source, now.plus(ERROR_TTL), errorStatus, false));
+            putCache(cacheKey, CacheEntry.error(List.of(), "unknown", source, now.plus(ERROR_TTL), errorStatus, false));
             LOGGER.info(() -> "Stored error Maven version cache entry for " + cacheKey + " from " + source + " status=" + errorStatus);
         }
         return metadata;
@@ -221,7 +332,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 coordinate, latest, latestSameMajor, upgradePathVersions,
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
         // Cache stores all versions so the dropdown stays complete on cache hit.
-        cache.put(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
+        putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
         LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest);
         return metadata;
     }
