@@ -258,13 +258,44 @@ public class MavenSettingsReader {
         for (int i = 0; i < serverNodes.getLength(); i++) {
             if (!(serverNodes.item(i) instanceof Element server)) continue;
             String id = text(server, "id");
-            String username = text(server, "username");
-            String password = text(server, "password");
+            String username = resolveCredential("username", text(server, "username"), id);
+            String password = resolveCredential("password", text(server, "password"), id);
             if (id != null && !id.isBlank()) {
                 servers.put(id.trim(), new String[]{username, password});
             }
         }
         return servers;
+    }
+
+    /**
+     * Resolves ${env.VAR} placeholders in a credential value.
+     * Returns null if the value is blank, still contains an unresolved placeholder,
+     * or the referenced environment variable is absent/empty — so callers never
+     * send a literal "${env.MAVEN_REPO_USER}" as a credential.
+     */
+    static String resolveCredential(String field, String raw, String serverId) {
+        if (raw == null || raw.isBlank()) return null;
+        String resolved = raw;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\\$\\{env\\.([^}]+)\\}").matcher(raw);
+        StringBuilder sb = new StringBuilder();
+        while (m.find()) {
+            String envVar = m.group(1);
+            String envVal = System.getenv(envVar);
+            if (envVal == null || envVal.isBlank()) {
+                LOGGER.warning(() -> "Server '" + serverId + "' " + field
+                        + " references ${env." + envVar + "} but that environment variable is not set; credentials will not be used");
+                return null;
+            }
+            m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(envVal));
+        }
+        m.appendTail(sb);
+        resolved = sb.toString();
+        if (resolved.contains("${")) {
+            LOGGER.warning(() -> "Server '" + serverId + "' " + field
+                    + " contains unresolved placeholder(s); credentials will not be used");
+            return null;
+        }
+        return resolved.isBlank() ? null : resolved;
     }
 
     private static List<String> parseMirrors(Element root) {

@@ -49,6 +49,14 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return repositoryBaseUrls;
     }
 
+    /** Remove PROVIDER_ERROR and MISSING cache entries so they are re-fetched after a configuration change. */
+    public synchronized void clearErrorCache() {
+        cache.entrySet().removeIf(e -> {
+            MetadataStatus s = e.getValue().status();
+            return s == MetadataStatus.PROVIDER_ERROR || s == MetadataStatus.MISSING;
+        });
+    }
+
     @Override
     public VersionMetadata latestVersion(ComponentCoordinate coordinate) {
         return latestVersion(coordinate, null);
@@ -121,6 +129,37 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                             + coordinate.groupId() + ":" + coordinate.artifactId()
                             + " but none are stable releases — URI: " + metadataUrl
                             + " — versions: " + allVersions.subList(0, Math.min(10, count)));
+                    lastStatus = MetadataStatus.PROVIDER_ERROR;
+                    continue;
+                }
+                if (status == 401) {
+                    if (username != null && !username.isBlank()) {
+                        // Credentials caused a 401 on what may be a publicly readable repo.
+                        // Retry anonymously so a bad/expired password doesn't block results.
+                        LOGGER.warning(() -> "401 Unauthorized with credentials; retrying anonymously — URI: " + metadataUrl);
+                        try {
+                            var anonResp = CLIENT.send(
+                                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
+                                            .GET()
+                                            .header("Accept", artif ? "application/json" : "application/xml,text/xml,*/*")
+                                            .timeout(java.time.Duration.ofSeconds(20))
+                                            .build(),
+                                    java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                            if (anonResp.statusCode() == 200) {
+                                List<String> allVersions = artif
+                                        ? parseArtifactoryVersions(anonResp.body())
+                                        : parseVersions(anonResp.body());
+                                if (!allVersions.isEmpty()) {
+                                    VersionMetadata result = succeedWithVersions(allVersions, metadataUrl, coordinate, currentVersion, now, cacheKey);
+                                    if (result != null) return result;
+                                }
+                            }
+                        } catch (Exception e2) {
+                            LOGGER.warning(() -> "Anonymous retry also failed — URI: " + metadataUrl + " — " + e2.getMessage());
+                        }
+                    } else {
+                        LOGGER.warning(() -> "401 Unauthorized (no credentials configured) — URI: " + metadataUrl);
+                    }
                     lastStatus = MetadataStatus.PROVIDER_ERROR;
                     continue;
                 }

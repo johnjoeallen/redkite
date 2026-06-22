@@ -1795,7 +1795,12 @@ public class RedKiteServerMain {
             if (System.getProperty("redkite.maven.repositories") != null) return;
             java.nio.file.Path resolved = MavenSettingsReader.resolveSettingsFile(projectRoot);
             String newPath = resolved != null ? resolved.toAbsolutePath().toString() : null;
-            if (java.util.Objects.equals(newPath, mavenSettingsPath)) return;
+            if (java.util.Objects.equals(newPath, mavenSettingsPath)) {
+                // Same settings file but credentials might have changed (env vars set after startup).
+                // Clear error/missing cache so they get re-fetched with fresh env resolution.
+                versionProvider.clearErrorCache();
+                return;
+            }
             LOGGER.info(() -> "Reconfiguring Maven settings for project " + projectRoot + ": " + newPath);
             this.mavenSettingsPath = newPath;
             this.versionProvider = buildVersionProvider(projectRoot);
