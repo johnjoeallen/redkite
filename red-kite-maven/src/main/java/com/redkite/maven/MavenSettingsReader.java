@@ -138,10 +138,15 @@ public class MavenSettingsReader {
                     + (username != null && !username.isBlank() ? " (with credentials)" : ""));
         }
 
-        List<String> activeProfileIds = parseActiveProfiles(root);
-        for (String url : parseProfileRepositories(root, activeProfileIds)) {
-            if (seen.add(url)) {
-                configs.add(new RepoConfig(url, null, null));
+        // When mirrorOf=* (or external:*) is present every repository is routed through
+        // the mirror. Adding profile repos directly would bypass the mirror and send
+        // requests to the original upstream (the typical source of "wrong Artifactory" bugs).
+        if (!isAllMirrored(root)) {
+            List<String> activeProfileIds = parseActiveProfiles(root);
+            for (String url : parseProfileRepositories(root, activeProfileIds)) {
+                if (seen.add(url)) {
+                    configs.add(new RepoConfig(url, null, null));
+                }
             }
         }
 
@@ -151,6 +156,8 @@ public class MavenSettingsReader {
             }
         }
 
+        LOGGER.info(() -> "Effective Maven repositories: "
+                + configs.stream().map(RepoConfig::url).collect(java.util.stream.Collectors.joining(", ")));
         return List.copyOf(configs);
     }
 
@@ -213,6 +220,23 @@ public class MavenSettingsReader {
             String t = part.trim();
             if ("*".equals(t) || "central".equals(t) || "external:*".equals(t)) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    /** Returns true if any mirror's mirrorOf is * or external:*, meaning it covers every repo. */
+    private static boolean isAllMirrored(Element root) {
+        Element mirrorsEl = firstChild(root, "mirrors");
+        if (mirrorsEl == null) return false;
+        NodeList mirrors = mirrorsEl.getElementsByTagName("mirror");
+        for (int i = 0; i < mirrors.getLength(); i++) {
+            if (!(mirrors.item(i) instanceof Element mirror)) continue;
+            String mirrorOf = text(mirror, "mirrorOf");
+            if (mirrorOf == null) continue;
+            for (String part : mirrorOf.split(",")) {
+                String t = part.trim();
+                if ("*".equals(t) || "external:*".equals(t)) return true;
             }
         }
         return false;

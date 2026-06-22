@@ -45,6 +45,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         this.password = password;
     }
 
+    public List<String> getRepositoryBaseUrls() {
+        return repositoryBaseUrls;
+    }
+
     @Override
     public VersionMetadata latestVersion(ComponentCoordinate coordinate) {
         return latestVersion(coordinate, null);

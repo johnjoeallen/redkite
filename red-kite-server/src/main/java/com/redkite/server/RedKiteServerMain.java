@@ -276,6 +276,11 @@ public class RedKiteServerMain {
             html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Rescan</button>");
             html.append("</div>");
             html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
+            html.append("<details style=\"margin-top:8px;font-size:.85rem\"><summary style=\"color:var(--muted);cursor:pointer\">Maven repositories</summary><ul style=\"margin:6px 0 0 1.2em;padding:0\">");
+            for (String repo : store.effectiveMavenRepos) {
+                html.append("<li style=\"font-family:monospace\">").append(escape(repo)).append("</li>");
+            }
+            html.append("</ul></details>");
             html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
             html.append("</section>");
             html.append("<section class=\"card span-2\">");
@@ -1755,6 +1760,7 @@ public class RedKiteServerMain {
         private final String dbPassword;
         private final HttpVersionMetadataProvider versionProvider;
         private final HttpVulnerabilityProvider vulnerabilityProvider;
+        private final List<String> effectiveMavenRepos;
 
         private Store(String jdbcUrl, String dbUser, String dbPassword) {
             this.jdbcUrl = jdbcUrl;
@@ -1778,6 +1784,8 @@ public class RedKiteServerMain {
                 }
                 this.versionProvider = new HttpVersionMetadataProvider(urls, repoUser, repoPass);
             }
+            this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
+            LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
             initializeSchema();
         }
