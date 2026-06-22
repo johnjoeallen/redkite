@@ -1169,7 +1169,9 @@ public class RedKiteServerMain {
         List<String> otherReasons = status.reasons().stream()
                 .filter(r -> !"Upgrade recommended".equals(r)).toList();
         boolean showUpgradeBtn = view.recommendation() != null && !status.isSnapshot();
-        if (!otherReasons.isEmpty() || showUpgradeBtn) {
+        boolean showNoUpgradeChip = !comp.direct() && !status.isSnapshot()
+                && view.recommendation() == null && view.versionMetadata() != null;
+        if (!otherReasons.isEmpty() || showUpgradeBtn || showNoUpgradeChip) {
             html.append("<div class=\"rem-reasons\">");
             for (String reason : otherReasons) {
                 html.append("<span class=\"reason-chip\">").append(escape(reason)).append("</span>");
@@ -1180,9 +1182,11 @@ public class RedKiteServerMain {
                         .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
                         .append("Upgrade recommended</button>");
                 } else {
-                    String transitiveChip = view.canUpgradeViaDirect() ? "Upgradable via direct" : "Needs major bump on direct";
+                    String transitiveChip = view.canUpgradeViaDirect() ? "Upgrade available" : "Major upgrade available";
                     html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");
                 }
+            } else if (showNoUpgradeChip) {
+                html.append("<span class=\"reason-chip\">No upgrade available</span>");
             }
             html.append("</div>");
         }
