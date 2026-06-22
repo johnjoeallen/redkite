@@ -416,6 +416,7 @@ public class RedKiteServerMain {
             return;
         }
         store.versionProvider.clearAll();
+        store.clearVersionCache();
         sendJson(exchange, 200, "{\"cleared\":true}");
     }
 
@@ -1960,6 +1961,16 @@ public class RedKiteServerMain {
 
         private java.sql.Connection dbConnection() {
             try { return connection(); } catch (java.sql.SQLException e) { throw new RuntimeException(e); }
+        }
+
+        synchronized void clearVersionCache() {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement("delete from rk_version_cache")) {
+                int rows = ps.executeUpdate();
+                LOGGER.info(() -> "Cleared rk_version_cache: " + rows + " rows deleted");
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to clear rk_version_cache: " + e.getMessage());
+            }
         }
 
         static Store connect(String jdbcUrl, String dbUser, String dbPassword) {

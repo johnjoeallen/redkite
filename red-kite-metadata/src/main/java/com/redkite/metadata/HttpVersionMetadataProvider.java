@@ -111,9 +111,17 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         if (dbConnectionFactory == null) return;
         try (Connection c = dbConnectionFactory.get();
              PreparedStatement ps = c.prepareStatement(
-                     "merge into rk_version_cache (cache_key, all_versions, latest_version, source, " +
-                     "expires_at_epoch_ms, status, complete, updated_at) " +
-                     "key (cache_key) values (?, ?, ?, ?, ?, ?, ?, current_timestamp)")) {
+                     "insert into rk_version_cache " +
+                     "(cache_key, all_versions, latest_version, source, expires_at_epoch_ms, status, complete, updated_at) " +
+                     "values (?, ?, ?, ?, ?, ?, ?, current_timestamp) " +
+                     "on conflict (cache_key) do update set " +
+                     "all_versions = excluded.all_versions, " +
+                     "latest_version = excluded.latest_version, " +
+                     "source = excluded.source, " +
+                     "expires_at_epoch_ms = excluded.expires_at_epoch_ms, " +
+                     "status = excluded.status, " +
+                     "complete = excluded.complete, " +
+                     "updated_at = current_timestamp")) {
             ps.setString(1, cacheKey);
             ps.setString(2, versionsToCsv(entry.versions()));
             ps.setString(3, entry.latestVersion());
