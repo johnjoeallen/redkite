@@ -31,8 +31,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
             .build();
     private static final Duration FRESH_TTL = Duration.ofHours(24);
+    private static final Duration LOCAL_TTL = Duration.ofHours(1);
     private static final Duration NEGATIVE_TTL = Duration.ofHours(6);
     private static final Duration ERROR_TTL = Duration.ofMinutes(15);
+    private static final String MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
 
     private final List<String> repositoryBaseUrls;
     private final Map<String, CacheEntry> cache = new LinkedHashMap<>();
@@ -339,9 +341,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         VersionMetadata metadata = new VersionMetadata(
                 coordinate, latest, latestSameMajor, upgradePathVersions,
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
-        // Cache stores all versions so the dropdown stays complete on cache hit.
-        putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(FRESH_TTL), MetadataStatus.FRESH, true));
-        LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest);
+        // Use a short TTL for artifacts not on Maven Central (internal/local); they can change frequently.
+        Duration ttl = isCentralUrl(source) || existsOnCentral(coordinate) ? FRESH_TTL : LOCAL_TTL;
+        putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
+        LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
         return metadata;
     }
 
@@ -405,6 +408,27 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     private static boolean isArtifactoryUrl(String url) {
         return url.toLowerCase().contains("/artifactory");
+    }
+
+    private static boolean isCentralUrl(String url) {
+        return url.contains("repo1.maven.org") || url.contains("central.maven.org")
+                || url.contains("repo.maven.apache.org");
+    }
+
+    /** HEAD against Maven Central; returns true if the artifact exists there. Defaults to false on error. */
+    private static boolean existsOnCentral(ComponentCoordinate coordinate) {
+        String url = metadataUrl(MAVEN_CENTRAL_BASE, coordinate);
+        try {
+            java.net.http.HttpResponse<Void> resp = CLIENT.send(
+                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
+                            .method("HEAD", java.net.http.HttpRequest.BodyPublishers.noBody())
+                            .timeout(Duration.ofSeconds(10)).build(),
+                    java.net.http.HttpResponse.BodyHandlers.discarding());
+            return resp.statusCode() == 200;
+        } catch (Exception e) {
+            LOGGER.fine(() -> "Central HEAD check failed for " + coordinate.groupId() + ":" + coordinate.artifactId() + ": " + e.getMessage());
+            return false;
+        }
     }
 
     private static String artifactoryVersionsUrl(String repoUrl, ComponentCoordinate coordinate) {
