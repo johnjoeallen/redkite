@@ -257,14 +257,13 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return bases.isEmpty() ? List.of("https://repo1.maven.org/maven2") : List.copyOf(bases);
     }
 
+    // Matches plain numeric versions (1.2.3) plus well-known stable qualifiers
+    // (.Final, .RELEASE, .GA, .SPn, .SRn) used by Hibernate, Spring, JBoss etc.
     private static final java.util.regex.Pattern STABLE_VERSION_PATTERN =
-            java.util.regex.Pattern.compile("^\\d+(?:\\.\\d+){1,3}$");
+            java.util.regex.Pattern.compile(
+                    "^\\d+(?:\\.\\d+){1,3}(?:[.\\-](?:Final|RELEASE|GA|SP\\d*|SR\\d*))?$",
+                    java.util.regex.Pattern.CASE_INSENSITIVE);
 
-    /**
-     * Returns true only for plain numeric releases: 1, 1.2, 1.2.3, or 1.2.3.4.
-     * Any qualifier (SNAPSHOT, -RC1, -alpha, timestamped builds like
-     * 3.18.1-20250709.213312-1, .Final, .RELEASE, etc.) returns false.
-     */
     static boolean isStableVersion(String version) {
         if (version == null || version.isBlank()) return false;
         return STABLE_VERSION_PATTERN.matcher(version.trim()).matches();
