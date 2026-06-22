@@ -360,9 +360,9 @@ public class RedKiteServerMain {
             html.append("<div>");
             html.append("<p class=\"eyebrow\">").append(escape(reportFmt.format(report.createdAt()))).append("</p>");
             if (project != null) {
-                html.append("<h1><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
+                html.append("<h1 style=\"font-size:1.5rem\"><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
             } else {
-                html.append("<h1>").append(escape(projectName)).append("</h1>");
+                html.append("<h1 style=\"font-size:1.5rem\">").append(escape(projectName)).append("</h1>");
             }
             html.append("</div>");
             html.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");

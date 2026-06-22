@@ -81,9 +81,9 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     // ---- persistent cache helpers ----
 
-    private void putCache(String cacheKey, CacheEntry entry) {
+    private boolean putCache(String cacheKey, CacheEntry entry) {
         cache.put(cacheKey, entry);
-        dbWrite(cacheKey, entry);
+        return dbWrite(cacheKey, entry);
     }
 
     private CacheEntry tryLoadFromDb(String cacheKey) {
@@ -109,21 +109,14 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         }
     }
 
-    private void dbWrite(String cacheKey, CacheEntry entry) {
-        if (dbConnectionFactory == null) return;
+    private boolean dbWrite(String cacheKey, CacheEntry entry) {
+        if (dbConnectionFactory == null) return true;
         try (Connection c = dbConnectionFactory.get();
              PreparedStatement ps = c.prepareStatement(
-                     "insert into rk_version_cache " +
+                     "merge into rk_version_cache " +
                      "(cache_key, all_versions, latest_version, source, expires_at_epoch_ms, status, complete, updated_at) " +
-                     "values (?, ?, ?, ?, ?, ?, ?, current_timestamp) " +
-                     "on conflict (cache_key) do update set " +
-                     "all_versions = excluded.all_versions, " +
-                     "latest_version = excluded.latest_version, " +
-                     "source = excluded.source, " +
-                     "expires_at_epoch_ms = excluded.expires_at_epoch_ms, " +
-                     "status = excluded.status, " +
-                     "complete = excluded.complete, " +
-                     "updated_at = current_timestamp")) {
+                     "key (cache_key) " +
+                     "values (?, ?, ?, ?, ?, ?, ?, current_timestamp)")) {
             ps.setString(1, cacheKey);
             ps.setString(2, versionsToCsv(entry.versions()));
             ps.setString(3, entry.latestVersion());
@@ -132,8 +125,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             ps.setString(6, entry.status().name());
             ps.setBoolean(7, entry.complete());
             ps.executeUpdate();
+            return true;
         } catch (Exception e) {
             LOGGER.warning(() -> "DB version cache write failed for " + cacheKey + ": " + e.getMessage());
+            return false;
         }
     }
 
@@ -343,8 +338,12 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
         // Use a short TTL for artifacts not on Maven Central (internal/local); they can change frequently.
         Duration ttl = isCentralUrl(source) || existsOnCentral(coordinate) ? FRESH_TTL : LOCAL_TTL;
-        putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
-        LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
+        boolean persisted = putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
+        if (persisted) {
+            LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
+        } else {
+            LOGGER.warning(() -> "Retrieved Maven version metadata but failed to persist cache for " + cacheKey + " => " + latest);
+        }
         return metadata;
     }
 
