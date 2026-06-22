@@ -57,6 +57,12 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         });
     }
 
+    /** Clear the entire version metadata cache, forcing a full re-fetch on the next scan. */
+    public synchronized void clearAll() {
+        cache.clear();
+        LOGGER.info("Version metadata cache cleared");
+    }
+
     @Override
     public VersionMetadata latestVersion(ComponentCoordinate coordinate) {
         return latestVersion(coordinate, null);
@@ -96,17 +102,24 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                     ? artifactoryVersionsUrl(repositoryBaseUrl, coordinate)
                     : metadataUrl(repositoryBaseUrl, coordinate);
             try {
-                var requestBuilder = java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
-                        .GET()
-                        .header("Accept", artif ? "application/json" : "application/xml,text/xml,*/*")
-                        .timeout(java.time.Duration.ofSeconds(20));
-                if (username != null && !username.isBlank()) {
+                String accept = artif ? "application/json" : "application/xml,text/xml,*/*";
+                // Always try anonymous first. Only add credentials on 401.
+                java.net.http.HttpResponse<String> response = CLIENT.send(
+                        java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
+                                .GET().header("Accept", accept)
+                                .timeout(java.time.Duration.ofSeconds(20)).build(),
+                        java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (response.statusCode() == 401 && username != null && !username.isBlank()) {
+                    LOGGER.info(() -> "Anonymous 401; retrying with credentials — URI: " + metadataUrl);
                     String encoded = java.util.Base64.getEncoder().encodeToString(
                             (username + ":" + (password != null ? password : "")).getBytes(StandardCharsets.UTF_8));
-                    requestBuilder.header("Authorization", "Basic " + encoded);
+                    response = CLIENT.send(
+                            java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
+                                    .GET().header("Accept", accept)
+                                    .header("Authorization", "Basic " + encoded)
+                                    .timeout(java.time.Duration.ofSeconds(20)).build(),
+                            java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 }
-                java.net.http.HttpRequest request = requestBuilder.build();
-                java.net.http.HttpResponse<String> response = CLIENT.send(request, java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 int status = response.statusCode();
                 if (status == 200) {
                     List<String> allVersions = artif
@@ -133,33 +146,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                     continue;
                 }
                 if (status == 401) {
-                    if (username != null && !username.isBlank()) {
-                        // Credentials caused a 401 on what may be a publicly readable repo.
-                        // Retry anonymously so a bad/expired password doesn't block results.
-                        LOGGER.warning(() -> "401 Unauthorized with credentials; retrying anonymously — URI: " + metadataUrl);
-                        try {
-                            var anonResp = CLIENT.send(
-                                    java.net.http.HttpRequest.newBuilder(java.net.URI.create(metadataUrl))
-                                            .GET()
-                                            .header("Accept", artif ? "application/json" : "application/xml,text/xml,*/*")
-                                            .timeout(java.time.Duration.ofSeconds(20))
-                                            .build(),
-                                    java.net.http.HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                            if (anonResp.statusCode() == 200) {
-                                List<String> allVersions = artif
-                                        ? parseArtifactoryVersions(anonResp.body())
-                                        : parseVersions(anonResp.body());
-                                if (!allVersions.isEmpty()) {
-                                    VersionMetadata result = succeedWithVersions(allVersions, metadataUrl, coordinate, currentVersion, now, cacheKey);
-                                    if (result != null) return result;
-                                }
-                            }
-                        } catch (Exception e2) {
-                            LOGGER.warning(() -> "Anonymous retry also failed — URI: " + metadataUrl + " — " + e2.getMessage());
-                        }
-                    } else {
-                        LOGGER.warning(() -> "401 Unauthorized (no credentials configured) — URI: " + metadataUrl);
-                    }
+                    LOGGER.warning(() -> "401 Unauthorized" + (username != null && !username.isBlank() ? " (credentials rejected)" : " (no credentials configured)") + " — URI: " + metadataUrl);
                     lastStatus = MetadataStatus.PROVIDER_ERROR;
                     continue;
                 }
