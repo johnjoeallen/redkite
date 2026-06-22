@@ -276,7 +276,7 @@ public class RedKiteServerMain {
             html.append("<div style=\"display:flex;align-items:center;gap:10px\">");
             html.append(report.complete() ? "<span class=\"badge success\">Complete</span>" : "<span class=\"badge warn\">Incomplete</span>");
             html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Rescan</button>");
-            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerFreshScan(").append(escape(jsString(projectPath))).append(")\" title=\"Clear version metadata cache then rescan\">Rescan (fresh)</button>");
+            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerFreshScan(").append(escape(jsString(projectPath))).append(")\" title=\"Clear version metadata cache then rescan\">Rescan (clear cache)</button>");
             html.append("</div>");
             html.append("</div><p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
             html.append("<details style=\"margin-top:8px;font-size:.85rem\"><summary style=\"color:var(--muted);cursor:pointer\">Maven repositories</summary>");
