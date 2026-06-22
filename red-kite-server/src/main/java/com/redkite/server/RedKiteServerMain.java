@@ -1541,6 +1541,7 @@ public class RedKiteServerMain {
                 + ".nav { display:flex; gap:12px; flex-wrap:wrap; }"
                 + ".nav a, .button { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background: rgba(18,26,50,.72); }"
                 + ".nav a:hover, .button:hover { border-color: rgba(125,211,252,.5); transform: translateY(-1px); }"
+                + ".button:disabled { opacity:.35; cursor:not-allowed; pointer-events:none; }"
                 + ".button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color:#08111f; font-weight:700; border-color: transparent; }"
                 + ".hero { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin:18px 0 28px; padding:28px; border:1px solid var(--line); border-radius:24px; background: linear-gradient(135deg, rgba(18,26,50,.95), rgba(15,22,41,.95)); box-shadow: 0 18px 60px rgba(0,0,0,.25); }"
                 + ".hero h1, h1 { margin:0; font-size: clamp(2rem, 3vw, 3.5rem); }"
