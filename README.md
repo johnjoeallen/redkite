@@ -83,10 +83,10 @@ java -Dredkite.port=8080 -jar red-kite.jar
 | Property | Default |
 |---|---|
 | `redkite.port` | `6502` |
-| `redkite.db.url` | `jdbc:h2:./data/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE` |
+| `redkite.db.url` | `jdbc:h2:~/.redkite/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE` |
 | `redkite.db.user` | `sa` |
 | `redkite.db.password` | _(empty)_ |
-| `redkite.prefs.file` | `./data/preferences.properties` |
+| `redkite.prefs.file` | `~/.redkite/preferences.properties` |
 | `redkite.osv.url` | `https://api.osv.dev` |
 
 ## Build From Source

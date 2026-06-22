@@ -85,7 +85,9 @@ public class RedKiteServerMain {
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
         this.store = Store.connect(jdbcUrl, dbUser, dbPassword);
-        this.prefsFile = java.nio.file.Path.of(System.getProperty("redkite.prefs.file", "./data/preferences.properties"));
+        java.nio.file.Path defaultDataDir = java.nio.file.Path.of(System.getProperty("user.home"), ".redkite");
+        this.prefsFile = java.nio.file.Path.of(System.getProperty("redkite.prefs.file",
+                defaultDataDir.resolve("preferences.properties").toString()));
         this.theme = loadTheme();
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         this.server.setExecutor(Executors.newCachedThreadPool());
@@ -120,7 +122,10 @@ public class RedKiteServerMain {
     }
 
     public static void main(String[] args) throws Exception {
-        String jdbcUrl = System.getProperty("redkite.db.url", "jdbc:h2:./data/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE");
+        java.nio.file.Path dataDir = java.nio.file.Path.of(System.getProperty("user.home"), ".redkite");
+        Files.createDirectories(dataDir);
+        String jdbcUrl = System.getProperty("redkite.db.url",
+                "jdbc:h2:" + dataDir.resolve("redkite") + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE");
         String dbUser = System.getProperty("redkite.db.user", "sa");
         String dbPassword = System.getProperty("redkite.db.password", "");
         int port = Integer.parseInt(System.getProperty("redkite.port", "6502"));
