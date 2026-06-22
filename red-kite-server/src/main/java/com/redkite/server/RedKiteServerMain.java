@@ -1772,11 +1772,12 @@ public class RedKiteServerMain {
             this.dbUser = dbUser;
             this.dbPassword = dbPassword;
             String mavenRepos = System.getProperty("redkite.maven.repositories");
-            java.nio.file.Path settingsPath = java.nio.file.Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
             if (mavenRepos != null) {
                 this.versionProvider = new HttpVersionMetadataProvider(mavenRepos);
                 this.mavenSettingsPath = null;
             } else {
+                java.nio.file.Path settingsPath = MavenSettingsReader.resolveSettingsFile();
+                this.mavenSettingsPath = settingsPath != null ? settingsPath.toAbsolutePath().toString() : null;
                 List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs();
                 String urls = repoConfigs.stream()
                         .map(MavenSettingsReader.RepoConfig::url)
@@ -1790,8 +1791,6 @@ public class RedKiteServerMain {
                     }
                 }
                 this.versionProvider = new HttpVersionMetadataProvider(urls, repoUser, repoPass);
-                this.mavenSettingsPath = java.nio.file.Files.exists(settingsPath)
-                        ? settingsPath.toAbsolutePath().toString() : null;
             }
             this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
             LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none, using system property)"));
