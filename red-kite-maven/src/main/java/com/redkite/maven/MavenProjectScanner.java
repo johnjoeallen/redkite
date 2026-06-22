@@ -167,12 +167,14 @@ public class MavenProjectScanner {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
             String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
-            List<String> command = List.of(
-                    mvn,
-                    "-f",
-                    pom.toString(),
-                    "-DskipTests",
-                    "dependency:tree");
+            java.nio.file.Path settings = MavenSettingsReader.resolveSettingsFile(root);
+            List<String> command;
+            if (settings != null && MavenSettingsReader.isProjectLocalSettings(settings, root)) {
+                LOGGER.info(() -> "Passing -s " + settings + " to mvn (project-local settings)");
+                command = List.of(mvn, "-s", settings.toString(), "-f", pom.toString(), "-DskipTests", "dependency:tree");
+            } else {
+                command = List.of(mvn, "-f", pom.toString(), "-DskipTests", "dependency:tree");
+            }
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exit = process.waitFor();

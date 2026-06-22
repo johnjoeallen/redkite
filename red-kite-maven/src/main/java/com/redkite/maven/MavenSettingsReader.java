@@ -44,10 +44,10 @@ public class MavenSettingsReader {
      * ~/.m2/settings.xml, falling back to anonymous Maven Central if the file
      * does not exist or cannot be parsed.
      */
-    public static List<RepoConfig> discoverRepositoryConfigs() {
-        Path settingsFile = resolveSettingsFile();
+    public static List<RepoConfig> discoverRepositoryConfigs(Path projectRoot) {
+        Path settingsFile = resolveSettingsFile(projectRoot);
         if (settingsFile == null) {
-            LOGGER.info("No .m2/settings.xml found in project directory or home directory; using Maven Central");
+            LOGGER.info("No settings.xml found; using Maven Central");
             return List.of(new RepoConfig(CENTRAL, null, null));
         }
         try {
@@ -64,12 +64,34 @@ public class MavenSettingsReader {
         }
     }
 
-    /** Project-local .m2/settings.xml takes priority over the home-directory one. Only one file is loaded. */
-    public static Path resolveSettingsFile() {
-        Path projectLocal = Path.of(System.getProperty("user.dir"), ".m2", "settings.xml");
-        if (Files.exists(projectLocal)) {
-            LOGGER.info(() -> "Using project-local settings.xml: " + projectLocal.toAbsolutePath());
-            return projectLocal;
+    /** Resolve settings without a known project root — home settings only. */
+    public static List<RepoConfig> discoverRepositoryConfigs() {
+        return discoverRepositoryConfigs(null);
+    }
+
+    /**
+     * Settings precedence (first found wins, no merging):
+     *   1. projectRoot/.m2/settings.xml
+     *   2. -s path from projectRoot/.mvn/maven.config
+     *   3. ~/.m2/settings.xml
+     *
+     * @param projectRoot the scanned project root; null skips project-local checks
+     */
+    public static Path resolveSettingsFile(Path projectRoot) {
+        if (projectRoot != null) {
+            Path projectLocal = projectRoot.resolve(".m2/settings.xml");
+            if (Files.exists(projectLocal)) {
+                LOGGER.info(() -> "Using project settings.xml: " + projectLocal.toAbsolutePath());
+                return projectLocal;
+            }
+            Path mavenConfig = projectRoot.resolve(".mvn/maven.config");
+            if (Files.exists(mavenConfig)) {
+                Path fromConfig = settingsFromMavenConfig(mavenConfig, projectRoot);
+                if (fromConfig != null) {
+                    LOGGER.info(() -> "Using settings.xml from .mvn/maven.config: " + fromConfig.toAbsolutePath());
+                    return fromConfig;
+                }
+            }
         }
         Path home = Path.of(System.getProperty("user.home"), ".m2", "settings.xml");
         if (Files.exists(home)) {
@@ -79,15 +101,48 @@ public class MavenSettingsReader {
         return null;
     }
 
+    /** Resolve settings without a known project root — home settings only. */
+    public static Path resolveSettingsFile() {
+        return resolveSettingsFile(null);
+    }
+
+    /**
+     * Returns true if the settings file is project-local (under projectRoot).
+     * When true, maven commands need an explicit -s flag because Maven does not
+     * load project-local settings automatically.
+     */
+    public static boolean isProjectLocalSettings(Path settingsFile, Path projectRoot) {
+        if (settingsFile == null || projectRoot == null) return false;
+        return settingsFile.startsWith(projectRoot);
+    }
+
+    /** Parse .mvn/maven.config for -s / --settings flags. Returns resolved absolute path or null. */
+    private static Path settingsFromMavenConfig(Path mavenConfig, Path projectRoot) {
+        try {
+            String content = Files.readString(mavenConfig);
+            String[] tokens = content.split("\\s+");
+            for (int i = 0; i < tokens.length - 1; i++) {
+                String t = tokens[i].trim();
+                if ("-s".equals(t) || "--settings".equals(t)) {
+                    Path p = Path.of(tokens[i + 1].trim());
+                    if (!p.isAbsolute()) p = projectRoot.resolve(p);
+                    if (Files.exists(p)) return p.toAbsolutePath();
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Could not read " + mavenConfig + ": " + e.getMessage());
+        }
+        return null;
+    }
+
     /**
      * Returns a comma-separated list of repository base URLs derived from
-     * ~/.m2/settings.xml, or the Maven Central URL if the file does not
-     * exist or contains no usable entries.
+     * settings.xml, or the Maven Central URL if no settings file is found.
      */
     public static String discoverRepositoryUrls() {
-        Path settingsFile = resolveSettingsFile();
+        Path settingsFile = resolveSettingsFile(null);
         if (settingsFile == null) {
-            LOGGER.info("No .m2/settings.xml found in project directory or home directory; using Maven Central");
+            LOGGER.info("No settings.xml found; using Maven Central");
             return CENTRAL;
         }
         try {

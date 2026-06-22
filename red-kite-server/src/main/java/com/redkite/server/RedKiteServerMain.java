@@ -325,6 +325,7 @@ public class RedKiteServerMain {
         new Thread(() -> {
             try {
                 Consumer<String> progress = msg -> job.message = msg;
+                store.reconfigureForProject(projectRoot);
                 ScanInput input = new MavenProjectScanner().scan(projectRoot, progress);
                 ScanReport report = store.ingest(input, progress);
                 job.scanId = report.scanId();
@@ -1762,10 +1763,10 @@ public class RedKiteServerMain {
         private final String jdbcUrl;
         private final String dbUser;
         private final String dbPassword;
-        private final HttpVersionMetadataProvider versionProvider;
+        private volatile HttpVersionMetadataProvider versionProvider;
         private final HttpVulnerabilityProvider vulnerabilityProvider;
-        private final List<String> effectiveMavenRepos;
-        private final String mavenSettingsPath;
+        volatile List<String> effectiveMavenRepos;
+        volatile String mavenSettingsPath;
 
         private Store(String jdbcUrl, String dbUser, String dbPassword) {
             this.jdbcUrl = jdbcUrl;
@@ -1776,27 +1777,46 @@ public class RedKiteServerMain {
                 this.versionProvider = new HttpVersionMetadataProvider(mavenRepos);
                 this.mavenSettingsPath = null;
             } else {
-                java.nio.file.Path settingsPath = MavenSettingsReader.resolveSettingsFile();
+                // At startup the project root is not yet known; use home settings only.
+                // reconfigureForProject() is called before each scan with the real root.
+                java.nio.file.Path settingsPath = MavenSettingsReader.resolveSettingsFile(null);
                 this.mavenSettingsPath = settingsPath != null ? settingsPath.toAbsolutePath().toString() : null;
-                List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs();
-                String urls = repoConfigs.stream()
-                        .map(MavenSettingsReader.RepoConfig::url)
-                        .collect(java.util.stream.Collectors.joining(","));
-                String repoUser = null, repoPass = null;
-                for (MavenSettingsReader.RepoConfig cfg : repoConfigs) {
-                    if (cfg.username() != null && !cfg.username().isBlank()) {
-                        repoUser = cfg.username();
-                        repoPass = cfg.password();
-                        break;
-                    }
-                }
-                this.versionProvider = new HttpVersionMetadataProvider(urls, repoUser, repoPass);
+                this.versionProvider = buildVersionProvider(null);
             }
             this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
-            LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none, using system property)"));
+            LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none)"));
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
             initializeSchema();
+        }
+
+        /** Re-resolve settings from the project root before a scan. No-op when overridden by system property. */
+        synchronized void reconfigureForProject(java.nio.file.Path projectRoot) {
+            if (System.getProperty("redkite.maven.repositories") != null) return;
+            java.nio.file.Path resolved = MavenSettingsReader.resolveSettingsFile(projectRoot);
+            String newPath = resolved != null ? resolved.toAbsolutePath().toString() : null;
+            if (java.util.Objects.equals(newPath, mavenSettingsPath)) return;
+            LOGGER.info(() -> "Reconfiguring Maven settings for project " + projectRoot + ": " + newPath);
+            this.mavenSettingsPath = newPath;
+            this.versionProvider = buildVersionProvider(projectRoot);
+            this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
+            LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
+        }
+
+        private static HttpVersionMetadataProvider buildVersionProvider(java.nio.file.Path projectRoot) {
+            List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs(projectRoot);
+            String urls = repoConfigs.stream()
+                    .map(MavenSettingsReader.RepoConfig::url)
+                    .collect(java.util.stream.Collectors.joining(","));
+            String repoUser = null, repoPass = null;
+            for (MavenSettingsReader.RepoConfig cfg : repoConfigs) {
+                if (cfg.username() != null && !cfg.username().isBlank()) {
+                    repoUser = cfg.username();
+                    repoPass = cfg.password();
+                    break;
+                }
+            }
+            return new HttpVersionMetadataProvider(urls, repoUser, repoPass);
         }
 
         static Store connect(String jdbcUrl, String dbUser, String dbPassword) {
