@@ -1,14 +1,14 @@
 # RedKite
 
-RedKite is a local Maven dependency scanner and upgrade assistant for checked-out Java repositories.
+RedKite is a local Maven dependency analyser and upgrade assistant for checked-out Java repositories.
 
-It scans local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
+It analyses local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
 
-![RedKite scan report](images/screenshot.png)
+![RedKite analysis](images/screenshot.png)
 
 ## What It Does
 
-- scans Maven multi-module projects (dependencies, dependency management, and build plugins)
+- analyses Maven multi-module projects (dependencies, dependency management, and build plugins)
 - shows declared (direct) and transitive dependencies with scope and version source
 - highlights SNAPSHOT dependencies as unverified risks
 - fetches and caches version metadata from Maven Central
@@ -49,17 +49,28 @@ The server starts on port `6502` and stores its database in a `data/` subdirecto
 http://localhost:6502
 ```
 
-## Scan A Repository
+## Analyse A Repository
 
-On the home page, type the full path to a Maven project and click **Scan**. A progress overlay shows while the scan runs; the browser navigates to the scan report when complete.
+On the home page, type the full path to a Maven project and click **Analyse**. A progress overlay shows while the analysis runs; the browser navigates to the analysis when complete.
 
-You can also click the **Scan** button next to any previously-scanned project, or **Rescan** from inside a scan report.
+You can also click the **Analyse** button next to any previously-analysed project on the home page, or **Analyse** from inside an existing analysis.
+
+## Project Page
+
+Each project has a page showing:
+
+- a summary of the latest analysis (component count, recommendations, status)
+- an **Analysis history** list of all past analyses with timestamps and status badges — click any row to open that analysis
+- an **Analyse** button to trigger a new analysis
+- the resolved `settings.xml` path and configured Maven repositories
 
 ## Apply Upgrades
 
-In the scan report, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply selected**. A popup shows the updated POM XML — click **Copy** to put it on the clipboard or **Write to file** to overwrite the file directly.
+In the analysis, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply selected**. A popup shows the updated POM XML — click **Copy** to put it on the clipboard or **Write to file** to overwrite the file directly.
 
 The generated POM normalises all declared dependencies that have an explicit literal version to `${artifactId.version}` property references. Dependencies being upgraded are set to the selected version; all other declared versions are extracted as-is into properties. This keeps the applied change minimal and reviewable while moving the project towards consistent property-based version management.
+
+Use **Clear cache** to flush the cached version and vulnerability metadata and force a fresh fetch on the next analysis.
 
 ## Configuration
 
@@ -75,6 +86,8 @@ java -Dredkite.port=8080 -jar red-kite.jar
 | `redkite.db.url` | `jdbc:h2:./data/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE` |
 | `redkite.db.user` | `sa` |
 | `redkite.db.password` | _(empty)_ |
+| `redkite.prefs.file` | `./data/preferences.properties` |
+| `redkite.osv.url` | `https://api.osv.dev` |
 
 ## Build From Source
 
