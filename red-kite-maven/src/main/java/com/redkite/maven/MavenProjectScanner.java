@@ -166,8 +166,9 @@ public class MavenProjectScanner {
     private void collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId) {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
+            String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
             List<String> command = List.of(
-                    "mvn",
+                    mvn,
                     "-f",
                     pom.toString(),
                     "-DskipTests",
