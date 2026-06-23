@@ -406,7 +406,7 @@ public class RedKiteServerMain {
             html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms));
             html.append("</section>");
             html.append("</div>");
-            html.append(renderLogModal(report, scanId));
+            html.append(renderLogModal(report, scanId, enforcerResult));
             html.append(scanOverlayHtml());
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
@@ -481,7 +481,14 @@ public class RedKiteServerMain {
                 ScanReport report = store.ingest(input, buildProg);
 
                 job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",0,"active");
-                runEnforcerCheck(projectRoot, report.scanId(), msg -> {});
+                runEnforcerCheck(projectRoot, report.scanId(), msg -> {
+                    if (msg.startsWith("Convergence ")) {
+                        try {
+                            int pct = Integer.parseInt(msg.substring("Convergence ".length()).trim());
+                            job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",pct,"active");
+                        } catch (Exception ignored) {}
+                    }
+                });
                 job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",100,"done");
 
                 job.scanId = report.scanId();
@@ -495,9 +502,10 @@ public class RedKiteServerMain {
 
     private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress) {
         try {
-            progress.accept("Checking dependency convergence…");
             Path pomPath = projectRoot.resolve("pom.xml");
+            progress.accept("Convergence 5");
             EnforcerRunner.EnforcerRunResult result = new EnforcerRunner().run(projectRoot, pomPath);
+            progress.accept("Convergence 60");
             String rawOutput = result.rawOutput();
             EnforcerStatus status;
             List<TransitiveConflictFinding> findings = List.of();
@@ -511,10 +519,12 @@ public class RedKiteServerMain {
                         ? EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE
                         : EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
             }
+            progress.accept("Convergence 75");
             List<String> staleExclusions = List.of();
             if (status != EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE) {
-                staleExclusions = detectStaleExclusions(projectRoot, pomPath, scanId);
+                staleExclusions = detectStaleExclusions(projectRoot, pomPath, scanId, progress);
             }
+            progress.accept("Convergence 95");
             store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions);
         } catch (Exception e) {
             LOGGER.warning(() -> "Enforcer check failed for scan " + scanId + ": " + e.getMessage());
@@ -522,11 +532,12 @@ public class RedKiteServerMain {
         }
     }
 
-    private List<String> detectStaleExclusions(Path projectRoot, Path pomPath, String scanId) {
+    private List<String> detectStaleExclusions(Path projectRoot, Path pomPath, String scanId, Consumer<String> progress) {
         try {
             String pomContent = Files.readString(pomPath);
             List<String> currentExclusions = new com.redkite.maven.RemediationApplier().parseRedkiteExclusions(pomContent);
             if (currentExclusions.isEmpty()) return List.of();
+            progress.accept("Convergence 80");
             EnforcerRunner.EnforcerRunResult pristine = new com.redkite.maven.TempPomAnalyzer().runWithoutRemediations(projectRoot, pomPath);
             Set<String> pristineConflicts = new java.util.HashSet<>();
             if (!pristine.passed() && pristine.errorDetail() == null) {
@@ -828,6 +839,7 @@ public class RedKiteServerMain {
         }
         store.versionProvider.clearAll();
         store.clearVersionCache();
+        store.vulnerabilityProvider.clearAll();
         sendJson(exchange, 200, "{\"cleared\":true}");
     }
 
@@ -2355,7 +2367,7 @@ public class RedKiteServerMain {
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
 
-    private String renderLogModal(ScanReport report, String scanId) {
+    private String renderLogModal(ScanReport report, String scanId, Store.EnforcerResultEntry enforcerResult) {
         Map<Long, ScanComponent> byId = new LinkedHashMap<>();
         for (ScanComponent c : report.components()) byId.put(c.id(), c);
 
@@ -2443,6 +2455,73 @@ public class RedKiteServerMain {
         if (report.complete() && parseWarnings.isEmpty() && issues.isEmpty()) {
             html.append("<div class=\"log-section\">");
             html.append("<p class=\"log-text\">No issues. All metadata resolved successfully.</p>");
+            html.append("</div>");
+        }
+
+        // Dependency convergence
+        if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
+            html.append("<div class=\"log-section\">");
+            if (enforcerResult.status() == EnforcerStatus.ENFORCER_RUN_PASSED) {
+                html.append("<div class=\"log-section-title\">Dependency convergence</div>");
+                html.append("<p class=\"log-text\">All enforcer rules passed. No conflicts detected.</p>");
+            } else if (enforcerResult.status() == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
+                List<TransitiveConflictFinding> findings = enforcerResult.findings();
+                html.append("<div class=\"log-section-title\" style=\"color:#e05050\">&#10005; Dependency convergence &nbsp;<span class=\"tab-count\">")
+                    .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span></div>");
+
+                // Group ADD_EXCLUSION by parent, collect ADD_DEPENDENCY_MANAGEMENT pins
+                Map<String, java.util.LinkedHashSet<String>> exclusionsByParent = new LinkedHashMap<>();
+                Map<String, String> pins = new LinkedHashMap<>();
+                for (TransitiveConflictFinding f : findings) {
+                    for (ConflictCandidateAction a : f.candidateActions()) {
+                        if (a.type() == ConflictCandidateAction.ActionType.ADD_EXCLUSION) {
+                            String parent = a.parentGroupId() + ":" + a.parentArtifactId();
+                            exclusionsByParent.computeIfAbsent(parent, k -> new java.util.LinkedHashSet<>())
+                                             .add(f.groupId() + ":" + f.artifactId());
+                        } else if (a.type() == ConflictCandidateAction.ActionType.ADD_DEPENDENCY_MANAGEMENT) {
+                            pins.putIfAbsent(f.groupId() + ":" + f.artifactId(), f.resolvedVersion());
+                        }
+                    }
+                }
+
+                if (!exclusionsByParent.isEmpty()) {
+                    html.append("<p class=\"log-text\" style=\"margin-top:10px\">Suggested exclusions:</p>");
+                    html.append("<div class=\"log-code-list\">");
+                    for (Map.Entry<String, java.util.LinkedHashSet<String>> entry : exclusionsByParent.entrySet()) {
+                        html.append("<div class=\"log-code-line\">in <strong>").append(escape(entry.getKey())).append("</strong>");
+                        for (String exc : entry.getValue()) {
+                            html.append("<br>&nbsp;&nbsp;exclude ").append(escape(exc));
+                        }
+                        html.append("</div>");
+                    }
+                    html.append("</div>");
+                }
+
+                if (!pins.isEmpty()) {
+                    html.append("<p class=\"log-text\" style=\"margin-top:10px\">Suggested version pins:</p>");
+                    html.append("<div class=\"log-code-list\">");
+                    for (Map.Entry<String, String> entry : pins.entrySet()) {
+                        html.append("<div class=\"log-code-line\">").append(escape(entry.getKey()))
+                            .append(" &rarr; ").append(escape(entry.getValue())).append("</div>");
+                    }
+                    html.append("</div>");
+                }
+            } else {
+                html.append("<div class=\"log-section-title\">Dependency convergence</div>");
+                html.append("<p class=\"log-text\">Convergence check could not run &mdash; ensure Maven is on PATH.</p>");
+            }
+
+            if (!enforcerResult.staleExclusions().isEmpty()) {
+                List<String> stale = enforcerResult.staleExclusions();
+                html.append("<p class=\"log-text\" style=\"margin-top:12px;color:var(--muted)\">")
+                    .append(stale.size()).append(" stale exclusion").append(stale.size() == 1 ? "" : "s")
+                    .append(" (no longer resolving any conflict):</p>");
+                html.append("<div class=\"log-code-list\">");
+                for (String ga : stale) {
+                    html.append("<div class=\"log-code-line\">").append(escape(ga)).append("</div>");
+                }
+                html.append("</div>");
+            }
             html.append("</div>");
         }
 
@@ -2674,8 +2753,8 @@ public class RedKiteServerMain {
         private final String jdbcUrl;
         private final String dbUser;
         private final String dbPassword;
-        private volatile HttpVersionMetadataProvider versionProvider;
-        private final HttpVulnerabilityProvider vulnerabilityProvider;
+        volatile HttpVersionMetadataProvider versionProvider;
+        final HttpVulnerabilityProvider vulnerabilityProvider;
         volatile List<String> effectiveMavenRepos;
         volatile String mavenSettingsPath;
 
@@ -2697,7 +2776,7 @@ public class RedKiteServerMain {
             this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
             LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none)"));
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
-            this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"));
+            this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"), this::dbConnection);
             initializeSchema();
         }
 
@@ -3238,6 +3317,11 @@ public class RedKiteServerMain {
                     statement.executeUpdate("merge into rk_schema_version (version) values (4)");
                     currentVersion = 4;
                 }
+                if (currentVersion < 5) {
+                    LOGGER.info("Migrating schema to v5 (vulnerability cache)");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (5)");
+                    currentVersion = 5;
+                }
                 statement.executeUpdate("""
                         create table if not exists projects (
                           id uuid primary key,
@@ -3342,6 +3426,14 @@ public class RedKiteServerMain {
                           expires_at_epoch_ms bigint not null,
                           status varchar(32) not null,
                           complete boolean not null,
+                          updated_at timestamp with time zone not null default current_timestamp
+                        )
+                        """);
+                statement.executeUpdate("""
+                        create table if not exists rk_vuln_cache (
+                          cache_key varchar(512) primary key,
+                          response_json text not null,
+                          expires_at_epoch_ms bigint not null,
                           updated_at timestamp with time zone not null default current_timestamp
                         )
                         """);
