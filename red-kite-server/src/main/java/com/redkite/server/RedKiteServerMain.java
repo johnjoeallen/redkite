@@ -3202,7 +3202,12 @@ public class RedKiteServerMain {
                 }
                 if (currentVersion < 4) {
                     LOGGER.info("Migrating schema to v4 (stale exclusions)");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
+                    // Only ALTER if table already exists; fresh installs get the column via CREATE TABLE below
+                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
+                        if (tbls.next()) {
+                            statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
+                        }
+                    }
                     statement.executeUpdate("merge into rk_schema_version (version) values (4)");
                     currentVersion = 4;
                 }
@@ -3296,6 +3301,7 @@ public class RedKiteServerMain {
                           status varchar(64) not null,
                           raw_output text not null,
                           findings_blob text not null,
+                          stale_exclusions_json text not null default '[]',
                           created_at timestamp not null default current_timestamp,
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
