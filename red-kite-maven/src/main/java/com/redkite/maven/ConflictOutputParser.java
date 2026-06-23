@@ -38,14 +38,14 @@ public class ConflictOutputParser {
             if (cm.find()) {
                 String gId = cm.group(1);
                 String aId = cm.group(2);
-                String version = cm.group(3).replaceAll("\\s.*", "");
+                String version = normalizeVersion(cm.group(3).replaceAll("\\s.*", ""));
                 List<String> paths = collectPaths(lines, i + 1);
                 i += 1 + countPathBlock(lines, i + 1);
                 findings.add(buildFinding(gId, aId, version, paths, "dependencyConvergence"));
             } else if (um.find()) {
                 String gId = um.group(1);
                 String aId = um.group(2);
-                String version = um.group(3).replaceAll("\\s.*", "");
+                String version = normalizeVersion(um.group(3).replaceAll("\\s.*", ""));
                 List<String> paths = collectPaths(lines, i + 1);
                 i += 1 + countPathBlock(lines, i + 1);
                 findings.add(buildFinding(gId, aId, version, paths, "requireUpperBoundDeps"));
@@ -56,51 +56,61 @@ public class ConflictOutputParser {
         return findings;
     }
 
+    private static String normalizeVersion(String raw) {
+        // Enforcer headers sometimes include the Maven type: "jar:3.5.6" or "pom:2.0.0".
+        // Strip it so the version compares correctly with versions extracted from path lines.
+        int colon = raw.indexOf(':');
+        if (colon > 0) {
+            String prefix = raw.substring(0, colon).toLowerCase();
+            if (prefix.equals("jar") || prefix.equals("pom") || prefix.equals("war")
+                    || prefix.equals("ear") || prefix.equals("test-jar")
+                    || prefix.equals("bundle") || prefix.equals("aar")) {
+                return raw.substring(colon + 1);
+            }
+        }
+        return raw;
+    }
+
     private TransitiveConflictFinding buildFinding(
             String groupId, String artifactId, String resolvedVersion,
             List<String> paths, String ruleName) {
 
         Set<String> conflictingVersions = new LinkedHashSet<>();
         List<ConflictCandidateAction> actions = new ArrayList<>();
-
-        // Collect all versions seen in paths other than the resolved version
-        for (String path : paths) {
-            for (String line : path.split("\n")) {
-                extractVersion(line, groupId, artifactId).ifPresent(v -> {
-                    if (!v.equals(resolvedVersion)) conflictingVersions.add(v);
-                });
-            }
-        }
+        Set<String> exclusionParents = new LinkedHashSet<>();
 
         // ADD_DEPENDENCY_MANAGEMENT: pin to the resolved version
         actions.add(new ConflictCandidateAction(
                 ActionType.ADD_DEPENDENCY_MANAGEMENT,
                 groupId, artifactId, resolvedVersion, null, null));
 
-        // ADD_EXCLUSION: for each path that introduces a conflicting version,
-        // suggest excluding the artifact from the direct dependency in that path
-        Set<String> exclusionParents = new LinkedHashSet<>();
+        // ADD_EXCLUSION: one candidate per distinct direct-dependency parent, for ALL paths.
+        // Each candidate carries the version it introduces so the UI can offer "use latest" auto-fix.
+        // A jar cannot be excluded from itself (self-exclusion guard).
         for (String path : paths) {
             String[] pathLines = path.split("\n");
-            // Find if this path has a conflicting version of the target artifact
-            boolean pathConflicts = false;
+
+            // Determine the version of the conflicting artifact this path introduces
+            String introducedVersion = null;
             for (String line : pathLines) {
                 Optional<String> v = extractVersion(line, groupId, artifactId);
-                if (v.isPresent() && !v.get().equals(resolvedVersion)) {
-                    pathConflicts = true;
-                    break;
-                }
+                if (v.isPresent()) { introducedVersion = v.get(); break; }
             }
-            if (!pathConflicts) continue;
+            if (introducedVersion == null) continue;
 
-            // The second line (index 1) in the path is the direct dependency to exclude from
+            if (!introducedVersion.equals(resolvedVersion)) {
+                conflictingVersions.add(introducedVersion);
+            }
+
             if (pathLines.length >= 2) {
+                final String pathVersion = introducedVersion;
                 parseCoord(pathLines[1]).ifPresent(coord -> {
+                    if (coord[0].equals(groupId) && coord[1].equals(artifactId)) return;
                     String key = coord[0] + ":" + coord[1];
                     if (exclusionParents.add(key)) {
                         actions.add(new ConflictCandidateAction(
                                 ActionType.ADD_EXCLUSION,
-                                groupId, artifactId, null,
+                                groupId, artifactId, pathVersion,
                                 coord[0], coord[1]));
                     }
                 });

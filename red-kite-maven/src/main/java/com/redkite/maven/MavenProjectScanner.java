@@ -138,6 +138,46 @@ public class MavenProjectScanner {
                 }
             }
 
+            // Add external parent POMs as upgradeable components.
+            // Only external parents (not other modules in this project) are added.
+            Set<String> addedParents = new LinkedHashSet<>();
+            for (PomModel model : models.values()) {
+                if (model.parentGroupId() == null || model.parentArtifactId() == null || model.parentVersion() == null) continue;
+                String parentKey = key(model.parentGroupId(), model.parentArtifactId());
+                if (models.containsKey(parentKey)) continue; // sibling/parent module — not external
+                if (!addedParents.add(parentKey)) continue;
+                String rawVersion = model.parentVersion();
+                String propertyName = null;
+                VersionSource versionSource = VersionSource.LITERAL;
+                String resolvedVersion = rawVersion;
+                if (rawVersion.startsWith("${") && rawVersion.endsWith("}")) {
+                    propertyName = rawVersion.substring(2, rawVersion.length() - 1);
+                    String prop = model.properties().get(propertyName);
+                    if (prop != null) resolvedVersion = prop;
+                    versionSource = VersionSource.PROPERTY;
+                }
+                String sourceFile = sourceFile(root, model.path());
+                String compKey = directKey(sourceFile, model.parentGroupId(), model.parentArtifactId());
+                if (!componentsByKey.containsKey(compKey)) {
+                    final String effectiveVersion = resolvedVersion;
+                    boolean snapshot = effectiveVersion.contains("SNAPSHOT");
+                    componentsByKey.put(compKey, new ScanComponent(
+                            nextId.getAndIncrement(),
+                            new ComponentCoordinate(model.parentGroupId(), model.parentArtifactId()),
+                            effectiveVersion,
+                            DependencyScope.COMPILE,
+                            true,
+                            versionSource,
+                            sourceFile,
+                            "/project/parent",
+                            model.properties(),
+                            snapshot,
+                            sourceFile + "#parent",
+                            sourceFile));
+                    LOGGER.info(() -> "Added external parent as component: " + model.parentGroupId() + ":" + model.parentArtifactId() + ":" + effectiveVersion);
+                }
+            }
+
             if (componentsByKey.isEmpty()) {
                 LOGGER.warning(() -> "No dependencies discovered in " + root + "; creating placeholder component");
                 componentsByKey.put("pom.xml|unknown:unknown|unknown|false", new ScanComponent(

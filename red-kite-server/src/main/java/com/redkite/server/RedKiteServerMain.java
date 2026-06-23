@@ -402,8 +402,14 @@ public class RedKiteServerMain {
                 html.append(renderEnforcerSection(scanId, enforcerResult));
                 html.append("</section>");
             }
+            Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
+            if (enforcerResult != null) {
+                for (TransitiveConflictFinding f : enforcerResult.findings()) {
+                    conflictsByKey.computeIfAbsent(f.groupId() + ":" + f.artifactId(), k -> new ArrayList<>()).add(f);
+                }
+            }
             html.append("<section class=\"card span-2\">");
-            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms));
+            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
             html.append("</section>");
             html.append("</div>");
             html.append(renderLogModal(report, scanId, enforcerResult));
@@ -865,7 +871,15 @@ public class RedKiteServerMain {
             try {
                 ScanEntry scan = store.getScan(scanId);
                 Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
-                Map<String, String> patchedFiles = generatePomPatches(scan.report(), sourcePoms, scan.input().workingTreePath(), updates);
+                Store.EnforcerResultEntry enforcerResult = store.getEnforcerResult(scanId);
+                Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
+                if (enforcerResult != null && enforcerResult.findings() != null) {
+                    for (TransitiveConflictFinding finding : enforcerResult.findings()) {
+                        conflictsByKey.computeIfAbsent(finding.groupId() + ":" + finding.artifactId(), k -> new ArrayList<>()).add(finding);
+                    }
+                }
+                Map<String, String> patchedFiles = generatePomPatches(
+                        scan.report(), sourcePoms, scan.input().workingTreePath(), updates, conflictsByKey);
                 if (patchedFiles.isEmpty()) { sendText(exchange, 400, "No matching source POMs for the selected components"); return; }
                 StringBuilder json = new StringBuilder("{");
                 boolean first = true;
@@ -950,20 +964,26 @@ public class RedKiteServerMain {
         }
     }
 
-    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates) throws Exception {
+    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey) throws Exception {
         // rawUpdates keys are component IDs (from the client) — resolve each to its exact component
         Map<Long, String> updateById = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : rawUpdates.entrySet()) {
             try { updateById.put(Long.parseLong(e.getKey()), e.getValue()); } catch (NumberFormatException ignored) {}
         }
-        Map<String, List<ScanComponent>> byFile = new LinkedHashMap<>();
+        Map<String, String> result = new LinkedHashMap<>();
+        Map<Long, ScanComponent> componentsById = new LinkedHashMap<>();
+        for (ScanComponent c : report.components()) {
+            componentsById.put(c.id(), c);
+        }
+
+        // Direct dependency upgrades use the existing version patch flow.
+        Map<String, List<ScanComponent>> directByFile = new LinkedHashMap<>();
         for (ScanComponent c : report.components()) {
             if (!c.direct() || c.snapshot() || c.sourceFilePath() == null) continue;
             if (!updateById.containsKey(c.id())) continue;
-            byFile.computeIfAbsent(c.sourceFilePath(), k -> new ArrayList<>()).add(c);
+            directByFile.computeIfAbsent(c.sourceFilePath(), k -> new ArrayList<>()).add(c);
         }
-        Map<String, String> result = new LinkedHashMap<>();
-        for (Map.Entry<String, List<ScanComponent>> entry : byFile.entrySet()) {
+        for (Map.Entry<String, List<ScanComponent>> entry : directByFile.entrySet()) {
             String content = sourcePoms.get(entry.getKey());
             if (content == null) continue;
             Map<String, String> fileUpdates = new LinkedHashMap<>();
@@ -973,7 +993,88 @@ public class RedKiteServerMain {
             }
             result.put(entry.getKey(), patchPomXml(content, fileUpdates));
         }
+
+        // Transitive convergence selections are translated into dependencyManagement pins
+        // plus exclusions on the parents introducing the non-selected versions.
+        RemediationApplier applier = new RemediationApplier();
+        String rootPomKey = selectRootPomKey(sourcePoms, workingTreePath);
+        for (Map.Entry<Long, String> entry : updateById.entrySet()) {
+            ScanComponent component = componentsById.get(entry.getKey());
+            if (component == null || component.direct() || component.snapshot()) {
+                continue;
+            }
+            String selectedVersion = entry.getValue();
+            if (selectedVersion == null || selectedVersion.isBlank() || selectedVersion.equals(component.version())) {
+                continue;
+            }
+            boolean changed = false;
+            TransitiveConflictFinding finding = findMatchingConflict(conflictsByKey, component);
+
+            if (rootPomKey != null) {
+                String content = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
+                if (content != null) {
+                    String updated = applier.applyDependencyManagementPin(
+                            content, finding.groupId(), finding.artifactId(), selectedVersion,
+                            "Enforcer dependency convergence fix by RedKite");
+                    if (!updated.equals(content)) {
+                        result.put(rootPomKey, updated);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (finding != null) {
+                for (ConflictCandidateAction action : finding.candidateActions()) {
+                    if (action.type() != ConflictCandidateAction.ActionType.ADD_EXCLUSION) {
+                        continue;
+                    }
+                    if (selectedVersion.equals(action.version())) {
+                        continue;
+                    }
+                    for (String filePath : sourcePoms.keySet()) {
+                        String content = result.containsKey(filePath) ? result.get(filePath) : sourcePoms.get(filePath);
+                        if (content == null) continue;
+                        String updated = applier.applyExclusion(
+                                content,
+                                action.parentGroupId(), action.parentArtifactId(),
+                                finding.groupId(), finding.artifactId(),
+                                "Enforcer dependency convergence fix by RedKite");
+                        if (!updated.equals(content)) {
+                            result.put(filePath, updated);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+
+            if (!changed) {
+                continue;
+            }
+        }
+        result.entrySet().removeIf(e -> sourcePoms.containsKey(e.getKey()) && sourcePoms.get(e.getKey()).equals(e.getValue()));
         return result;
+    }
+
+    private String selectRootPomKey(Map<String, String> sourcePoms, String workingTreePath) {
+        if (sourcePoms.containsKey("pom.xml")) {
+            return "pom.xml";
+        }
+        String best = null;
+        int bestDepth = Integer.MAX_VALUE;
+        for (String key : sourcePoms.keySet()) {
+            if (key == null || !key.endsWith("pom.xml")) {
+                continue;
+            }
+            int depth = (int) key.chars().filter(ch -> ch == '/').count();
+            if (best == null || depth < bestDepth || (depth == bestDepth && key.length() < best.length())) {
+                best = key;
+                bestDepth = depth;
+            }
+        }
+        if (best != null) {
+            return best;
+        }
+        return sourcePoms.isEmpty() ? null : sourcePoms.keySet().iterator().next();
     }
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates) throws Exception {
@@ -982,12 +1083,12 @@ public class RedKiteServerMain {
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
         Element root = doc.getDocumentElement();
 
-        // Collect <dependency> and <plugin> elements
+        // Collect <parent>, <dependency>, and <plugin> elements to patch
         NodeList allElements = doc.getElementsByTagName("*");
         List<Element> patchTargets = new ArrayList<>();
         for (int i = 0; i < allElements.getLength(); i++) {
             Node n = allElements.item(i);
-            if (n instanceof Element e && ("dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
+            if (n instanceof Element e && ("parent".equals(e.getNodeName()) || "dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
                 patchTargets.add(e);
             }
         }
@@ -1059,6 +1160,10 @@ public class RedKiteServerMain {
             } else {
                 // Literal version: normalise to a property reference.
                 // Use the upgrade version if selected, otherwise keep the current version.
+                // Exception: <parent> versions are left as literals when not being upgraded —
+                // it's unusual and disruptive to normalise a parent version to a property
+                // just because other deps in the same POM are being upgraded.
+                if (upgrade == null && "parent".equals(dep.getNodeName())) continue;
                 String effectiveVersion = upgrade != null ? upgrade : versionText;
                 String propName = propNameForCoord.get(coord);
                 if (propName == null) {
@@ -1320,7 +1425,8 @@ public class RedKiteServerMain {
             MetadataResult versionMetadata,
             UpgradeRecommendation recommendation,
             List<VulnerabilityFinding> findings,
-            boolean canUpgradeViaDirect) {}
+            boolean canUpgradeViaDirect,
+            TransitiveConflictFinding convergenceFinding) {}
 
     private static String enforcerBadge(Store.EnforcerResultEntry e) {
         if (e == null) return "";
@@ -1373,54 +1479,9 @@ public class RedKiteServerMain {
         }
 
         html.append("<p><span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\">")
-            .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span></p>");
-        html.append("<div id=\"enforcer-apply-msg\" style=\"display:none;margin-bottom:12px\" class=\"badge success\">Applied — re-analyse to verify.</div>");
-        html.append("<table class=\"dep-table\" style=\"margin-top:12px\">");
-        html.append("<thead><tr><th>Dependency</th><th>Resolved</th><th>Conflicts</th><th>Rule</th><th>Actions</th></tr></thead><tbody>");
-
-        for (TransitiveConflictFinding f : findings) {
-            html.append("<tr>");
-            html.append("<td><code>").append(escape(f.groupId())).append(":").append(escape(f.artifactId())).append("</code></td>");
-            html.append("<td><code>").append(escape(f.resolvedVersion())).append("</code></td>");
-            html.append("<td>");
-            for (String v : f.conflictingVersions()) {
-                html.append("<span class=\"badge warn\" style=\"font-size:.75rem;margin-right:4px\">").append(escape(v)).append("</span>");
-            }
-            html.append("</td>");
-            html.append("<td style=\"font-size:.8rem;color:var(--muted)\">").append(escape(f.ruleName())).append("</td>");
-            html.append("<td style=\"display:flex;gap:6px;flex-wrap:wrap\">");
-            for (ConflictCandidateAction action : f.candidateActions()) {
-                String label;
-                String title;
-                String dataAttrs;
-                if (action.type() == ConflictCandidateAction.ActionType.ADD_DEPENDENCY_MANAGEMENT) {
-                    label = "Pin " + f.resolvedVersion();
-                    title = "Add dependencyManagement entry to pin " + f.groupId() + ":" + f.artifactId() + " to " + f.resolvedVersion();
-                    dataAttrs = " data-action=\"ADD_DEPENDENCY_MANAGEMENT\""
-                            + " data-scan-id=\"" + escape(scanId) + "\""
-                            + " data-group-id=\"" + escape(f.groupId()) + "\""
-                            + " data-artifact-id=\"" + escape(f.artifactId()) + "\""
-                            + " data-version=\"" + escape(f.resolvedVersion()) + "\"";
-                } else {
-                    label = "Exclude from " + action.parentArtifactId();
-                    title = "Add exclusion of " + f.groupId() + ":" + f.artifactId() + " from " + action.parentGroupId() + ":" + action.parentArtifactId();
-                    dataAttrs = " data-action=\"ADD_EXCLUSION\""
-                            + " data-scan-id=\"" + escape(scanId) + "\""
-                            + " data-group-id=\"" + escape(f.groupId()) + "\""
-                            + " data-artifact-id=\"" + escape(f.artifactId()) + "\""
-                            + " data-parent-group-id=\"" + escape(action.parentGroupId()) + "\""
-                            + " data-parent-artifact-id=\"" + escape(action.parentArtifactId()) + "\"";
-                }
-                html.append("<button class=\"button\" style=\"font-size:.78rem;padding:2px 8px\" title=\"")
-                    .append(escape(title)).append("\"")
-                    .append(dataAttrs)
-                    .append(" onclick=\"applyRemediation(this)\">")
-                    .append(escape(label)).append("</button>");
-            }
-            html.append("</td>");
-            html.append("</tr>");
-        }
-        html.append("</tbody></table>");
+            .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span>")
+            .append(" &nbsp;<span class=\"muted\" style=\"font-size:.85rem\">The matching dependency picker below includes the conflicting versions inline.</span></p>");
+        html.append("<div id=\"enforcer-apply-msg\" style=\"display:none;margin-bottom:12px\" class=\"badge success\">Applied - re-analyse to verify.</div>");
 
         List<String> staleExclusions = entry.staleExclusions();
         if (!staleExclusions.isEmpty()) {
@@ -1440,7 +1501,7 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
-    private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms) {
+    private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms, Map<String, List<TransitiveConflictFinding>> conflictsByKey) {
         ReportSummary summary = RemediationClassifier.summarize(report);
         List<ScanComponent> components = report.components();
         if (components.isEmpty()) {
@@ -1498,6 +1559,7 @@ public class RedKiteServerMain {
                     c, report.vulnerabilityFindings(), report.recommendations(), report.metadataResults());
             MetadataResult versionMeta = versionMetaByComponent.get(c.id());
             UpgradeRecommendation rec = recByComponent.get(c.id());
+            TransitiveConflictFinding conflict = findMatchingConflict(conflictsByKey, c);
             List<VulnerabilityFinding> vulns = vulnsByKey.getOrDefault(
                     c.coordinate().groupId() + ":" + c.coordinate().artifactId() + "@" + c.version(), List.of());
             boolean canUpgradeViaDirect = false;
@@ -1513,14 +1575,14 @@ public class RedKiteServerMain {
                     }
                 }
             }
-            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect));
+            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect, conflict));
         }
 
         // Sort: CRITICAL → HIGH → MEDIUM → LOW → UNKNOWN advisory → SNAPSHOT → STALE → VERSION_MGMT → UPGRADE → CLEAN
         // Within same bucket: direct before transitive, then alphabetical
         views.sort((a, b) -> {
-            int ka = remediationSortKey(a.component(), a.status());
-            int kb = remediationSortKey(b.component(), b.status());
+            int ka = remediationSortKey(a);
+            int kb = remediationSortKey(b);
             if (ka != kb) return Integer.compare(ka, kb);
             if (a.component().direct() != b.component().direct()) return a.component().direct() ? -1 : 1;
             return a.component().coordinate().artifactId()
@@ -1570,9 +1632,12 @@ public class RedKiteServerMain {
                 return a.compareTo(b);
             });
             String firstModule = moduleOrder.stream()
-                    .filter(m -> !byModule.getOrDefault(m, List.of()).isEmpty())
+                    .filter(m -> byModule.getOrDefault(m, List.of()).stream().anyMatch(this::isDefaultVisibleRemediationCard))
                     .findFirst()
-                    .orElse(moduleOrder.get(0));
+                    .orElseGet(() -> moduleOrder.stream()
+                            .filter(m -> !byModule.getOrDefault(m, List.of()).isEmpty())
+                            .findFirst()
+                            .orElse(moduleOrder.get(0)));
             html.append("<script>remModule=").append(jsString(firstModule)).append(";</script>");
             html.append("<select class=\"rem-module-select\" onchange=\"filterRemediationModule(this.value)\">");
             for (String mod : moduleOrder) {
@@ -1584,15 +1649,17 @@ public class RedKiteServerMain {
             html.append("</select>");
         }
 
-        // Filter toggle: CVE | Snapshot | Upgrade | Transitive | Clean | All
+        // Filter toggle: CVE | Conflict | Snapshot | Upgrade | Transitive | Clean | All
         long cveCount = views.stream().filter(v -> v.status().hasVulnerability()).count();
+        long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
         long upgradeDirectCount = views.stream().filter(v -> v.status().needsRemediation() && !v.status().hasVulnerability() && !v.status().isSnapshot() && v.component().direct()).count();
         long upgradeTransCount = views.stream().filter(v -> v.status().needsRemediation() && !v.status().hasVulnerability() && !v.status().isSnapshot() && !v.component().direct()).count();
         long transitiveCount = views.stream().filter(v -> !v.component().direct() && !v.component().snapshot()).count();
-        long cleanCount = views.stream().filter(v -> !v.status().needsRemediation()).count();
+        long cleanCount = views.stream().filter(v -> !v.status().needsRemediation() && v.convergenceFinding() == null).count();
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cve\" onclick=\"setRemediationMode('cve')\">CVE <span class=\"tab-count\">").append(cveCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"conflict\" onclick=\"setRemediationMode('conflict')\">&#9651; Conflict <span class=\"tab-count\">").append(conflictCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
         html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable direct(<span id=\"upg-direct-count\">").append(upgradeDirectCount).append("</span>) transitive(<span id=\"upg-trans-count\">").append(upgradeTransCount).append("</span>)</button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"transitive\" onclick=\"setRemediationMode('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
@@ -1783,11 +1850,13 @@ public class RedKiteServerMain {
         boolean upgradeOnly = status.hasUpgradeRecommendation()
                 && !status.hasVulnerability() && !status.isSnapshot()
                 && !status.hasDeclaredVersionDeclaration() && !status.hasStaleMetadata();
-        html.append("<div class=\"rem-card").append(clean ? " clean" : "").append("\" data-clean=\"").append(clean)
+        boolean actionableConvergence = view.convergenceFinding() != null;
+        html.append("<div class=\"rem-card").append(clean && !actionableConvergence ? " clean" : "").append("\" data-clean=\"").append(clean && !actionableConvergence)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
                 .append("\" data-hasvuln=\"").append(status.hasVulnerability())
                 .append("\" data-upgradeonly=\"").append(upgradeOnly)
+                .append("\" data-hasconflict=\"").append(actionableConvergence)
                 .append("\" data-coord=\"").append(escape(coordStr))
                 .append("\" data-comp-id=\"").append(comp.id()).append("\">");
 
@@ -1800,6 +1869,9 @@ public class RedKiteServerMain {
         String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
         html.append("<span class=\"badge ").append(kindClass).append("\">").append(kindLabel).append("</span>");
         html.append("<span class=\"badge neutral\">").append(scopeLabel(comp.scope())).append("</span>");
+        if (actionableConvergence) {
+            html.append("<span class=\"badge conflict-badge\">&#9651; Conflict</span>");
+        }
         html.append("</div>");
         html.append("</div>");
 
@@ -1853,15 +1925,35 @@ public class RedKiteServerMain {
             html.append("</div>");
         }
 
-        // Version selector for direct deps only; transitive deps cannot be edited in the POM
-        if (!clean && view.versionMetadata() != null) {
+        // Version selector for direct deps and convergence-linked transitive deps.
+        if (view.versionMetadata() != null || view.convergenceFinding() != null) {
             html.append("<div class=\"rem-actions\">");
             if (comp.direct()) {
                 String selectorId = "view_" + comp.id();
-                String selectedVersion = view.recommendation() != null
-                        ? view.recommendation().targetVersion() : comp.version();
+                List<String> directConflictVersions = view.convergenceFinding() != null
+                        ? view.convergenceFinding().conflictingVersions() : List.of();
+                String selectedVersion = view.convergenceFinding() != null
+                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings())
+                        : (view.recommendation() != null ? view.recommendation().targetVersion() : comp.version());
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), view.recommendation(), view.findings(), false));
+                        view.versionMetadata(), view.recommendation(), view.findings(), false, directConflictVersions, false));
+                if (view.convergenceFinding() != null) {
+                    html.append(renderConflictResolveBtn(selectorId, view.convergenceFinding()));
+                }
+            } else if (view.versionMetadata() != null || view.convergenceFinding() != null) {
+                String selectorId = "view_" + comp.id();
+                List<String> conflictVersions = view.convergenceFinding() != null
+                        ? view.convergenceFinding().conflictingVersions()
+                        : List.of();
+                String selectedVersion = view.convergenceFinding() != null
+                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings())
+                        : (view.recommendation() != null ? view.recommendation().targetVersion() : comp.version());
+                html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
+                        view.versionMetadata(), view.recommendation(), view.findings(), false,
+                        conflictVersions, true));
+                if (view.convergenceFinding() != null) {
+                    html.append(renderConflictResolveBtn(selectorId, view.convergenceFinding()));
+                }
             }
             html.append("</div>");
         }
@@ -1892,7 +1984,12 @@ public class RedKiteServerMain {
         return "<span class=\"sev-badge " + cls + "\">" + escape(severity.icon()) + " " + escape(severity.label()) + "</span>";
     }
 
-    private int remediationSortKey(ScanComponent component, RemediationStatus status) {
+    private int remediationSortKey(ComponentView view) {
+        ScanComponent component = view.component();
+        RemediationStatus status = view.status();
+        if (view.convergenceFinding() != null) {
+            return 80;
+        }
         if (status.hasVulnerability()) {
             return switch (status.highestSeverity()) {
                 case CRITICAL -> 0;
@@ -1913,14 +2010,21 @@ public class RedKiteServerMain {
 
     private String renderVersionSelect(String selectorId, ComponentCoordinate coordinate, String currentVersion,
             String selectedVersion, MetadataResult versionMetadata, UpgradeRecommendation recommendation,
-            List<VulnerabilityFinding> vulnFindings, boolean includeNameAttr) {
+            List<VulnerabilityFinding> vulnFindings, boolean includeNameAttr, List<String> conflictVersions,
+            boolean includeCurrentOption) {
         List<String> choices = versionChoices(versionMetadata, recommendation);
         // Build deduplicated ordered set: recommended first, then choices, then latest
         LinkedHashSet<String> ordered = new LinkedHashSet<>();
+        if (includeCurrentOption && currentVersion != null && !currentVersion.isBlank()) {
+            ordered.add(currentVersion);
+        }
         if (recommendation != null && recommendation.targetVersion() != null && !recommendation.targetVersion().isBlank()) {
             ordered.add(recommendation.targetVersion());
         }
         ordered.addAll(choices);
+        if (conflictVersions != null) {
+            ordered.addAll(conflictVersions);
+        }
         if (versionMetadata != null && versionMetadata.latestVersion() != null
                 && !versionMetadata.latestVersion().isBlank()
                 && !"unknown".equalsIgnoreCase(versionMetadata.latestVersion())
@@ -1931,6 +2035,10 @@ public class RedKiteServerMain {
         if (ordered.isEmpty()) {
             return "<span class=\"version-note muted\">No upgrade candidates</span>";
         }
+
+        // Sort versions in semantic ascending order before rendering
+        List<String> sortedVersions = new ArrayList<>(ordered);
+        sortedVersions.sort(this::compareVersionsSemantic);
 
         StringBuilder html = new StringBuilder();
         html.append("<div class=\"version-sel-wrap\">");
@@ -1948,10 +2056,15 @@ public class RedKiteServerMain {
         String recommendedVersion = recommendation != null ? recommendation.targetVersion() : null;
         String latestVersion = versionMetadata != null ? versionMetadata.latestVersion() : null;
         String latestSameMajor = versionMetadata != null ? versionMetadata.latestSameMajorVersion() : null;
+        java.util.Set<String> conflictSet = conflictVersions == null ? java.util.Set.of() : new java.util.LinkedHashSet<>(conflictVersions);
 
-        // Pre-select the recommended version when one exists and differs from current.
-        boolean hasPreSelection = recommendedVersion != null && !recommendedVersion.isBlank()
-                && !recommendedVersion.equals(currentVersion) && ordered.contains(recommendedVersion);
+        // Explicit selectedVersion (e.g. conflict default) takes priority over the recommendation.
+        boolean hasExplicitSelection = selectedVersion != null && !selectedVersion.isBlank()
+                && !selectedVersion.equals(currentVersion) && ordered.contains(selectedVersion);
+        boolean hasPreSelection = hasExplicitSelection
+                || (recommendedVersion != null && !recommendedVersion.isBlank()
+                    && !recommendedVersion.equals(currentVersion) && ordered.contains(recommendedVersion));
+        String preSelectedVersion = hasExplicitSelection ? selectedVersion : recommendedVersion;
 
         String nameAttr = includeNameAttr ? " name=\"" + escape(selectorId) + "\"" : "";
         html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr)
@@ -1962,12 +2075,13 @@ public class RedKiteServerMain {
         html.append(">");
         // Blank placeholder shown only when nothing is pre-selected
         html.append("<option value=\"\"").append(hasPreSelection ? "" : " selected").append(">Select version…</option>");
-        for (String version : ordered) {
+        for (String version : sortedVersions) {
             boolean hasCve = hasCveForVersion(coordinate, version, vulnFindings);
             String label = buildVersionOptionLabel(version, recommendedVersion, latestVersion, latestSameMajor,
-                    recommendation != null ? recommendation.reason() : null, hasCve, currentVersion);
+                    recommendation != null ? recommendation.reason() : null, hasCve, currentVersion,
+                    conflictSet.contains(version), includeCurrentOption && version.equals(currentVersion));
             html.append("<option value=\"").append(escape(version)).append("\"")
-                    .append(hasPreSelection && version.equals(recommendedVersion) ? " selected" : "")
+                    .append(hasPreSelection && version.equals(preSelectedVersion) ? " selected" : "")
                     .append(">").append(escape(label)).append("</option>");
         }
         html.append("</select>");
@@ -1976,8 +2090,10 @@ public class RedKiteServerMain {
     }
 
     private String buildVersionOptionLabel(String version, String recommendedVersion, String latestVersion,
-            String latestSameMajor, RecommendationReason reason, boolean hasCve, String currentVersion) {
+            String latestSameMajor, RecommendationReason reason, boolean hasCve, String currentVersion,
+            boolean isConflictVersion, boolean isCurrentVersion) {
         List<String> tags = new ArrayList<>();
+        if (isCurrentVersion) tags.add("current");
         if (version.equals(recommendedVersion)) {
             tags.add("recommended");
             if (reason == RecommendationReason.CVE_FIX) tags.add("fixes CVE");
@@ -1987,10 +2103,55 @@ public class RedKiteServerMain {
             tags.add(sameMajorMinor(version, currentVersion) ? "latest same minor" : "latest same major");
         }
         if (hasCve) tags.add("vulnerable");
+        if (isConflictVersion) tags.add("conflict");
         if (version.contains("-SNAPSHOT") || version.contains("-alpha") || version.contains("-beta") || version.contains("-rc")) {
             tags.add("pre-release");
         }
         return tags.isEmpty() ? version : version + " — " + String.join(", ", tags);
+    }
+
+    private int compareVersionsSemantic(String a, String b) {
+        if (a == null) return b == null ? 0 : -1;
+        if (b == null) return 1;
+        String[] pa = a.replace('-', '.').split("\\.");
+        String[] pb = b.replace('-', '.').split("\\.");
+        int n = Math.max(pa.length, pb.length);
+        for (int i = 0; i < n; i++) {
+            String sa = i < pa.length ? pa[i] : "0";
+            String sb = i < pb.length ? pb[i] : "0";
+            try {
+                int diff = Integer.compare(Integer.parseInt(sa), Integer.parseInt(sb));
+                if (diff != 0) return diff;
+            } catch (NumberFormatException e) {
+                int diff = sa.compareTo(sb);
+                if (diff != 0) return diff;
+            }
+        }
+        return 0;
+    }
+
+    private String conflictDefaultVersion(TransitiveConflictFinding f, ScanComponent comp,
+            List<VulnerabilityFinding> vulnFindings) {
+        String newest = f.resolvedVersion() != null ? f.resolvedVersion() : "";
+        for (String v : f.conflictingVersions()) {
+            if (compareVersionsSemantic(v, newest) > 0) newest = v;
+        }
+        if (comp.direct() && comp.version() != null && compareVersionsSemantic(comp.version(), newest) > 0) {
+            newest = comp.version();
+        }
+        // If the candidate is still within a CVE-affected range, bump to the fix version (same major only)
+        if (vulnFindings != null && comp.coordinate() != null) {
+            for (VulnerabilityFinding finding : vulnFindings) {
+                if (finding.fixedVersion() == null || finding.coordinate() == null) continue;
+                if (!comp.coordinate().groupId().equals(finding.coordinate().groupId())
+                        || !comp.coordinate().artifactId().equals(finding.coordinate().artifactId())) continue;
+                if (sameMajor(newest, finding.fixedVersion())
+                        && compareVersionsSemantic(newest, finding.fixedVersion()) < 0) {
+                    newest = finding.fixedVersion();
+                }
+            }
+        }
+        return newest.isBlank() ? null : newest;
     }
 
     private boolean sameMajorMinor(String v1, String v2) {
@@ -2005,6 +2166,64 @@ public class RedKiteServerMain {
         String[] p1 = v1.split("[.\\-]", 2);
         String[] p2 = v2.split("[.\\-]", 2);
         return p1.length >= 1 && p2.length >= 1 && !p1[0].isBlank() && p1[0].equals(p2[0]);
+    }
+
+    private boolean isDefaultVisibleRemediationCard(ComponentView view) {
+        if (view == null) {
+            return false;
+        }
+        if (view.convergenceFinding() != null) {
+            return true;
+        }
+        RemediationStatus status = view.status();
+        return status != null
+                && status.needsRemediation()
+                && !status.hasVulnerability()
+                && !status.isSnapshot();
+    }
+
+    private TransitiveConflictFinding findMatchingConflict(Map<String, List<TransitiveConflictFinding>> conflictsByKey, ScanComponent component) {
+        if (conflictsByKey == null || component == null || component.coordinate() == null) {
+            return null;
+        }
+        String key = component.coordinate().groupId() + ":" + component.coordinate().artifactId();
+        List<TransitiveConflictFinding> conflicts = conflictsByKey.get(key);
+        if (conflicts == null || conflicts.isEmpty()) {
+            return null;
+        }
+        String currentVersion = component.version();
+        if (currentVersion != null && !currentVersion.isBlank()) {
+            for (TransitiveConflictFinding conflict : conflicts) {
+                if (currentVersion.equals(conflict.resolvedVersion())) {
+                    return conflict;
+                }
+            }
+        }
+        return conflicts.get(0);
+    }
+
+    private String renderConflictResolveBtn(String selectorId, TransitiveConflictFinding f) {
+        // Build JSON exclusion data embedded as a data attribute (single-quote delimited)
+        StringBuilder json = new StringBuilder("{");
+        json.append("\"groupId\":").append(jsonStr(f.groupId())).append(",");
+        json.append("\"artifactId\":").append(jsonStr(f.artifactId())).append(",");
+        json.append("\"resolvedVersion\":").append(jsonStr(f.resolvedVersion())).append(",");
+        json.append("\"exclusions\":[");
+        boolean first = true;
+        for (ConflictCandidateAction a : f.candidateActions()) {
+            if (a.type() != ConflictCandidateAction.ActionType.ADD_EXCLUSION || a.version() == null) continue;
+            if (!first) json.append(",");
+            first = false;
+            json.append("{\"parentGroupId\":").append(jsonStr(a.parentGroupId()))
+                .append(",\"parentArtifactId\":").append(jsonStr(a.parentArtifactId()))
+                .append(",\"introducedVersion\":").append(jsonStr(a.version())).append("}");
+        }
+        json.append("]}");
+        String jsonAttr = json.toString().replace("'", "&#39;");
+        return "<button class=\"button primary\" style=\"font-size:.82rem;white-space:nowrap\""
+                + " data-conflict='" + jsonAttr + "'"
+                + " data-selector-id=\"" + escape(selectorId) + "\""
+                + " onclick=\"resolveConflict(this)\">Resolve</button>";
     }
 
     private String renderDependencyInventory(ScanReport report) {
@@ -2361,8 +2580,8 @@ public class RedKiteServerMain {
                 + ".pom-modal-filename { font-family:ui-monospace,monospace; font-size:.9rem; color:var(--accent); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }"
                 + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
                 + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
-                + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp||comp.kind==='transitive')return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(comp&&comp.kind!=='transitive'&&s.value!==comp.v)any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}</script></head><body><div class=\"shell\">"
+                + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}.badge.conflict-badge{background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;font-size:.72rem;}"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,conflictN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';else if(remMode==='conflict')modeOk=card.dataset.hasconflict==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(card.dataset.hasconflict==='true')conflictN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='conflict')el.textContent=conflictN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp)return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(comp&&s.value!==comp.v)any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}function applyRemediationAsync(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';});}function compareVersions(a,b){var pa=a.replace(/-/g,'.').split('.');var pb=b.replace(/-/g,'.').split('.');var n=Math.max(pa.length,pb.length);for(var i=0;i<n;i++){var d=(parseInt(pa[i],10)||0)-(parseInt(pb[i],10)||0);if(d!==0)return d;}return 0;}function resolveConflict(btn){var data=JSON.parse(btn.dataset.conflict);var selId=btn.dataset.selectorId;var sel=selId?document.getElementById(selId):null;var chosenVersion=sel?sel.value:'';if(!chosenVersion){alert('Select a target version first.');return;}btn.disabled=true;btn.textContent='Applying…';var actions=[];actions.push({scanId:rk_scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:data.groupId,artifactId:data.artifactId,version:chosenVersion});(data.exclusions||[]).forEach(function(excl){if(excl.introducedVersion!==chosenVersion){actions.push({scanId:rk_scanId,actionType:'ADD_EXCLUSION',groupId:data.groupId,artifactId:data.artifactId,version:excl.introducedVersion,parentGroupId:excl.parentGroupId,parentArtifactId:excl.parentArtifactId});}});actions.reduce(function(p,payload){return p.then(function(){return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});});});},Promise.resolve()).then(function(){btn.textContent='Resolved';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Resolve';alert('Resolve failed: '+(err.message||err));});}</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-logo\" href=\"/\"><img class=\"brand-icon\" src=\"/logo.svg\" alt=\"RedKite logo\"><div class=\"brand-text\"><span class=\"brand-logo-name\">" + escape(brand) + "</span><span class=\"brand-logo-tag\">Maven Dependency Assistant &mdash; local dependency analysis and upgrade planning for checked-out Maven repositories.</span></div></a></div><div class=\"nav\"><div class=\"theme-picker\" id=\"theme-picker\"><button class=\"button theme-btn\" type=\"button\" onclick=\"toggleThemePicker()\" title=\"Change theme\" aria-label=\"Change theme\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><circle cx=\"4\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"10\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"7\" cy=\"3.5\" r=\"2.5\"/></svg></button><div class=\"theme-swatches\" id=\"theme-swatches\"><button class=\"swatch\" data-theme=\"dark\" onclick=\"setTheme('dark')\" title=\"Dark\" style=\"background:#818cf8\"></button><button class=\"swatch\" data-theme=\"light\" onclick=\"setTheme('light')\" title=\"Light\" style=\"background:#3b6bec\"></button><button class=\"swatch\" data-theme=\"ocean\" onclick=\"setTheme('ocean')\" title=\"Ocean\" style=\"background:#7dd3fc\"></button><button class=\"swatch\" data-theme=\"dusk\" onclick=\"setTheme('dusk')\" title=\"Dusk\" style=\"background:#e879f9\"></button><button class=\"swatch\" data-theme=\"forest\" onclick=\"setTheme('forest')\" title=\"Forest\" style=\"background:#34d399\"></button><button class=\"swatch\" data-theme=\"ember\" onclick=\"setTheme('ember')\" title=\"Ember\" style=\"background:#fbbf24\"></button></div></div></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
@@ -2468,44 +2687,7 @@ public class RedKiteServerMain {
                 List<TransitiveConflictFinding> findings = enforcerResult.findings();
                 html.append("<div class=\"log-section-title\" style=\"color:#e05050\">&#10005; Dependency convergence &nbsp;<span class=\"tab-count\">")
                     .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span></div>");
-
-                // Group ADD_EXCLUSION by parent, collect ADD_DEPENDENCY_MANAGEMENT pins
-                Map<String, java.util.LinkedHashSet<String>> exclusionsByParent = new LinkedHashMap<>();
-                Map<String, String> pins = new LinkedHashMap<>();
-                for (TransitiveConflictFinding f : findings) {
-                    for (ConflictCandidateAction a : f.candidateActions()) {
-                        if (a.type() == ConflictCandidateAction.ActionType.ADD_EXCLUSION) {
-                            String parent = a.parentGroupId() + ":" + a.parentArtifactId();
-                            exclusionsByParent.computeIfAbsent(parent, k -> new java.util.LinkedHashSet<>())
-                                             .add(f.groupId() + ":" + f.artifactId());
-                        } else if (a.type() == ConflictCandidateAction.ActionType.ADD_DEPENDENCY_MANAGEMENT) {
-                            pins.putIfAbsent(f.groupId() + ":" + f.artifactId(), f.resolvedVersion());
-                        }
-                    }
-                }
-
-                if (!exclusionsByParent.isEmpty()) {
-                    html.append("<p class=\"log-text\" style=\"margin-top:10px\">Suggested exclusions:</p>");
-                    html.append("<div class=\"log-code-list\">");
-                    for (Map.Entry<String, java.util.LinkedHashSet<String>> entry : exclusionsByParent.entrySet()) {
-                        html.append("<div class=\"log-code-line\">in <strong>").append(escape(entry.getKey())).append("</strong>");
-                        for (String exc : entry.getValue()) {
-                            html.append("<br>&nbsp;&nbsp;exclude ").append(escape(exc));
-                        }
-                        html.append("</div>");
-                    }
-                    html.append("</div>");
-                }
-
-                if (!pins.isEmpty()) {
-                    html.append("<p class=\"log-text\" style=\"margin-top:10px\">Suggested version pins:</p>");
-                    html.append("<div class=\"log-code-list\">");
-                    for (Map.Entry<String, String> entry : pins.entrySet()) {
-                        html.append("<div class=\"log-code-line\">").append(escape(entry.getKey()))
-                            .append(" &rarr; ").append(escape(entry.getValue())).append("</div>");
-                    }
-                    html.append("</div>");
-                }
+                html.append("<p class=\"log-text\">Conflict details are shown inline on the affected dependency pickers below.</p>");
             } else {
                 html.append("<div class=\"log-section-title\">Dependency convergence</div>");
                 html.append("<p class=\"log-text\">Convergence check could not run &mdash; ensure Maven is on PATH.</p>");
