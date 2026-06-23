@@ -82,15 +82,18 @@ public class RedKiteServerMain {
     private static final class ScanJob {
         enum Status { RUNNING, DONE, ERROR }
         volatile Status status = Status.RUNNING;
-        volatile String phasesJson = scanPhases(0,"active",0,"pending",0,"pending");
+        volatile String phasesJson = scanPhases(0,"active",0,"pending",0,"pending",0,"pending",0,"pending");
         volatile String scanId;
         volatile String errorMessage;
     }
 
-    private static String scanPhases(int p0, String s0, int p1, String s1, int p2, String s2) {
+    private static String scanPhases(int p0, String s0, int p1, String s1, int p2, String s2,
+                                     int p3, String s3, int p4, String s4) {
         return "[{\"name\":\"Dependency analysis\",\"pct\":" + p0 + ",\"status\":\"" + s0 + "\"},"
              + "{\"name\":\"Version metadata\",\"pct\":" + p1 + ",\"status\":\"" + s1 + "\"},"
-             + "{\"name\":\"Convergence\",\"pct\":" + p2 + ",\"status\":\"" + s2 + "\"}]";
+             + "{\"name\":\"Vulnerability scan\",\"pct\":" + p2 + ",\"status\":\"" + s2 + "\"},"
+             + "{\"name\":\"Upgrade analysis\",\"pct\":" + p3 + ",\"status\":\"" + s3 + "\"},"
+             + "{\"name\":\"Convergence\",\"pct\":" + p4 + ",\"status\":\"" + s4 + "\"}]";
     }
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
@@ -444,38 +447,42 @@ public class RedKiteServerMain {
                 Consumer<String> scanProg = msg -> {
                     if (msg.startsWith("Found ")) {
                         try { scanMods[0] = Integer.parseInt(msg.split(" ")[1]); } catch (Exception ignored) {}
-                        job.phasesJson = scanPhases(5,"active",0,"pending",0,"pending");
+                        job.phasesJson = scanPhases(5,"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     } else if (msg.startsWith("Running dependency:tree")) {
                         scanDone[0]++;
                         int pct = scanMods[0] > 0 ? 10 + scanDone[0] * 80 / scanMods[0] : 20;
-                        job.phasesJson = scanPhases(Math.min(pct, 95),"active",0,"pending",0,"pending");
+                        job.phasesJson = scanPhases(Math.min(pct, 95),"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     }
                 };
                 ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg);
 
-                // Phase 1: version metadata
-                job.phasesJson = scanPhases(100,"done",0,"active",0,"pending");
-                Consumer<String> metaProg = msg -> {
-                    if (msg.startsWith("Checking metadata ")) {
-                        String part = msg.substring("Checking metadata ".length());
-                        int slash = part.indexOf('/');
-                        if (slash > 0) {
-                            int end = part.indexOf(' ', slash);
-                            try {
-                                int n = Integer.parseInt(part.substring(0, slash).trim());
-                                int t = Integer.parseInt(part.substring(slash + 1, end < 0 ? part.length() : end).trim());
-                                int pct = t > 0 ? n * 100 / t : 0;
-                                job.phasesJson = scanPhases(100,"done",pct,"active",0,"pending");
-                            } catch (Exception ignored) {}
-                        }
+                job.phasesJson = scanPhases(100,"done",0,"active",0,"pending",0,"pending",0,"pending");
+                Consumer<String> buildProg = msg -> {
+                    if (msg.startsWith("Version ")) {
+                        String[] parts = msg.substring("Version ".length()).split("/");
+                        try {
+                            int n = Integer.parseInt(parts[0].trim());
+                            int t = Integer.parseInt(parts[1].trim());
+                            int pct = t > 0 ? n * 100 / t : 0;
+                            job.phasesJson = scanPhases(100,"done",pct,"active",0,"pending",0,"pending",0,"pending");
+                        } catch (Exception ignored) {}
+                    } else if (msg.startsWith("Vulnerability ")) {
+                        String[] parts = msg.substring("Vulnerability ".length()).split("/");
+                        try {
+                            int n = Integer.parseInt(parts[0].trim());
+                            int t = Integer.parseInt(parts[1].trim());
+                            int pct = t > 0 ? n * 100 / t : 0;
+                            job.phasesJson = scanPhases(100,"done",100,"done",pct,"active",0,"pending",0,"pending");
+                        } catch (Exception ignored) {}
+                    } else if ("Upgrades".equals(msg)) {
+                        job.phasesJson = scanPhases(100,"done",100,"done",100,"done",0,"active",0,"pending");
                     }
                 };
-                ScanReport report = store.ingest(input, metaProg);
+                ScanReport report = store.ingest(input, buildProg);
 
-                // Phase 2: convergence
-                job.phasesJson = scanPhases(100,"done",100,"done",0,"active");
+                job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",0,"active");
                 runEnforcerCheck(projectRoot, report.scanId(), msg -> {});
-                job.phasesJson = scanPhases(100,"done",100,"done",100,"done");
+                job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",100,"done");
 
                 job.scanId = report.scanId();
                 job.status = ScanJob.Status.DONE;
@@ -2941,17 +2948,37 @@ public class RedKiteServerMain {
         }
 
         private ScanReport buildReport(ScanInput input, String projectId, String scanId, Consumer<String> progress) {
+            List<ScanComponent> components = input.components();
+            int total = components.size();
+
+            // Pass 1: version metadata
+            Map<Long, VersionMetadata> versionMap = new LinkedHashMap<>();
+            for (int i = 0; i < components.size(); i++) {
+                ScanComponent c = components.get(i);
+                progress.accept("Version " + (i + 1) + "/" + total);
+                if (!c.snapshot()) {
+                    versionMap.put(c.id(), versionProvider.latestVersion(c.coordinate(), c.version()));
+                }
+            }
+
+            // Pass 2: vulnerability scan
+            Map<Long, List<VulnerabilityFinding>> vulnMap = new LinkedHashMap<>();
+            for (int i = 0; i < components.size(); i++) {
+                ScanComponent c = components.get(i);
+                progress.accept("Vulnerability " + (i + 1) + "/" + total);
+                if (!c.snapshot()) {
+                    vulnMap.put(c.id(), vulnerabilityProvider.vulnerabilities(c.coordinate(), c.version()));
+                }
+            }
+
+            // Pass 3: upgrade analysis
+            progress.accept("Upgrades");
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
             List<MetadataResult> metadata = new ArrayList<>();
             List<VulnerabilityFinding> vulnerabilityFindings = new ArrayList<>();
             boolean complete = true;
-            List<ScanComponent> components = input.components();
-            int total = components.size();
-            int n = 0;
             for (ScanComponent component : components) {
-                n++;
-                progress.accept("Checking metadata " + n + "/" + total + " — " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                 LOGGER.info(() -> "Enriching component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " version=" + component.version());
                 if (component.snapshot()) {
                     LOGGER.info(() -> "Component is SNAPSHOT; recording unverified dependency risk for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
@@ -2962,7 +2989,7 @@ public class RedKiteServerMain {
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                 } else {
-                    VersionMetadata versionMetadata = versionProvider.latestVersion(component.coordinate(), component.version());
+                    VersionMetadata versionMetadata = versionMap.get(component.id());
                     LOGGER.info(() -> "Maven version metadata for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => latest=" + versionMetadata.latestVersion() + ", sameMajor=" + versionMetadata.latestSameMajorVersion() + ", complete=" + versionMetadata.complete() + ", status=" + versionMetadata.status());
                     String versionMessage = versionMetadata.complete()
                             ? "Latest Maven release is " + versionMetadata.latestVersion() + "."
@@ -2972,7 +2999,7 @@ public class RedKiteServerMain {
                         complete = false;
                     }
 
-                    List<VulnerabilityFinding> compVulns = vulnerabilityProvider.vulnerabilities(component.coordinate(), component.version());
+                    List<VulnerabilityFinding> compVulns = vulnMap.getOrDefault(component.id(), List.of());
                     boolean hasVulns = !compVulns.isEmpty();
                     String vulnMessage = hasVulns
                             ? "Found " + compVulns.size() + " vulnerabilit" + (compVulns.size() == 1 ? "y" : "ies") + "."
