@@ -2,8 +2,12 @@ package com.redkite.server;
 
 import com.redkite.core.domain.*;
 import com.redkite.core.service.SerializationSupport;
+import com.redkite.maven.ConflictOutputParser;
+import com.redkite.maven.EnforcerDetector;
+import com.redkite.maven.EnforcerRunner;
 import com.redkite.maven.MavenProjectScanner;
 import com.redkite.maven.MavenSettingsReader;
+import com.redkite.maven.RemediationApplier;
 import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
@@ -78,9 +82,15 @@ public class RedKiteServerMain {
     private static final class ScanJob {
         enum Status { RUNNING, DONE, ERROR }
         volatile Status status = Status.RUNNING;
-        volatile String message = "Starting…";
+        volatile String phasesJson = scanPhases(0,"active",0,"pending",0,"pending");
         volatile String scanId;
         volatile String errorMessage;
+    }
+
+    private static String scanPhases(int p0, String s0, int p1, String s1, int p2, String s2) {
+        return "[{\"name\":\"Dependency analysis\",\"pct\":" + p0 + ",\"status\":\"" + s0 + "\"},"
+             + "{\"name\":\"Version metadata\",\"pct\":" + p1 + ",\"status\":\"" + s1 + "\"},"
+             + "{\"name\":\"Convergence\",\"pct\":" + p2 + ",\"status\":\"" + s2 + "\"}]";
     }
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
@@ -152,6 +162,8 @@ public class RedKiteServerMain {
         server.createContext("/api/metadata/clear", exchange -> safeHandle(exchange, this::handleApiMetadataClear));
         server.createContext("/api/projects", exchange -> safeHandle(exchange, this::handleApiProjects));
         server.createContext("/api/prefs", exchange -> safeHandle(exchange, this::handleApiPrefs));
+        server.createContext("/api/scans/enforcer", exchange -> safeHandle(exchange, this::handleApiEnforcerResults));
+        server.createContext("/api/scans/remediation/apply", exchange -> safeHandle(exchange, this::handleApiRemediationApply));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -182,7 +194,7 @@ public class RedKiteServerMain {
             return;
         }
         StringBuilder html = new StringBuilder();
-        html.append(pageShellStart(BRAND, "Projects", "Local Maven dependency scans, version checks, and upgrade planning."));
+        html.append(pageShellStart(BRAND, "Projects", "Local Maven dependency analysis, version checks, and upgrade planning."));
         // Scan new project section
         html.append("<section class=\"card\" style=\"margin-bottom:18px\">");
         html.append("<h2>Analyse project</h2>");
@@ -214,13 +226,7 @@ public class RedKiteServerMain {
         html.append("</div></section>");
 
         // Blocking overlay shown during scan
-        html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\">");
-        html.append("<div class=\"scan-overlay-box\">");
-        html.append("<div class=\"scan-spinner\"></div>");
-        html.append("<span>Analysing&hellip;</span>");
-        html.append("<span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span>");
-        html.append("</div>");
-        html.append("</div>");
+        html.append(scanOverlayHtml());
 
         html.append("<script>");
         html.append("function startScan(){var path=document.getElementById('scan-path').value.trim();if(!path){showScanError('Enter the full path to the project.');return;}hideScanError();triggerScan(path);}");
@@ -289,7 +295,7 @@ public class RedKiteServerMain {
 
             if (latestScan != null) {
                 ScanReport report = latestScan.report();
-                html.append("<section class=\"card\"><h2>Latest scan</h2>");
+                html.append("<section class=\"card\"><h2>Latest analysis</h2>");
                 html.append("<p class=\"proj-meta-val muted\" style=\"margin-bottom:10px\">").append(fmt.format(latestScan.createdAt())).append("</p>");
                 html.append(statGrid(
                         statCard("Components", String.valueOf(report.components().size())),
@@ -300,8 +306,10 @@ public class RedKiteServerMain {
             }
             html.append("<section class=\"card\"><h2>Analysis history</h2>");
             if (scans.isEmpty()) {
-                html.append("<p class=\"muted\">No scans yet.</p>");
+                html.append("<p class=\"muted\">No analyses yet.</p>");
             } else {
+                List<String> scanIds = scans.stream().map(ScanEntry::id).toList();
+                Map<String, Store.EnforcerResultEntry> enforcerResults = store.getEnforcerResults(scanIds);
                 html.append("<div class=\"scan-history-list\">");
                 for (int i = scans.size() - 1; i >= 0; i--) {
                     ScanEntry s = scans.get(i);
@@ -311,7 +319,10 @@ public class RedKiteServerMain {
                     String statusClass = r.complete() ? "success" : failed ? "scan-failed" : "warn";
                     html.append("<a class=\"scan-history-row\" href=\"/scans/").append(s.id()).append("\">");
                     html.append("<span class=\"scan-history-ts\">").append(fmt.format(s.createdAt())).append("</span>");
+                    html.append("<div style=\"display:flex;gap:6px;align-items:center\">");
                     html.append("<span class=\"badge ").append(statusClass).append("\">").append(statusLabel).append("</span>");
+                    html.append(enforcerBadge(enforcerResults.get(s.id())));
+                    html.append("</div>");
                     if (i == scans.size() - 1) html.append("<span class=\"scan-history-latest\">latest</span>");
                     html.append("</a>");
                 }
@@ -321,14 +332,10 @@ public class RedKiteServerMain {
             html.append("</div>");
 
             // Scan overlay
-            html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\">");
-            html.append("<div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div>");
-            html.append("<span>Analysing&hellip;</span>");
-            html.append("<span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span>");
-            html.append("</div></div>");
+            html.append(scanOverlayHtml());
             html.append("<script>");
             html.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
-            html.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
+            html.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
             html.append("function deleteProject(id,name){if(!confirm('Delete project \"'+name+'\" and all its analyses?\\n\\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}");
             html.append("</script>");
             html.append(pageShellEnd());
@@ -360,6 +367,7 @@ public class RedKiteServerMain {
             for (MetadataResult metadataResult : report.metadataResults()) {
                 metadataByComponent.computeIfAbsent(metadataResult.componentId(), key -> new ArrayList<>()).add(metadataResult);
             }
+            Store.EnforcerResultEntry enforcerResult = store.getEnforcerResult(scanId);
             StringBuilder html = new StringBuilder();
             html.append(pageShellStart(BRAND, "Analysis", "Dependency inventory and upgrade recommendations."));
             ProjectEntry project = store.getProject(report.projectId());
@@ -379,18 +387,24 @@ public class RedKiteServerMain {
             html.append(report.complete() ? "<span class=\"badge success\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Complete</span>"
                     : isBuildFailed(report) ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Failed</span>"
                     : "<span class=\"badge warn\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Incomplete</span>");
+            html.append(enforcerBadge(enforcerResult));
             html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Analyse</button>");
             html.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
             html.append("</div>");
             html.append("</div>");
             html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
             html.append("</section>");
+            if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
+                html.append("<section class=\"card span-2\">");
+                html.append(renderEnforcerSection(scanId, enforcerResult));
+                html.append("</section>");
+            }
             html.append("<section class=\"card span-2\">");
             html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms));
             html.append("</section>");
             html.append("</div>");
             html.append(renderLogModal(report, scanId));
-            html.append("<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\"><div class=\"scan-overlay-box\"><div class=\"scan-spinner\"></div><span>Analysing&hellip;</span><span id=\"scan-status\" class=\"muted\" style=\"font-size:.88rem;max-width:480px;text-align:center\"></span></div></div>");
+            html.append(scanOverlayHtml());
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
             return;
@@ -423,10 +437,46 @@ public class RedKiteServerMain {
         sendJson(exchange, 200, "{\"jobId\":\"" + jobId + "\"}");
         new Thread(() -> {
             try {
-                Consumer<String> progress = msg -> job.message = msg;
                 store.reconfigureForProject(projectRoot);
-                ScanInput input = new MavenProjectScanner().scan(projectRoot, progress);
-                ScanReport report = store.ingest(input, progress);
+
+                // Phase 0: dependency scan
+                int[] scanMods = {0}, scanDone = {0};
+                Consumer<String> scanProg = msg -> {
+                    if (msg.startsWith("Found ")) {
+                        try { scanMods[0] = Integer.parseInt(msg.split(" ")[1]); } catch (Exception ignored) {}
+                        job.phasesJson = scanPhases(5,"active",0,"pending",0,"pending");
+                    } else if (msg.startsWith("Running dependency:tree")) {
+                        scanDone[0]++;
+                        int pct = scanMods[0] > 0 ? 10 + scanDone[0] * 80 / scanMods[0] : 20;
+                        job.phasesJson = scanPhases(Math.min(pct, 95),"active",0,"pending",0,"pending");
+                    }
+                };
+                ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg);
+
+                // Phase 1: version metadata
+                job.phasesJson = scanPhases(100,"done",0,"active",0,"pending");
+                Consumer<String> metaProg = msg -> {
+                    if (msg.startsWith("Checking metadata ")) {
+                        String part = msg.substring("Checking metadata ".length());
+                        int slash = part.indexOf('/');
+                        if (slash > 0) {
+                            int end = part.indexOf(' ', slash);
+                            try {
+                                int n = Integer.parseInt(part.substring(0, slash).trim());
+                                int t = Integer.parseInt(part.substring(slash + 1, end < 0 ? part.length() : end).trim());
+                                int pct = t > 0 ? n * 100 / t : 0;
+                                job.phasesJson = scanPhases(100,"done",pct,"active",0,"pending");
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                };
+                ScanReport report = store.ingest(input, metaProg);
+
+                // Phase 2: convergence
+                job.phasesJson = scanPhases(100,"done",100,"done",0,"active");
+                runEnforcerCheck(projectRoot, report.scanId(), msg -> {});
+                job.phasesJson = scanPhases(100,"done",100,"done",100,"done");
+
                 job.scanId = report.scanId();
                 job.status = ScanJob.Status.DONE;
             } catch (Throwable e) {
@@ -434,6 +484,244 @@ public class RedKiteServerMain {
                 job.status = ScanJob.Status.ERROR;
             }
         }, "redkite-scan-" + jobId).start();
+    }
+
+    private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress) {
+        try {
+            progress.accept("Checking dependency convergence…");
+            Path pomPath = projectRoot.resolve("pom.xml");
+            EnforcerRunner.EnforcerRunResult result = new EnforcerRunner().run(projectRoot, pomPath);
+            String rawOutput = result.rawOutput();
+            EnforcerStatus status;
+            List<TransitiveConflictFinding> findings = List.of();
+            if (result.errorDetail() != null) {
+                status = EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE;
+            } else if (result.passed()) {
+                status = EnforcerStatus.ENFORCER_RUN_PASSED;
+            } else {
+                findings = new ConflictOutputParser().parse(rawOutput);
+                status = findings.isEmpty()
+                        ? EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE
+                        : EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
+            }
+            List<String> staleExclusions = List.of();
+            if (status != EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE) {
+                staleExclusions = detectStaleExclusions(projectRoot, pomPath, scanId);
+            }
+            store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions);
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Enforcer check failed for scan " + scanId + ": " + e.getMessage());
+            store.saveEnforcerResult(scanId, EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE, "", List.of(), List.of());
+        }
+    }
+
+    private List<String> detectStaleExclusions(Path projectRoot, Path pomPath, String scanId) {
+        try {
+            String pomContent = Files.readString(pomPath);
+            List<String> currentExclusions = new com.redkite.maven.RemediationApplier().parseRedkiteExclusions(pomContent);
+            if (currentExclusions.isEmpty()) return List.of();
+            EnforcerRunner.EnforcerRunResult pristine = new com.redkite.maven.TempPomAnalyzer().runWithoutRemediations(projectRoot, pomPath);
+            Set<String> pristineConflicts = new java.util.HashSet<>();
+            if (!pristine.passed() && pristine.errorDetail() == null) {
+                new ConflictOutputParser().parse(pristine.rawOutput()).stream()
+                        .map(f -> f.groupId() + ":" + f.artifactId())
+                        .forEach(pristineConflicts::add);
+            }
+            return currentExclusions.stream()
+                    .filter(ga -> !pristineConflicts.contains(ga))
+                    .distinct().toList();
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Stale exclusion check failed for scan " + scanId + ": " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    private void handleApiEnforcerResults(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        String scanId = queryParam(exchange.getRequestURI().getQuery(), "scanId");
+        if (scanId == null) { sendText(exchange, 400, "Missing scanId"); return; }
+        Store.EnforcerResultEntry entry = store.getEnforcerResult(scanId);
+        if (entry == null) { sendJson(exchange, 200, "{\"status\":\"ENFORCER_NOT_CONFIGURED\",\"findings\":[]}"); return; }
+        sendJson(exchange, 200, enforcerResultToJson(entry));
+    }
+
+    private void handleApiRemediationApply(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        Map<String, String> params = parseJsonObject(body);
+        String scanId = params.get("scanId");
+        String actionType = params.get("actionType");
+        String groupId = params.get("groupId");
+        String artifactId = params.get("artifactId");
+        String version = params.get("version");
+        String parentGroupId = params.get("parentGroupId");
+        String parentArtifactId = params.get("parentArtifactId");
+        String pomFile = params.get("pomFile");
+
+        if (scanId == null || actionType == null || groupId == null || artifactId == null) {
+            sendText(exchange, 400, "Missing required fields");
+            return;
+        }
+
+        try {
+            ScanEntry scanEntry = store.getScan(scanId);
+            Path projectRoot = Path.of(scanEntry.input().workingTreePath());
+            Path targetPom = pomFile != null && !pomFile.isBlank()
+                    ? Path.of(pomFile)
+                    : projectRoot.resolve("pom.xml");
+
+            if (!targetPom.startsWith(projectRoot)) {
+                sendText(exchange, 400, "POM path outside project root");
+                return;
+            }
+
+            RemediationApplier applier = new RemediationApplier();
+            String updatedPom;
+            String reason = "Enforcer dependency convergence fix by RedKite";
+
+            if ("ADD_EXCLUSION".equals(actionType)) {
+                if (parentGroupId == null || parentArtifactId == null) {
+                    sendText(exchange, 400, "Missing parentGroupId/parentArtifactId for exclusion");
+                    return;
+                }
+                updatedPom = applier.applyExclusion(targetPom, parentGroupId, parentArtifactId,
+                        groupId, artifactId, reason);
+            } else if ("ADD_DEPENDENCY_MANAGEMENT".equals(actionType)) {
+                if (version == null) {
+                    sendText(exchange, 400, "Missing version for dependency management pin");
+                    return;
+                }
+                updatedPom = applier.applyDependencyManagementPin(targetPom, groupId, artifactId, version, reason);
+            } else {
+                sendText(exchange, 400, "Unknown actionType: " + actionType);
+                return;
+            }
+
+            // Write the modified POM
+            Files.writeString(targetPom, updatedPom, StandardCharsets.UTF_8);
+
+            // Re-run enforcer check to refresh findings
+            runEnforcerCheck(projectRoot, scanId, msg -> {});
+            Store.EnforcerResultEntry updated = store.getEnforcerResult(scanId);
+            sendJson(exchange, 200, updated != null ? enforcerResultToJson(updated) : "{\"status\":\"ENFORCER_NOT_CONFIGURED\",\"findings\":[]}");
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Remediation apply failed: " + e.getMessage());
+            sendText(exchange, 500, "Apply failed: " + e.getMessage());
+        }
+    }
+
+    private String enforcerResultToJson(Store.EnforcerResultEntry entry) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"status\":").append(jsonStr(entry.status().name()));
+        sb.append(",\"findings\":[");
+        List<TransitiveConflictFinding> findings = entry.findings();
+        for (int i = 0; i < findings.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(findingToJson(findings.get(i)));
+        }
+        sb.append("],\"staleExclusions\":[");
+        List<String> stale = entry.staleExclusions();
+        for (int i = 0; i < stale.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(jsonStr(stale.get(i)));
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private String findingToJson(TransitiveConflictFinding f) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"groupId\":").append(jsonStr(f.groupId())).append(",");
+        sb.append("\"artifactId\":").append(jsonStr(f.artifactId())).append(",");
+        sb.append("\"resolvedVersion\":").append(jsonStr(f.resolvedVersion())).append(",");
+        sb.append("\"ruleName\":").append(jsonStr(f.ruleName())).append(",");
+        sb.append("\"conflictingVersions\":").append(stringListToJson(f.conflictingVersions())).append(",");
+        sb.append("\"dependencyPaths\":").append(stringListToJson(f.dependencyPaths())).append(",");
+        sb.append("\"candidateActions\":[");
+        List<ConflictCandidateAction> actions = f.candidateActions();
+        for (int i = 0; i < actions.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(actionToJson(actions.get(i)));
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private String actionToJson(ConflictCandidateAction a) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"type\":").append(jsonStr(a.type().name())).append(",");
+        sb.append("\"groupId\":").append(jsonStr(a.groupId())).append(",");
+        sb.append("\"artifactId\":").append(jsonStr(a.artifactId())).append(",");
+        sb.append("\"version\":").append(jsonStr(a.version())).append(",");
+        sb.append("\"parentGroupId\":").append(jsonStr(a.parentGroupId())).append(",");
+        sb.append("\"parentArtifactId\":").append(jsonStr(a.parentArtifactId()));
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private String stringListToJson(List<String> list) {
+        if (list == null || list.isEmpty()) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(jsonStr(list.get(i)));
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static Map<String, String> parseJsonObject(String json) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (json == null || json.isBlank()) return map;
+        String s = json.strip();
+        if (s.startsWith("{")) s = s.substring(1);
+        if (s.endsWith("}")) s = s.substring(0, s.length() - 1);
+        // Naive key-value parser for flat JSON objects with string values
+        int i = 0;
+        while (i < s.length()) {
+            // Find key
+            int kStart = s.indexOf('"', i);
+            if (kStart == -1) break;
+            int kEnd = s.indexOf('"', kStart + 1);
+            if (kEnd == -1) break;
+            String key = s.substring(kStart + 1, kEnd);
+            // Find colon
+            int colon = s.indexOf(':', kEnd + 1);
+            if (colon == -1) break;
+            // Find value
+            int vStart = colon + 1;
+            while (vStart < s.length() && s.charAt(vStart) == ' ') vStart++;
+            if (vStart >= s.length()) break;
+            String value;
+            if (s.charAt(vStart) == '"') {
+                int vEnd = vStart + 1;
+                while (vEnd < s.length()) {
+                    if (s.charAt(vEnd) == '\\') { vEnd += 2; continue; }
+                    if (s.charAt(vEnd) == '"') break;
+                    vEnd++;
+                }
+                value = s.substring(vStart + 1, vEnd)
+                        .replace("\\\"", "\"").replace("\\n", "\n").replace("\\\\", "\\");
+                map.put(key, value);
+                i = vEnd + 1;
+            } else {
+                // non-string value (number/bool/null)
+                int vEnd = vStart;
+                while (vEnd < s.length() && s.charAt(vEnd) != ',' && s.charAt(vEnd) != '}') vEnd++;
+                value = s.substring(vStart, vEnd).strip();
+                if (!"null".equals(value)) map.put(key, value);
+                i = vEnd + 1;
+            }
+        }
+        return map;
     }
 
     private void handleApiScanStatus(HttpExchange exchange) throws IOException {
@@ -446,7 +734,7 @@ public class RedKiteServerMain {
         ScanJob job = scanJobs.get(jobId);
         if (job == null) { sendText(exchange, 404, "Job not found"); return; }
         switch (job.status) {
-            case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"message\":" + jsonStr(job.message) + "}");
+            case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"phases\":" + job.phasesJson + "}");
             case DONE -> {
                 scanJobs.remove(jobId);
                 sendJson(exchange, 200, "{\"status\":\"done\",\"scanId\":\"" + job.scanId + "\"}");
@@ -1014,6 +1302,124 @@ public class RedKiteServerMain {
             UpgradeRecommendation recommendation,
             List<VulnerabilityFinding> findings,
             boolean canUpgradeViaDirect) {}
+
+    private static String enforcerBadge(Store.EnforcerResultEntry e) {
+        if (e == null) return "";
+        return switch (e.status()) {
+            case ENFORCER_RUN_PASSED ->
+                "<span class=\"badge success\" title=\"Dependency convergence check passed\">Convergence ✓</span>";
+            case ENFORCER_RUN_FAILED_WITH_FINDINGS -> {
+                int n = e.findings().size();
+                yield "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\""
+                    + " title=\"Dependency convergence check failed\">"
+                    + n + " convergence " + (n == 1 ? "conflict" : "conflicts") + "</span>";
+            }
+            default -> "";
+        };
+    }
+
+    private static String scanOverlayHtml() {
+        return "<div id=\"scan-overlay\" class=\"scan-overlay\" style=\"display:none\">"
+             + "<div class=\"scan-overlay-box\">"
+             + "<div style=\"display:flex;align-items:center;gap:10px\">"
+             + "<div class=\"scan-spinner\"></div>"
+             + "<span>Analysing…</span>"
+             + "</div>"
+             + "<div id=\"scan-phases\" style=\"width:300px;display:flex;flex-direction:column;gap:10px\"></div>"
+             + "</div></div>";
+    }
+
+    private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
+        StringBuilder html = new StringBuilder();
+        html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency convergence</h2>");
+
+        EnforcerStatus status = entry.status();
+        if (status == EnforcerStatus.ENFORCER_CONFIGURED_NO_CONVERGENCE_RULES) {
+            html.append("<p class=\"muted\">Enforcer plugin detected but no <code>dependencyConvergence</code> or <code>requireUpperBoundDeps</code> rules configured.</p>");
+            return html.toString();
+        }
+        if (status == EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE) {
+            html.append("<p class=\"muted\">Could not run <code>mvn enforcer:enforce</code> &mdash; ensure Maven is on PATH.</p>");
+            return html.toString();
+        }
+        if (status == EnforcerStatus.ENFORCER_RUN_PASSED) {
+            html.append("<p><span class=\"badge success\">Passed</span> All enforcer dependency convergence rules passed.</p>");
+            return html.toString();
+        }
+
+        List<TransitiveConflictFinding> findings = entry.findings();
+        if (findings.isEmpty()) {
+            html.append("<p class=\"muted\">Enforcer reported failures but no structured findings could be extracted. Check the analysis log for details.</p>");
+            return html.toString();
+        }
+
+        html.append("<p><span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\">")
+            .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span></p>");
+        html.append("<div id=\"enforcer-apply-msg\" style=\"display:none;margin-bottom:12px\" class=\"badge success\">Applied — re-analyse to verify.</div>");
+        html.append("<table class=\"dep-table\" style=\"margin-top:12px\">");
+        html.append("<thead><tr><th>Dependency</th><th>Resolved</th><th>Conflicts</th><th>Rule</th><th>Actions</th></tr></thead><tbody>");
+
+        for (TransitiveConflictFinding f : findings) {
+            html.append("<tr>");
+            html.append("<td><code>").append(escape(f.groupId())).append(":").append(escape(f.artifactId())).append("</code></td>");
+            html.append("<td><code>").append(escape(f.resolvedVersion())).append("</code></td>");
+            html.append("<td>");
+            for (String v : f.conflictingVersions()) {
+                html.append("<span class=\"badge warn\" style=\"font-size:.75rem;margin-right:4px\">").append(escape(v)).append("</span>");
+            }
+            html.append("</td>");
+            html.append("<td style=\"font-size:.8rem;color:var(--muted)\">").append(escape(f.ruleName())).append("</td>");
+            html.append("<td style=\"display:flex;gap:6px;flex-wrap:wrap\">");
+            for (ConflictCandidateAction action : f.candidateActions()) {
+                String label;
+                String title;
+                String dataAttrs;
+                if (action.type() == ConflictCandidateAction.ActionType.ADD_DEPENDENCY_MANAGEMENT) {
+                    label = "Pin " + f.resolvedVersion();
+                    title = "Add dependencyManagement entry to pin " + f.groupId() + ":" + f.artifactId() + " to " + f.resolvedVersion();
+                    dataAttrs = " data-action=\"ADD_DEPENDENCY_MANAGEMENT\""
+                            + " data-scan-id=\"" + escape(scanId) + "\""
+                            + " data-group-id=\"" + escape(f.groupId()) + "\""
+                            + " data-artifact-id=\"" + escape(f.artifactId()) + "\""
+                            + " data-version=\"" + escape(f.resolvedVersion()) + "\"";
+                } else {
+                    label = "Exclude from " + action.parentArtifactId();
+                    title = "Add exclusion of " + f.groupId() + ":" + f.artifactId() + " from " + action.parentGroupId() + ":" + action.parentArtifactId();
+                    dataAttrs = " data-action=\"ADD_EXCLUSION\""
+                            + " data-scan-id=\"" + escape(scanId) + "\""
+                            + " data-group-id=\"" + escape(f.groupId()) + "\""
+                            + " data-artifact-id=\"" + escape(f.artifactId()) + "\""
+                            + " data-parent-group-id=\"" + escape(action.parentGroupId()) + "\""
+                            + " data-parent-artifact-id=\"" + escape(action.parentArtifactId()) + "\"";
+                }
+                html.append("<button class=\"button\" style=\"font-size:.78rem;padding:2px 8px\" title=\"")
+                    .append(escape(title)).append("\"")
+                    .append(dataAttrs)
+                    .append(" onclick=\"applyRemediation(this)\">")
+                    .append(escape(label)).append("</button>");
+            }
+            html.append("</td>");
+            html.append("</tr>");
+        }
+        html.append("</tbody></table>");
+
+        List<String> staleExclusions = entry.staleExclusions();
+        if (!staleExclusions.isEmpty()) {
+            html.append("<div style=\"margin-top:18px;padding:14px 16px;border:1px solid rgba(75,85,99,.4);border-radius:12px;background:rgba(75,85,99,.08)\">");
+            html.append("<div style=\"font-size:.85rem;font-weight:600;color:var(--muted);margin-bottom:8px\">")
+                .append(staleExclusions.size()).append(" stale exclusion").append(staleExclusions.size() == 1 ? "" : "s")
+                .append(" &mdash; no longer resolving any conflict</div>");
+            html.append("<div style=\"display:flex;flex-wrap:wrap;gap:6px\">");
+            for (String ga : staleExclusions) {
+                html.append("<code style=\"font-size:.8rem;padding:2px 8px;border-radius:6px;background:rgba(0,0,0,.2)\">")
+                    .append(escape(ga)).append("</code>");
+            }
+            html.append("</div>");
+            html.append("</div>");
+        }
+
+        return html.toString();
+    }
 
     private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms) {
         ReportSummary summary = RemediationClassifier.summarize(report);
@@ -1923,7 +2329,12 @@ public class RedKiteServerMain {
                 + ".scan-overlay { position:fixed; inset:0; background:rgba(7,11,22,.82); backdrop-filter:blur(4px); z-index:9999; display:flex; align-items:center; justify-content:center; }"
                 + ".scan-overlay-box { display:flex; flex-direction:column; gap:14px; align-items:center; padding:36px 48px; border:1px solid var(--line); border-radius:24px; background:var(--panel); font-size:1.05rem; font-weight:600; }"
                 + "@keyframes rk-spin { to { transform:rotate(360deg); } }"
-                + ".scan-spinner { width:36px; height:36px; border:3px solid rgba(125,211,252,.2); border-top-color:var(--accent); border-radius:50%; animation:rk-spin .8s linear infinite; }"
+                + ".scan-spinner { width:28px; height:28px; border:3px solid rgba(125,211,252,.2); border-top-color:var(--accent); border-radius:50%; animation:rk-spin .8s linear infinite; flex-shrink:0; }"
+                + ".scan-phase-track{height:4px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden;}"
+                + ".scan-phase-fill{height:100%;border-radius:2px;transition:width .4s ease;}"
+                + ".scan-phase-fill.active{background:var(--accent);}"
+                + ".scan-phase-fill.done{background:rgba(34,197,94,.75);}"
+                + ".scan-phase-fill.pending{width:0!important;background:transparent;}"
                 + ".pom-modal { position:fixed; inset:0; z-index:9990; display:flex; align-items:center; justify-content:center; }"
                 + ".pom-modal-backdrop { position:absolute; inset:0; background:rgba(7,11,22,.85); backdrop-filter:blur(6px); cursor:pointer; }"
                 + ".pom-modal-box { position:relative; z-index:1; background:var(--panel); border:1px solid var(--line); border-radius:22px; width:min(900px,92vw); max-height:85vh; display:flex; flex-direction:column; box-shadow:0 24px 80px rgba(0,0,0,.4); overflow:hidden; }"
@@ -1932,7 +2343,7 @@ public class RedKiteServerMain {
                 + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
                 + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
                 + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp||comp.kind==='transitive')return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(comp&&comp.kind!=='transitive'&&s.value!==comp.v)any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){var el=document.getElementById('scan-status');if(el)el.textContent=d.message||'';setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}</script></head><body><div class=\"shell\">"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const parts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{if(!sel.value)return;const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp||comp.kind==='transitive')return;if(sel.value!==comp.v)parts.push(encodeURIComponent(compId)+'='+encodeURIComponent(sel.value));});if(!parts.length)return;const btn=document.getElementById('apply-btn');btn.disabled=true;btn.textContent='Generating...';fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to generate POM.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(comp&&comp.kind!=='transitive'&&s.value!==comp.v)any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-logo\" href=\"/\"><img class=\"brand-icon\" src=\"/logo.svg\" alt=\"RedKite logo\"><div class=\"brand-text\"><span class=\"brand-logo-name\">" + escape(brand) + "</span><span class=\"brand-logo-tag\">Maven Dependency Assistant &mdash; local dependency analysis and upgrade planning for checked-out Maven repositories.</span></div></a></div><div class=\"nav\"><div class=\"theme-picker\" id=\"theme-picker\"><button class=\"button theme-btn\" type=\"button\" onclick=\"toggleThemePicker()\" title=\"Change theme\" aria-label=\"Change theme\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><circle cx=\"4\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"10\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"7\" cy=\"3.5\" r=\"2.5\"/></svg></button><div class=\"theme-swatches\" id=\"theme-swatches\"><button class=\"swatch\" data-theme=\"dark\" onclick=\"setTheme('dark')\" title=\"Dark\" style=\"background:#818cf8\"></button><button class=\"swatch\" data-theme=\"light\" onclick=\"setTheme('light')\" title=\"Light\" style=\"background:#3b6bec\"></button><button class=\"swatch\" data-theme=\"ocean\" onclick=\"setTheme('ocean')\" title=\"Ocean\" style=\"background:#7dd3fc\"></button><button class=\"swatch\" data-theme=\"dusk\" onclick=\"setTheme('dusk')\" title=\"Dusk\" style=\"background:#e879f9\"></button><button class=\"swatch\" data-theme=\"forest\" onclick=\"setTheme('forest')\" title=\"Forest\" style=\"background:#34d399\"></button><button class=\"swatch\" data-theme=\"ember\" onclick=\"setTheme('ember')\" title=\"Ember\" style=\"background:#fbbf24\"></button></div></div></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
@@ -2770,11 +3181,11 @@ public class RedKiteServerMain {
                 statement.executeUpdate("""
                         create table if not exists rk_schema_version (version int primary key)
                         """);
-                boolean needsMigration;
+                int currentVersion;
                 try (ResultSet vrs = statement.executeQuery("select version from rk_schema_version")) {
-                    needsMigration = !vrs.next() || vrs.getInt("version") < 2;
+                    currentVersion = vrs.next() ? vrs.getInt("version") : 0;
                 }
-                if (needsMigration) {
+                if (currentVersion < 2) {
                     LOGGER.info("Migrating schema to v2 (UUID primary keys)");
                     statement.executeUpdate("drop table if exists generated_poms");
                     statement.executeUpdate("drop table if exists source_poms");
@@ -2782,6 +3193,18 @@ public class RedKiteServerMain {
                     statement.executeUpdate("drop table if exists scans");
                     statement.executeUpdate("drop table if exists projects");
                     statement.executeUpdate("merge into rk_schema_version (version) values (2)");
+                    currentVersion = 2;
+                }
+                if (currentVersion < 3) {
+                    LOGGER.info("Migrating schema to v3 (enforcer results)");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (3)");
+                    currentVersion = 3;
+                }
+                if (currentVersion < 4) {
+                    LOGGER.info("Migrating schema to v4 (stale exclusions)");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (4)");
+                    currentVersion = 4;
                 }
                 statement.executeUpdate("""
                         create table if not exists projects (
@@ -2865,6 +3288,16 @@ public class RedKiteServerMain {
                           cooldown_until timestamp with time zone,
                           last_success_at timestamp with time zone,
                           updated_at timestamp with time zone not null default current_timestamp
+                        )
+                        """);
+                statement.executeUpdate("""
+                        create table if not exists enforcer_results (
+                          scan_id uuid primary key,
+                          status varchar(64) not null,
+                          raw_output text not null,
+                          findings_blob text not null,
+                          created_at timestamp not null default current_timestamp,
+                          foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
                 statement.executeUpdate("""
@@ -3068,6 +3501,81 @@ public class RedKiteServerMain {
                 throw new IllegalStateException("Failed to load generated POMs", e);
             }
         }
+
+        synchronized void saveEnforcerResult(String scanId, EnforcerStatus status,
+                                             String rawOutput, List<TransitiveConflictFinding> findings,
+                                             List<String> staleExclusions) {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "merge into enforcer_results (scan_id, status, raw_output, findings_blob, stale_exclusions_json) key (scan_id) values (?, ?, ?, ?, ?)")) {
+                ps.setString(1, scanId);
+                ps.setString(2, status.name());
+                ps.setString(3, rawOutput == null ? "" : rawOutput);
+                ps.setString(4, SerializationSupport.toBase64(new java.util.ArrayList<>(findings)));
+                ps.setString(5, toJsonStringArray(staleExclusions));
+                ps.executeUpdate();
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to save enforcer result for scan " + scanId + ": " + e.getMessage());
+            }
+        }
+
+        private static String toJsonStringArray(List<String> list) {
+            if (list == null || list.isEmpty()) return "[]";
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < list.size(); i++) {
+                if (i > 0) sb.append(",");
+                sb.append("\"").append(list.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append("\"");
+            }
+            return sb.append("]").toString();
+        }
+
+        private static List<String> fromJsonStringArray(String json) {
+            if (json == null || json.isBlank() || "[]".equals(json.trim())) return List.of();
+            String inner = json.trim();
+            if (inner.startsWith("[")) inner = inner.substring(1);
+            if (inner.endsWith("]")) inner = inner.substring(0, inner.length() - 1);
+            List<String> result = new ArrayList<>();
+            for (String part : inner.split(",")) {
+                String s = part.trim();
+                if (s.startsWith("\"")) s = s.substring(1);
+                if (s.endsWith("\"")) s = s.substring(0, s.length() - 1);
+                if (!s.isEmpty()) result.add(s);
+            }
+            return result;
+        }
+
+        synchronized Map<String, EnforcerResultEntry> getEnforcerResults(List<String> scanIds) {
+            if (scanIds.isEmpty()) return Map.of();
+            Map<String, EnforcerResultEntry> result = new LinkedHashMap<>();
+            for (String id : scanIds) {
+                EnforcerResultEntry entry = getEnforcerResult(id);
+                if (entry != null) result.put(id, entry);
+            }
+            return result;
+        }
+
+        synchronized EnforcerResultEntry getEnforcerResult(String scanId) {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "select status, raw_output, findings_blob, stale_exclusions_json from enforcer_results where scan_id = ?")) {
+                ps.setString(1, scanId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+                    EnforcerStatus status = EnforcerStatus.valueOf(rs.getString("status"));
+                    String rawOutput = rs.getString("raw_output");
+                    @SuppressWarnings("unchecked")
+                    List<TransitiveConflictFinding> findings = SerializationSupport.fromBase64(rs.getString("findings_blob"), java.util.ArrayList.class);
+                    List<String> staleExclusions = fromJsonStringArray(rs.getString("stale_exclusions_json"));
+                    return new EnforcerResultEntry(status, rawOutput, findings == null ? List.of() : findings, staleExclusions);
+                }
+            } catch (SQLException | IllegalArgumentException e) {
+                LOGGER.warning(() -> "Failed to load enforcer result for scan " + scanId + ": " + e.getMessage());
+                return null;
+            }
+        }
+
+        record EnforcerResultEntry(EnforcerStatus status, String rawOutput,
+                                   List<TransitiveConflictFinding> findings, List<String> staleExclusions) {}
 
     }
 
