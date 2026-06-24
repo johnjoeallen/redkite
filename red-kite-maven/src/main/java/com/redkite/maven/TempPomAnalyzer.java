@@ -15,6 +15,11 @@ import java.util.logging.Logger;
  * is visible. A second variant re-runs with computed dep-management pins applied for
  * Phase 2 auto-fix verification.
  *
+ * <p>The temp directory mirrors the project's POM tree with stripped POMs and symlinks
+ * for all other content (src/, resources/, etc.), so {@code mvn verify -DskipTests}
+ * can compile even when enforcer rules are bound to the lifecycle rather than configured
+ * for direct {@code enforcer:enforce} invocation.
+ *
  * <p>Original files are never modified — work is always done in a temp directory.
  */
 public class TempPomAnalyzer {
@@ -32,6 +37,29 @@ public class TempPomAnalyzer {
             int exclusionsStripped,
             List<String> depMgmtRemoved,
             List<String> allRedkiteExclusions) {}
+
+    /** Dep-management and exclusion metadata read from POM files without invoking Maven. */
+    public record PomMetadata(int exclusionsStripped, List<String> depMgmtEntries,
+                              List<String> allRedkiteExclusions) {}
+
+    /**
+     * Scans all POM files under {@code projectRoot} and returns dep-management entries and
+     * RedKite exclusion counts — without running Maven.
+     */
+    public PomMetadata scanPomMetadata(Path projectRoot) throws IOException {
+        List<Path> allPoms = findAllPoms(projectRoot);
+        int exclusionsStripped = 0;
+        List<String> depMgmtEntries = new ArrayList<>();
+        List<String> allRedkiteExclusions = new ArrayList<>();
+        for (Path pom : allPoms) {
+            String content = Files.readString(pom, StandardCharsets.UTF_8);
+            exclusionsStripped += applier.countRedkiteExclusions(content);
+            allRedkiteExclusions.addAll(applier.parseRedkiteExclusions(content));
+            depMgmtEntries.addAll(applier.extractDepMgmtEntries(content));
+        }
+        return new PomMetadata(exclusionsStripped,
+                List.copyOf(depMgmtEntries), List.copyOf(allRedkiteExclusions));
+    }
 
     /**
      * Strips all RedKite remediations and all existing dep-management from every POM in
@@ -57,13 +85,14 @@ public class TempPomAnalyzer {
 
         Path tempRoot = Files.createTempDirectory("redkite-pristine-");
         try {
-            for (Path pom : allPoms) {
-                String content = Files.readString(pom, StandardCharsets.UTF_8);
-                String stripped = applier.stripRedkiteRemediations(content);
-                stripped = applier.stripAllDepManagement(stripped);
-                Path dest = tempRoot.resolve(projectRoot.relativize(pom));
-                Files.createDirectories(dest.getParent());
-                Files.writeString(dest, stripped, StandardCharsets.UTF_8);
+            writePoms(allPoms, projectRoot, tempRoot, (pom, content) -> {
+                String s = applier.stripRedkiteRemediations(content);
+                return applier.stripAllDepManagement(s);
+            });
+            try {
+                symlinkNonPomContent(allPoms, projectRoot, tempRoot);
+            } catch (Exception e) {
+                LOGGER.warning(() -> "Symlink creation failed, verify fallback may not compile: " + e.getMessage());
             }
             Path tempPomPath = tempRoot.resolve(projectRoot.relativize(pomPath));
             EnforcerRunner.EnforcerRunResult result = runner.run(projectRoot, tempPomPath);
@@ -85,25 +114,70 @@ public class TempPomAnalyzer {
         List<Path> allPoms = findAllPoms(projectRoot);
         Path tempRoot = Files.createTempDirectory("redkite-phase2-");
         try {
-            for (Path pom : allPoms) {
-                String content = Files.readString(pom, StandardCharsets.UTF_8);
-                String stripped = applier.stripRedkiteRemediations(content);
-                stripped = applier.stripAllDepManagement(stripped);
+            writePoms(allPoms, projectRoot, tempRoot, (pom, content) -> {
+                String s = applier.stripRedkiteRemediations(content);
+                s = applier.stripAllDepManagement(s);
                 if (pom.toAbsolutePath().equals(pomPath.toAbsolutePath())) {
                     for (Map.Entry<String, String> pin : pins.entrySet()) {
                         String[] ga = pin.getKey().split(":", 2);
-                        stripped = applier.applyDependencyManagementPin(
-                                stripped, ga[0], ga[1], pin.getValue(), "redkite-phase2");
+                        s = applier.applyDependencyManagementPin(s, ga[0], ga[1], pin.getValue(), "redkite-phase2");
                     }
                 }
-                Path dest = tempRoot.resolve(projectRoot.relativize(pom));
-                Files.createDirectories(dest.getParent());
-                Files.writeString(dest, stripped, StandardCharsets.UTF_8);
+                return s;
+            });
+            try {
+                symlinkNonPomContent(allPoms, projectRoot, tempRoot);
+            } catch (Exception e) {
+                LOGGER.warning(() -> "Symlink creation failed, verify fallback may not compile: " + e.getMessage());
             }
             Path tempPomPath = tempRoot.resolve(projectRoot.relativize(pomPath));
             return runner.run(projectRoot, tempPomPath);
         } finally {
             deleteQuietly(tempRoot);
+        }
+    }
+
+    @FunctionalInterface
+    private interface PomTransform {
+        String transform(Path pom, String content) throws IOException;
+    }
+
+    private static void writePoms(List<Path> allPoms, Path projectRoot, Path tempRoot,
+            PomTransform transform) throws IOException {
+        for (Path pom : allPoms) {
+            String content = Files.readString(pom, StandardCharsets.UTF_8);
+            String transformed = transform.transform(pom, content);
+            Path dest = tempRoot.resolve(projectRoot.relativize(pom));
+            Files.createDirectories(dest.getParent());
+            Files.writeString(dest, transformed, StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * For each module directory that has a POM, creates symlinks in the temp directory
+     * for all non-pom, non-target entries (src/, resources/, etc.). This allows
+     * {@code mvn verify -DskipTests} to compile even though only the POMs live in temp.
+     * Failures are silently logged — symlinks are best-effort.
+     */
+    private static void symlinkNonPomContent(List<Path> allPoms, Path projectRoot, Path tempRoot) {
+        for (Path pom : allPoms) {
+            Path pomDir = pom.getParent();
+            Path destDir = tempRoot.resolve(projectRoot.relativize(pomDir));
+            try (var stream = Files.list(pomDir)) {
+                stream.forEach(child -> {
+                    String name = child.getFileName().toString();
+                    if (name.equals("pom.xml") || name.equals("target") || name.startsWith(".")) return;
+                    Path destChild = destDir.resolve(name);
+                    if (Files.exists(destChild)) return; // module subdir already created
+                    try {
+                        Files.createSymbolicLink(destChild, child.toAbsolutePath());
+                    } catch (Exception e) {
+                        LOGGER.fine(() -> "Could not symlink " + destChild + " → " + child + ": " + e.getMessage());
+                    }
+                });
+            } catch (Exception e) {
+                LOGGER.fine(() -> "Could not list " + pomDir + " for symlinking: " + e.getMessage());
+            }
         }
     }
 
@@ -131,9 +205,23 @@ public class TempPomAnalyzer {
         return poms;
     }
 
+    /**
+     * Deletes a temp directory tree, following symlinks only one level deep so that
+     * symlinks to original source directories are removed without deleting source files.
+     */
     private static void deleteQuietly(Path dir) {
         try {
             Files.walkFileTree(dir, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(Path d, BasicFileAttributes attrs) throws IOException {
+                    // Don't follow symlinks into the original project tree
+                    if (!d.equals(dir) && Files.isSymbolicLink(d)) {
+                        Files.delete(d);
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                     Files.delete(file);

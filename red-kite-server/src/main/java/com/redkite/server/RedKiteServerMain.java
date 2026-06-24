@@ -509,29 +509,42 @@ public class RedKiteServerMain {
     private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress) {
         try {
             Path pomPath = projectRoot.resolve("pom.xml");
+            com.redkite.maven.TempPomAnalyzer analyzer = new com.redkite.maven.TempPomAnalyzer();
             progress.accept("Dependency management 5");
 
-            // Phase 1: pristine run — strips ALL RedKite remediations and ALL dep management
-            com.redkite.maven.TempPomAnalyzer.PristineResult pristine =
-                    new com.redkite.maven.TempPomAnalyzer().runPristine(projectRoot, pomPath);
-            progress.accept("Dependency management 45");
+            // Scan POM files for dep-management entries and RedKite exclusion metadata.
+            // This is a pure file read — no Maven invocation needed.
+            com.redkite.maven.TempPomAnalyzer.PomMetadata meta = analyzer.scanPomMetadata(projectRoot);
+            progress.accept("Dependency management 20");
 
-            String rawOutput = pristine.enforcerResult().rawOutput();
+            // Run the enforcer against the original project (not a temp directory) so that
+            // parent-POM resolution and source-file lookup always work correctly.
+            // If enforcer:enforce reports no standalone rules, EnforcerRunner falls back to
+            // mvn verify -DskipTests automatically.
+            EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath);
+            progress.accept("Dependency management 50");
+
+            String rawOutput = enfResult.rawOutput();
             EnforcerStatus status;
             List<TransitiveConflictFinding> findings = List.of();
-            if (pristine.enforcerResult().errorDetail() != null) {
+            if (enfResult.errorDetail() != null) {
                 status = EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE;
-            } else if (pristine.enforcerResult().passed()) {
+                LOGGER.warning(() -> "Enforcer could not start for scan " + scanId + ": " + enfResult.errorDetail());
+            } else if (enfResult.passed()) {
                 status = EnforcerStatus.ENFORCER_RUN_PASSED;
             } else {
                 findings = new ConflictOutputParser().parse(rawOutput);
-                status = findings.isEmpty()
-                        ? EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE
-                        : EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
+                if (findings.isEmpty()) {
+                    status = EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE;
+                    LOGGER.warning(() -> "Enforcer ran but produced no parseable conflict findings for scan "
+                            + scanId + ". Raw output length: " + rawOutput.length());
+                } else {
+                    status = EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
+                }
             }
 
-            // Phase 2: validate auto-fix with computed dep-management pins
-            progress.accept("Dependency management 50");
+            // Phase 2: verify auto-fix with computed dep-management pins
+            progress.accept("Dependency management 60");
             List<TransitiveConflictFinding> phase2Findings = null;
             List<String> phase2Pins = List.of();
             if (status == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
@@ -543,17 +556,17 @@ public class RedKiteServerMain {
             }
             progress.accept("Dependency management 80");
 
-            // Stale exclusion detection: reuse Phase 1 findings — no extra enforcer run needed
-            Set<String> phase1ConflictKeys = findings.stream()
+            // Stale exclusion detection
+            Set<String> conflictKeys = findings.stream()
                     .map(f -> f.groupId() + ":" + f.artifactId())
                     .collect(java.util.stream.Collectors.toSet());
-            List<String> staleExclusions = pristine.allRedkiteExclusions().stream()
-                    .filter(ga -> !phase1ConflictKeys.contains(ga))
+            List<String> staleExclusions = meta.allRedkiteExclusions().stream()
+                    .filter(ga -> !conflictKeys.contains(ga))
                     .distinct().toList();
 
             progress.accept("Dependency management 95");
             store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions, phase2Findings,
-                    pristine.exclusionsStripped(), pristine.depMgmtRemoved(), phase2Pins);
+                    meta.exclusionsStripped(), meta.depMgmtEntries(), phase2Pins);
         } catch (Exception e) {
             LOGGER.warning(() -> "Enforcer check failed for scan " + scanId + ": " + e.getMessage());
             store.saveEnforcerResult(scanId, EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE, "",
@@ -1520,6 +1533,18 @@ public class RedKiteServerMain {
                 "<span class=\"badge success\" title=\"Dependency management check passed\">Dep. mgmt ✓</span>";
             case ENFORCER_RUN_FAILED_WITH_FINDINGS -> {
                 int n = e.findings().size();
+                List<TransitiveConflictFinding> phase2 = e.phase2Findings();
+                if (phase2 != null && phase2.isEmpty()) {
+                    // All conflicts resolved by auto-fix
+                    yield "<span class=\"badge success\" title=\"" + n + " conflict" + (n == 1 ? "" : "s")
+                        + " resolved by dep-management pins\">"
+                        + n + " conflict" + (n == 1 ? "" : "s") + " resolved ✓</span>";
+                }
+                if (phase2 != null && !phase2.isEmpty()) {
+                    yield "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\""
+                        + " title=\"" + phase2.size() + " conflict" + (phase2.size() == 1 ? "" : "s") + " remain unresolvable\">"
+                        + phase2.size() + " unresolvable</span>";
+                }
                 yield "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\""
                     + " title=\"Dependency management check failed\">"
                     + n + " convergence " + (n == 1 ? "conflict" : "conflicts") + "</span>";
@@ -1549,11 +1574,28 @@ public class RedKiteServerMain {
             return html.toString();
         }
         if (status == EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE) {
-            html.append("<p class=\"muted\">Could not run <code>mvn enforcer:enforce</code> &mdash; ensure Maven is on PATH.</p>");
+            if (entry.rawOutput() == null || entry.rawOutput().isBlank()) {
+                html.append("<p class=\"muted\">Could not start Maven &mdash; ensure <code>mvn</code> is on PATH.</p>");
+            } else {
+                html.append("<p class=\"muted\">Dependency check ran (via <code>mvn verify</code> fallback) but produced no parseable conflict output. ")
+                   .append("Check the analysis log for the full Maven output.</p>");
+            }
             return html.toString();
         }
         if (status == EnforcerStatus.ENFORCER_RUN_PASSED) {
-            html.append("<p><span class=\"badge success\">Passed</span> All enforcer dependency management rules passed.</p>");
+            html.append("<p><span class=\"badge success\">Passed</span> No dependency conflicts found");
+            int exStrippedP = entry.exclusionsStripped();
+            int dmRemovedP = entry.depMgmtRemoved().size();
+            if (exStrippedP > 0 || dmRemovedP > 0) {
+                html.append(" &mdash; pristine analysis ran with ");
+                if (dmRemovedP > 0) html.append(dmRemovedP).append(" dep-management entr").append(dmRemovedP == 1 ? "y" : "ies").append(" removed");
+                if (dmRemovedP > 0 && exStrippedP > 0) html.append(" and ");
+                if (exStrippedP > 0) html.append(exStrippedP).append(" exclusion").append(exStrippedP == 1 ? "" : "s").append(" stripped");
+                html.append(". Existing fixes may be stale.");
+            } else {
+                html.append(".");
+            }
+            html.append("</p>");
             return html.toString();
         }
 
@@ -3776,6 +3818,23 @@ public class RedKiteServerMain {
                     }
                     statement.executeUpdate("merge into rk_schema_version (version) values (8)");
                     currentVersion = 8;
+                }
+                if (currentVersion < 9) {
+                    LOGGER.info("Migrating schema to v9 (ensure phase2_findings_blob present)");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (9)");
+                    currentVersion = 9;
+                }
+                if (currentVersion < 10) {
+                    LOGGER.info("Migrating schema to v10 (ensure all enforcer columns present)");
+                    // v7/v8 metadata-gated migrations may have silently skipped; re-apply all unconditionally.
+                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
+                    statement.executeUpdate("merge into rk_schema_version (version) values (10)");
+                    currentVersion = 10;
                 }
                 statement.executeUpdate("""
                         create table if not exists projects (
