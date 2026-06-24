@@ -65,10 +65,12 @@ public class ConflictOutputParser {
             if (prefix.equals("jar") || prefix.equals("pom") || prefix.equals("war")
                     || prefix.equals("ear") || prefix.equals("test-jar")
                     || prefix.equals("bundle") || prefix.equals("aar")) {
-                return raw.substring(colon + 1);
+                raw = raw.substring(colon + 1);
             }
         }
-        return raw;
+        // Strip trailing sentence punctuation — enforcer headers end with a period before " Paths to..."
+        // and the regex captures up to the space, leaving e.g. "3.5.6." instead of "3.5.6".
+        return raw.replaceAll("\\.+$", "");
     }
 
     private TransitiveConflictFinding buildFinding(

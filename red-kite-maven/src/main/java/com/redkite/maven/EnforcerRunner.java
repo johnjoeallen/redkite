@@ -70,7 +70,7 @@ public class EnforcerRunner {
                 LOGGER.info(() -> "Enforcer run passed for " + pomPath);
                 return EnforcerRunResult.passed(output);
             } else {
-                LOGGER.info(() -> "Enforcer run failed (exit=" + exit + ") for " + pomPath);
+                LOGGER.info(() -> "Enforcer exited " + exit + " for " + pomPath + " (violations or no rules configured)");
                 return EnforcerRunResult.failed(output);
             }
         } catch (IOException | InterruptedException e) {
