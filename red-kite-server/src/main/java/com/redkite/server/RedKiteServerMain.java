@@ -3747,107 +3747,31 @@ public class RedKiteServerMain {
             };
         }
 
-        /**
-         * Creates the {@code enforcer_results} table with ALL current columns if it does not
-         * already exist. Every migration that ALTERs this table must call this first so that
-         * the subsequent {@code ADD COLUMN IF NOT EXISTS} statements are safe on both fresh
-         * and partially-migrated databases.
-         */
-        private static void ensureEnforcerResultsTable(Statement statement) throws SQLException {
-            statement.executeUpdate("""
-                    create table if not exists enforcer_results (
-                      scan_id uuid primary key,
-                      status varchar(64) not null,
-                      raw_output text not null default '',
-                      findings_blob text not null default '',
-                      stale_exclusions_json text not null default '[]',
-                      phase2_findings_blob text not null default '',
-                      exclusions_stripped int not null default 0,
-                      dep_mgmt_removed_json text not null default '[]',
-                      phase2_pins_json text not null default '[]',
-                      created_at timestamp not null default current_timestamp
-                    )
-                    """);
-        }
-
         private void initializeSchema() {
             try (Connection connection = connection();
-                 Statement statement = connection.createStatement()) {
-                statement.executeUpdate("""
-                        create table if not exists rk_schema_version (version int primary key)
-                        """);
-                int currentVersion;
-                try (ResultSet vrs = statement.executeQuery("select version from rk_schema_version")) {
-                    currentVersion = vrs.next() ? vrs.getInt("version") : 0;
+                 Statement st = connection.createStatement()) {
+
+                // v2 is the only versioned gate: it was a destructive rekey from integer to UUID
+                // primary keys. Guard it so it never re-runs on a DB that has already been migrated.
+                st.executeUpdate("create table if not exists rk_schema_version (version int primary key)");
+                int storedVersion;
+                try (ResultSet vrs = st.executeQuery("select version from rk_schema_version")) {
+                    storedVersion = vrs.next() ? vrs.getInt("version") : 0;
                 }
-                if (currentVersion < 2) {
-                    LOGGER.info("Migrating schema to v2 (UUID primary keys)");
-                    statement.executeUpdate("drop table if exists generated_poms");
-                    statement.executeUpdate("drop table if exists source_poms");
-                    statement.executeUpdate("drop table if exists metadata_cache_entries");
-                    statement.executeUpdate("drop table if exists scans");
-                    statement.executeUpdate("drop table if exists projects");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (2)");
-                    currentVersion = 2;
+                if (storedVersion < 2) {
+                    LOGGER.info("One-time migration: dropping pre-UUID tables");
+                    st.executeUpdate("drop table if exists generated_poms");
+                    st.executeUpdate("drop table if exists source_poms");
+                    st.executeUpdate("drop table if exists metadata_cache_entries");
+                    st.executeUpdate("drop table if exists scans");
+                    st.executeUpdate("drop table if exists projects");
+                    st.executeUpdate("merge into rk_schema_version (version) values (2)");
                 }
-                if (currentVersion < 3) {
-                    LOGGER.info("Migrating schema to v3 (enforcer results)");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (3)");
-                    currentVersion = 3;
-                }
-                if (currentVersion < 4) {
-                    LOGGER.info("Migrating schema to v4 (stale exclusions)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (4)");
-                    currentVersion = 4;
-                }
-                if (currentVersion < 5) {
-                    LOGGER.info("Migrating schema to v5 (vulnerability cache)");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (5)");
-                    currentVersion = 5;
-                }
-                if (currentVersion < 6) {
-                    LOGGER.info("Migrating schema to v6 (phase2 findings)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (6)");
-                    currentVersion = 6;
-                }
-                if (currentVersion < 7) {
-                    LOGGER.info("Migrating schema to v7 (pristine analysis metadata)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (7)");
-                    currentVersion = 7;
-                }
-                if (currentVersion < 8) {
-                    LOGGER.info("Migrating schema to v8 (phase2 applied pins)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (8)");
-                    currentVersion = 8;
-                }
-                if (currentVersion < 9) {
-                    LOGGER.info("Migrating schema to v9 (ensure phase2_findings_blob present)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (9)");
-                    currentVersion = 9;
-                }
-                if (currentVersion < 10) {
-                    LOGGER.info("Migrating schema to v10 (ensure all enforcer columns present)");
-                    ensureEnforcerResultsTable(statement);
-                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
-                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
-                    statement.executeUpdate("merge into rk_schema_version (version) values (10)");
-                    currentVersion = 10;
-                }
-                statement.executeUpdate("""
+
+                // --- create all tables with their current full schema ---
+                // Idempotent: CREATE TABLE IF NOT EXISTS is a no-op when the table already exists.
+
+                st.executeUpdate("""
                         create table if not exists projects (
                           id uuid primary key,
                           name varchar(255) not null,
@@ -3856,7 +3780,8 @@ public class RedKiteServerMain {
                           updated_at timestamp not null default current_timestamp
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists scans (
                           id uuid primary key,
                           project_id uuid not null,
@@ -3873,7 +3798,8 @@ public class RedKiteServerMain {
                           foreign key (project_id) references projects(id) on delete cascade
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists metadata_cache_entries (
                           id uuid default random_uuid() primary key,
                           scan_id uuid not null,
@@ -3899,7 +3825,8 @@ public class RedKiteServerMain {
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists source_poms (
                           id uuid default random_uuid() primary key,
                           scan_id uuid not null,
@@ -3909,7 +3836,8 @@ public class RedKiteServerMain {
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists generated_poms (
                           id uuid default random_uuid() primary key,
                           scan_id uuid not null,
@@ -3920,7 +3848,8 @@ public class RedKiteServerMain {
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists provider_rate_limit_state (
                           provider varchar(255) primary key,
                           rate_limited_at timestamp with time zone,
@@ -3931,8 +3860,8 @@ public class RedKiteServerMain {
                           updated_at timestamp with time zone not null default current_timestamp
                         )
                         """);
-                // Full schema including FK — safe here because scans table is already created above.
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists enforcer_results (
                           scan_id uuid primary key,
                           status varchar(64) not null,
@@ -3947,7 +3876,8 @@ public class RedKiteServerMain {
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists rk_version_cache (
                           cache_key varchar(512) primary key,
                           all_versions text not null,
@@ -3959,7 +3889,8 @@ public class RedKiteServerMain {
                           updated_at timestamp with time zone not null default current_timestamp
                         )
                         """);
-                statement.executeUpdate("""
+
+                st.executeUpdate("""
                         create table if not exists rk_vuln_cache (
                           cache_key varchar(512) primary key,
                           response_json text not null,
@@ -3967,6 +3898,17 @@ public class RedKiteServerMain {
                           updated_at timestamp with time zone not null default current_timestamp
                         )
                         """);
+
+                // --- reconcile columns that were added to existing tables after initial release ---
+                // ADD COLUMN IF NOT EXISTS is a no-op when the column already exists, so these
+                // run on every startup without harm. New installs never reach these (the CREATE
+                // TABLE above already includes all columns).
+                st.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
+                st.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
+                st.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
+                st.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
+                st.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
+
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to initialize schema", e);
             }
