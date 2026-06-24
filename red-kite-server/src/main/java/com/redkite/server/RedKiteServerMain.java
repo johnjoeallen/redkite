@@ -93,7 +93,7 @@ public class RedKiteServerMain {
              + "{\"name\":\"Version metadata\",\"pct\":" + p1 + ",\"status\":\"" + s1 + "\"},"
              + "{\"name\":\"Vulnerability scan\",\"pct\":" + p2 + ",\"status\":\"" + s2 + "\"},"
              + "{\"name\":\"Upgrade analysis\",\"pct\":" + p3 + ",\"status\":\"" + s3 + "\"},"
-             + "{\"name\":\"Convergence\",\"pct\":" + p4 + ",\"status\":\"" + s4 + "\"}]";
+             + "{\"name\":\"Dependency management\",\"pct\":" + p4 + ",\"status\":\"" + s4 + "\"}]";
     }
 
     public RedKiteServerMain(String jdbcUrl, String dbUser, String dbPassword, int port) throws IOException {
@@ -488,9 +488,9 @@ public class RedKiteServerMain {
 
                 job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",0,"active");
                 runEnforcerCheck(projectRoot, report.scanId(), msg -> {
-                    if (msg.startsWith("Convergence ")) {
+                    if (msg.startsWith("Dependency management ")) {
                         try {
-                            int pct = Integer.parseInt(msg.substring("Convergence ".length()).trim());
+                            int pct = Integer.parseInt(msg.substring("Dependency management ".length()).trim());
                             job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",pct,"active");
                         } catch (Exception ignored) {}
                     }
@@ -509,15 +509,19 @@ public class RedKiteServerMain {
     private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress) {
         try {
             Path pomPath = projectRoot.resolve("pom.xml");
-            progress.accept("Convergence 5");
-            EnforcerRunner.EnforcerRunResult result = new EnforcerRunner().run(projectRoot, pomPath);
-            progress.accept("Convergence 60");
-            String rawOutput = result.rawOutput();
+            progress.accept("Dependency management 5");
+
+            // Phase 1: pristine run — strips ALL RedKite remediations and ALL dep management
+            com.redkite.maven.TempPomAnalyzer.PristineResult pristine =
+                    new com.redkite.maven.TempPomAnalyzer().runPristine(projectRoot, pomPath);
+            progress.accept("Dependency management 45");
+
+            String rawOutput = pristine.enforcerResult().rawOutput();
             EnforcerStatus status;
             List<TransitiveConflictFinding> findings = List.of();
-            if (result.errorDetail() != null) {
+            if (pristine.enforcerResult().errorDetail() != null) {
                 status = EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE;
-            } else if (result.passed()) {
+            } else if (pristine.enforcerResult().passed()) {
                 status = EnforcerStatus.ENFORCER_RUN_PASSED;
             } else {
                 findings = new ConflictOutputParser().parse(rawOutput);
@@ -525,39 +529,120 @@ public class RedKiteServerMain {
                         ? EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE
                         : EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
             }
-            progress.accept("Convergence 75");
-            List<String> staleExclusions = List.of();
-            if (status != EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE) {
-                staleExclusions = detectStaleExclusions(projectRoot, pomPath, scanId, progress);
+
+            // Phase 2: validate auto-fix with computed dep-management pins
+            progress.accept("Dependency management 50");
+            List<TransitiveConflictFinding> phase2Findings = null;
+            List<String> phase2Pins = List.of();
+            if (status == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
+                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings);
+                if (p2 != null) {
+                    phase2Findings = p2.remainingFindings();
+                    phase2Pins = p2.appliedPins();
+                }
             }
-            progress.accept("Convergence 95");
-            store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions);
+            progress.accept("Dependency management 80");
+
+            // Stale exclusion detection: reuse Phase 1 findings — no extra enforcer run needed
+            Set<String> phase1ConflictKeys = findings.stream()
+                    .map(f -> f.groupId() + ":" + f.artifactId())
+                    .collect(java.util.stream.Collectors.toSet());
+            List<String> staleExclusions = pristine.allRedkiteExclusions().stream()
+                    .filter(ga -> !phase1ConflictKeys.contains(ga))
+                    .distinct().toList();
+
+            progress.accept("Dependency management 95");
+            store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions, phase2Findings,
+                    pristine.exclusionsStripped(), pristine.depMgmtRemoved(), phase2Pins);
         } catch (Exception e) {
             LOGGER.warning(() -> "Enforcer check failed for scan " + scanId + ": " + e.getMessage());
-            store.saveEnforcerResult(scanId, EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE, "", List.of(), List.of());
+            store.saveEnforcerResult(scanId, EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE, "",
+                    List.of(), List.of(), null, 0, List.of(), List.of());
         }
     }
 
-    private List<String> detectStaleExclusions(Path projectRoot, Path pomPath, String scanId, Consumer<String> progress) {
+    /**
+     * Phase 2: applies computed dep-management pins to a temp copy of all project POMs
+     * (with all existing dep management and RedKite remediations stripped) and re-runs the
+     * enforcer to verify whether the auto-fix resolves all violations.
+     *
+     * Returns the remaining findings, an empty list if all resolved, or null if Phase 2 could not run.
+     */
+    private record Phase2Result(List<TransitiveConflictFinding> remainingFindings, List<String> appliedPins) {}
+
+    private Phase2Result runPhase2Validation(
+            Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings) {
         try {
-            String pomContent = Files.readString(pomPath);
-            List<String> currentExclusions = new com.redkite.maven.RemediationApplier().parseRedkiteExclusions(pomContent);
-            if (currentExclusions.isEmpty()) return List.of();
-            progress.accept("Convergence 80");
-            EnforcerRunner.EnforcerRunResult pristine = new com.redkite.maven.TempPomAnalyzer().runWithoutRemediations(projectRoot, pomPath);
-            Set<String> pristineConflicts = new java.util.HashSet<>();
-            if (!pristine.passed() && pristine.errorDetail() == null) {
-                new ConflictOutputParser().parse(pristine.rawOutput()).stream()
-                        .map(f -> f.groupId() + ":" + f.artifactId())
-                        .forEach(pristineConflicts::add);
+            // Compute winner as max version — consistent with pristine analysis (all dep mgmt stripped)
+            Map<String, String> pins = new LinkedHashMap<>();
+            for (TransitiveConflictFinding f : findings) {
+                String winner = computeWinnerVersion(f, "");
+                if (winner != null && !winner.isBlank()) {
+                    pins.put(f.groupId() + ":" + f.artifactId(), winner);
+                }
             }
-            return currentExclusions.stream()
-                    .filter(ga -> !pristineConflicts.contains(ga))
-                    .distinct().toList();
+            List<String> pinsList = pins.entrySet().stream()
+                    .map(e -> e.getKey() + ":" + e.getValue())
+                    .toList();
+            LOGGER.info(() -> "Phase 2: running enforcer with " + pins.size() + " computed dep-management pin(s)");
+            EnforcerRunner.EnforcerRunResult r =
+                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins);
+            if (r.passed()) {
+                LOGGER.info("Phase 2: all conflicts resolved by auto-fix");
+                return new Phase2Result(List.of(), pinsList);
+            }
+            if (r.errorDetail() != null) return new Phase2Result(null, pinsList);
+            List<TransitiveConflictFinding> remaining = new ConflictOutputParser().parse(r.rawOutput());
+            LOGGER.info(() -> "Phase 2: " + remaining.size() + " conflict(s) remain after auto-fix");
+            return new Phase2Result(remaining, pinsList);
         } catch (Exception e) {
-            LOGGER.warning(() -> "Stale exclusion check failed for scan " + scanId + ": " + e.getMessage());
-            return List.of();
+            LOGGER.warning(() -> "Phase 2 validation failed: " + e.getMessage());
+            return null;
         }
+    }
+
+    /**
+     * Computes the version to pin for a conflict finding.
+     * Prefers an existing explicit dep-management entry in the POM; falls back to the max version.
+     */
+    private String computeWinnerVersion(TransitiveConflictFinding f, String pomContent) {
+        // Check for an existing <dependencyManagement> pin in the POM
+        String pinned = extractDepMgmtVersion(pomContent, f.groupId(), f.artifactId());
+        if (pinned != null && !pinned.isBlank()) return pinned;
+
+        // Otherwise use the max of resolvedVersion and all conflicting versions
+        String winner = f.resolvedVersion() != null ? f.resolvedVersion() : "";
+        for (String v : f.conflictingVersions()) {
+            if (compareVersionsSemantic(v, winner) > 0) winner = v;
+        }
+        return winner.isBlank() ? null : winner;
+    }
+
+    /** Extracts the pinned version for g:a from an existing <dependencyManagement> block. */
+    private static String extractDepMgmtVersion(String pomXml, String groupId, String artifactId) {
+        // Simple scan: look for <groupId>G</groupId> / <artifactId>A</artifactId> / <version>V</version>
+        // within a <dependencyManagement> block.
+        int dmStart = pomXml.indexOf("<dependencyManagement>");
+        int dmEnd = pomXml.indexOf("</dependencyManagement>");
+        if (dmStart < 0 || dmEnd <= dmStart) return null;
+        String dm = pomXml.substring(dmStart, dmEnd);
+        // Find each <dependency> block within dep management
+        int pos = 0;
+        while (true) {
+            int depStart = dm.indexOf("<dependency>", pos);
+            if (depStart < 0) break;
+            int depEnd = dm.indexOf("</dependency>", depStart);
+            if (depEnd < 0) break;
+            String dep = dm.substring(depStart, depEnd);
+            if (dep.contains("<groupId>" + groupId + "</groupId>")
+                    && dep.contains("<artifactId>" + artifactId + "</artifactId>")) {
+                int vs = dep.indexOf("<version>");
+                int ve = dep.indexOf("</version>");
+                if (vs >= 0 && ve > vs) return dep.substring(vs + 9, ve).trim();
+            }
+            pos = depEnd + 1;
+        }
+        return null;
     }
 
     private void handleApiEnforcerResults(HttpExchange exchange) throws IOException {
@@ -1432,11 +1517,11 @@ public class RedKiteServerMain {
         if (e == null) return "";
         return switch (e.status()) {
             case ENFORCER_RUN_PASSED ->
-                "<span class=\"badge success\" title=\"Dependency convergence check passed\">Convergence ✓</span>";
+                "<span class=\"badge success\" title=\"Dependency management check passed\">Dep. mgmt ✓</span>";
             case ENFORCER_RUN_FAILED_WITH_FINDINGS -> {
                 int n = e.findings().size();
                 yield "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\""
-                    + " title=\"Dependency convergence check failed\">"
+                    + " title=\"Dependency management check failed\">"
                     + n + " convergence " + (n == 1 ? "conflict" : "conflicts") + "</span>";
             }
             default -> "";
@@ -1456,7 +1541,7 @@ public class RedKiteServerMain {
 
     private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
         StringBuilder html = new StringBuilder();
-        html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency convergence</h2>");
+        html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency management</h2>");
 
         EnforcerStatus status = entry.status();
         if (status == EnforcerStatus.ENFORCER_CONFIGURED_NO_CONVERGENCE_RULES) {
@@ -1468,7 +1553,7 @@ public class RedKiteServerMain {
             return html.toString();
         }
         if (status == EnforcerStatus.ENFORCER_RUN_PASSED) {
-            html.append("<p><span class=\"badge success\">Passed</span> All enforcer dependency convergence rules passed.</p>");
+            html.append("<p><span class=\"badge success\">Passed</span> All enforcer dependency management rules passed.</p>");
             return html.toString();
         }
 
@@ -1479,8 +1564,70 @@ public class RedKiteServerMain {
         }
 
         html.append("<p><span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5\">")
-            .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span>")
-            .append(" &nbsp;<span class=\"muted\" style=\"font-size:.85rem\">The matching dependency picker below includes the conflicting versions inline.</span></p>");
+            .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span>");
+
+        List<TransitiveConflictFinding> phase2 = entry.phase2Findings();
+        if (phase2 != null) {
+            if (phase2.isEmpty()) {
+                html.append(" &nbsp;<span class=\"badge success\" style=\"font-size:.8rem\">Auto-fix verified</span>");
+            } else {
+                html.append(" &nbsp;<span class=\"badge\" style=\"font-size:.8rem;background:rgba(251,191,36,.12);border-color:rgba(251,191,36,.4);color:#fde68a\">")
+                    .append(phase2.size()).append(" unresolvable").append("</span>");
+            }
+        }
+        html.append(" &nbsp;<span class=\"muted\" style=\"font-size:.85rem\">The matching dependency picker below includes the conflicting versions inline.</span></p>");
+
+        // Pristine analysis summary
+        int exStripped = entry.exclusionsStripped();
+        int dmRemoved = entry.depMgmtRemoved().size();
+        if (exStripped > 0 || dmRemoved > 0) {
+            html.append("<p style=\"font-size:.82rem;color:var(--muted);margin:4px 0 12px\">Pristine analysis:");
+            if (exStripped > 0) {
+                html.append(" ").append(exStripped).append(" exclusion").append(exStripped == 1 ? "" : "s").append(" stripped");
+            }
+            if (exStripped > 0 && dmRemoved > 0) html.append(" &middot;");
+            if (dmRemoved > 0) {
+                html.append(" ").append(dmRemoved).append(" dep-management entr").append(dmRemoved == 1 ? "y" : "ies").append(" removed");
+            }
+            html.append("</p>");
+        }
+
+        // Auto-fix pin list — from stored Phase 2 computed pins, or derived from Phase 1 findings
+        List<String> phase2Pins = entry.phase2Pins();
+        if (phase2Pins.isEmpty() && !findings.isEmpty()) {
+            // Phase 2 hasn't run or data predates this feature — compute planned pins for display
+            phase2Pins = findings.stream()
+                    .map(f -> {
+                        String w = computeWinnerVersion(f, "");
+                        return w != null ? f.groupId() + ":" + f.artifactId() + ":" + w : null;
+                    })
+                    .filter(s -> s != null)
+                    .toList();
+        }
+        if (!phase2Pins.isEmpty()) {
+            Set<String> stillFailing = new java.util.HashSet<>();
+            if (phase2 != null) {
+                for (TransitiveConflictFinding f : phase2) stillFailing.add(f.groupId() + ":" + f.artifactId());
+            }
+            html.append("<div style=\"margin-top:14px;padding:12px 14px;border:1px solid rgba(75,85,99,.35);border-radius:10px;background:rgba(75,85,99,.06)\">");
+            html.append("<div style=\"font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:8px\">Auto-fix &mdash; computed dep-management pins</div>");
+            html.append("<div style=\"display:flex;flex-direction:column;gap:4px\">");
+            for (String gav : phase2Pins) {
+                int last = gav.lastIndexOf(':');
+                String ga = last > 0 ? gav.substring(0, last) : gav;
+                String version = last > 0 ? gav.substring(last + 1) : "?";
+                boolean resolved = !stillFailing.contains(ga);
+                html.append("<div style=\"font-size:.8rem;display:flex;align-items:baseline;gap:6px\">")
+                    .append("<span style=\"color:").append(resolved ? "#6ee7b7" : "#e05050").append("\">")
+                    .append(resolved ? "&#10003;" : "&#9888;").append("</span>")
+                    .append("<code style=\"font-size:.78rem\">").append(escape(ga)).append("</code>")
+                    .append("<span style=\"color:var(--muted)\">&rarr;</span>")
+                    .append("<code style=\"font-size:.78rem\">").append(escape(version)).append("</code>")
+                    .append("</div>");
+            }
+            html.append("</div></div>");
+        }
+
         html.append("<div id=\"enforcer-apply-msg\" style=\"display:none;margin-bottom:12px\" class=\"badge success\">Applied - re-analyse to verify.</div>");
 
         List<String> staleExclusions = entry.staleExclusions();
@@ -2689,20 +2836,94 @@ public class RedKiteServerMain {
             html.append("</div>");
         }
 
-        // Dependency convergence
+        // Dependency management
         if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
             html.append("<div class=\"log-section\">");
             if (enforcerResult.status() == EnforcerStatus.ENFORCER_RUN_PASSED) {
-                html.append("<div class=\"log-section-title\">Dependency convergence</div>");
+                html.append("<div class=\"log-section-title\">Dependency management</div>");
                 html.append("<p class=\"log-text\">All enforcer rules passed. No conflicts detected.</p>");
             } else if (enforcerResult.status() == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
                 List<TransitiveConflictFinding> findings = enforcerResult.findings();
-                html.append("<div class=\"log-section-title\" style=\"color:#e05050\">&#10005; Dependency convergence &nbsp;<span class=\"tab-count\">")
+                html.append("<div class=\"log-section-title\" style=\"color:#e05050\">&#10005; Dependency management &nbsp;<span class=\"tab-count\">")
                     .append(findings.size()).append(" conflict").append(findings.size() == 1 ? "" : "s").append("</span></div>");
                 html.append("<p class=\"log-text\">Conflict details are shown inline on the affected dependency pickers below.</p>");
             } else {
-                html.append("<div class=\"log-section-title\">Dependency convergence</div>");
-                html.append("<p class=\"log-text\">Convergence check could not run &mdash; ensure Maven is on PATH.</p>");
+                html.append("<div class=\"log-section-title\">Dependency management</div>");
+                html.append("<p class=\"log-text\">Dependency management check could not run &mdash; ensure Maven is on PATH.</p>");
+            }
+
+            // Pristine analysis metadata
+            int exStripped = enforcerResult.exclusionsStripped();
+            List<String> depMgmtRemoved = enforcerResult.depMgmtRemoved();
+            if (exStripped > 0 || !depMgmtRemoved.isEmpty()) {
+                html.append("<p class=\"log-text\" style=\"margin-top:12px;font-weight:600\">Pristine analysis changes</p>");
+                if (exStripped > 0) {
+                    html.append("<p class=\"log-text\">&#10003; ").append(exStripped)
+                        .append(" exclusion").append(exStripped == 1 ? "" : "s").append(" stripped across all POMs</p>");
+                }
+                if (!depMgmtRemoved.isEmpty()) {
+                    html.append("<p class=\"log-text\">Dep-management cleared (").append(depMgmtRemoved.size())
+                        .append(" entr").append(depMgmtRemoved.size() == 1 ? "y" : "ies").append("):</p>");
+                    html.append("<div class=\"log-code-list\">");
+                    for (String gav : depMgmtRemoved) {
+                        html.append("<div class=\"log-code-line\">- ").append(escape(gav)).append("</div>");
+                    }
+                    html.append("</div>");
+                }
+            }
+
+            // Auto-fix verification summary with diff against original dep management
+            List<TransitiveConflictFinding> phase2 = enforcerResult.phase2Findings();
+            List<String> phase2Pins = enforcerResult.phase2Pins();
+            if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
+                phase2Pins = enforcerResult.findings().stream()
+                        .map(f -> {
+                            String w = computeWinnerVersion(f, "");
+                            return w != null ? f.groupId() + ":" + f.artifactId() + ":" + w : null;
+                        })
+                        .filter(s -> s != null)
+                        .toList();
+            }
+            if (!phase2Pins.isEmpty()) {
+                java.util.Set<String> stillFailing = new java.util.HashSet<>();
+                if (phase2 != null) {
+                    for (TransitiveConflictFinding f : phase2) stillFailing.add(f.groupId() + ":" + f.artifactId());
+                }
+                // Build original dep-management map for diff (G:A → V)
+                Map<String, String> originalPins = new LinkedHashMap<>();
+                for (String gav : depMgmtRemoved) {
+                    int last = gav.lastIndexOf(':');
+                    if (last > 0) originalPins.put(gav.substring(0, last), gav.substring(last + 1));
+                }
+                html.append("<p class=\"log-text\" style=\"margin-top:12px;font-weight:600\">Auto-fix: computed dep-management pins</p>");
+                html.append("<div class=\"log-code-list\">");
+                java.util.Set<String> computedGAs = new java.util.LinkedHashSet<>();
+                for (String gav : phase2Pins) {
+                    int last = gav.lastIndexOf(':');
+                    String ga = last > 0 ? gav.substring(0, last) : gav;
+                    String version = last > 0 ? gav.substring(last + 1) : "?";
+                    computedGAs.add(ga);
+                    boolean resolved = !stillFailing.contains(ga);
+                    String origV = originalPins.get(ga);
+                    String diffNote = origV == null ? " <span style=\"color:var(--muted)\">(new)</span>"
+                            : origV.equals(version) ? " <span style=\"color:#6ee7b7\">(same as before)</span>"
+                            : " <span style=\"color:#fde68a\">was " + escape(origV) + "</span>";
+                    html.append("<div class=\"log-code-line\">")
+                        .append(resolved ? "&#10003; " : "&#9888; ")
+                        .append(escape(ga)).append(" &rarr; ").append(escape(version))
+                        .append(diffNote)
+                        .append(resolved ? "" : " <span style=\"color:#e05050\">(still failing)</span>")
+                        .append("</div>");
+                }
+                // Show original entries that have no corresponding computed pin (no longer needed)
+                for (Map.Entry<String, String> orig : originalPins.entrySet()) {
+                    if (!computedGAs.contains(orig.getKey())) {
+                        html.append("<div class=\"log-code-line\" style=\"color:var(--muted)\">&#8722; ")
+                            .append(escape(orig.getKey())).append(":").append(escape(orig.getValue()))
+                            .append(" <span>(no longer needed)</span></div>");
+                    }
+                }
+                html.append("</div>");
             }
 
             if (!enforcerResult.staleExclusions().isEmpty()) {
@@ -3525,6 +3746,37 @@ public class RedKiteServerMain {
                     statement.executeUpdate("merge into rk_schema_version (version) values (5)");
                     currentVersion = 5;
                 }
+                if (currentVersion < 6) {
+                    LOGGER.info("Migrating schema to v6 (phase2 findings)");
+                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
+                        if (tbls.next()) {
+                            statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
+                        }
+                    }
+                    statement.executeUpdate("merge into rk_schema_version (version) values (6)");
+                    currentVersion = 6;
+                }
+                if (currentVersion < 7) {
+                    LOGGER.info("Migrating schema to v7 (pristine analysis metadata)");
+                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
+                        if (tbls.next()) {
+                            statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
+                            statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
+                        }
+                    }
+                    statement.executeUpdate("merge into rk_schema_version (version) values (7)");
+                    currentVersion = 7;
+                }
+                if (currentVersion < 8) {
+                    LOGGER.info("Migrating schema to v8 (phase2 applied pins)");
+                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
+                        if (tbls.next()) {
+                            statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
+                        }
+                    }
+                    statement.executeUpdate("merge into rk_schema_version (version) values (8)");
+                    currentVersion = 8;
+                }
                 statement.executeUpdate("""
                         create table if not exists projects (
                           id uuid primary key,
@@ -3616,6 +3868,10 @@ public class RedKiteServerMain {
                           raw_output text not null,
                           findings_blob text not null,
                           stale_exclusions_json text not null default '[]',
+                          phase2_findings_blob text not null default '',
+                          exclusions_stripped int not null default 0,
+                          dep_mgmt_removed_json text not null default '[]',
+                          phase2_pins_json text not null default '[]',
                           created_at timestamp not null default current_timestamp,
                           foreign key (scan_id) references scans(id) on delete cascade
                         )
@@ -3832,15 +4088,22 @@ public class RedKiteServerMain {
 
         synchronized void saveEnforcerResult(String scanId, EnforcerStatus status,
                                              String rawOutput, List<TransitiveConflictFinding> findings,
-                                             List<String> staleExclusions) {
+                                             List<String> staleExclusions,
+                                             List<TransitiveConflictFinding> phase2Findings,
+                                             int exclusionsStripped, List<String> depMgmtRemoved,
+                                             List<String> phase2Pins) {
             try (Connection c = connection();
                  PreparedStatement ps = c.prepareStatement(
-                         "merge into enforcer_results (scan_id, status, raw_output, findings_blob, stale_exclusions_json) key (scan_id) values (?, ?, ?, ?, ?)")) {
+                         "merge into enforcer_results (scan_id, status, raw_output, findings_blob, stale_exclusions_json, phase2_findings_blob, exclusions_stripped, dep_mgmt_removed_json, phase2_pins_json) key (scan_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                 ps.setString(1, scanId);
                 ps.setString(2, status.name());
                 ps.setString(3, rawOutput == null ? "" : rawOutput);
                 ps.setString(4, SerializationSupport.toBase64(new java.util.ArrayList<>(findings)));
                 ps.setString(5, toJsonStringArray(staleExclusions));
+                ps.setString(6, phase2Findings == null ? "" : SerializationSupport.toBase64(new java.util.ArrayList<>(phase2Findings)));
+                ps.setInt(7, exclusionsStripped);
+                ps.setString(8, toJsonStringArray(depMgmtRemoved));
+                ps.setString(9, toJsonStringArray(phase2Pins));
                 ps.executeUpdate();
             } catch (SQLException e) {
                 LOGGER.warning(() -> "Failed to save enforcer result for scan " + scanId + ": " + e.getMessage());
@@ -3885,7 +4148,7 @@ public class RedKiteServerMain {
         synchronized EnforcerResultEntry getEnforcerResult(String scanId) {
             try (Connection c = connection();
                  PreparedStatement ps = c.prepareStatement(
-                         "select status, raw_output, findings_blob, stale_exclusions_json from enforcer_results where scan_id = ?")) {
+                         "select status, raw_output, findings_blob, stale_exclusions_json, phase2_findings_blob, exclusions_stripped, dep_mgmt_removed_json, phase2_pins_json from enforcer_results where scan_id = ?")) {
                 ps.setString(1, scanId);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) return null;
@@ -3894,7 +4157,16 @@ public class RedKiteServerMain {
                     @SuppressWarnings("unchecked")
                     List<TransitiveConflictFinding> findings = SerializationSupport.fromBase64(rs.getString("findings_blob"), java.util.ArrayList.class);
                     List<String> staleExclusions = fromJsonStringArray(rs.getString("stale_exclusions_json"));
-                    return new EnforcerResultEntry(status, rawOutput, findings == null ? List.of() : findings, staleExclusions);
+                    String p2blob = rs.getString("phase2_findings_blob");
+                    @SuppressWarnings("unchecked")
+                    List<TransitiveConflictFinding> phase2Findings = (p2blob == null || p2blob.isBlank())
+                            ? null : SerializationSupport.fromBase64(p2blob, java.util.ArrayList.class);
+                    int exclusionsStripped = rs.getInt("exclusions_stripped");
+                    List<String> depMgmtRemoved = fromJsonStringArray(rs.getString("dep_mgmt_removed_json"));
+                    List<String> phase2Pins = fromJsonStringArray(rs.getString("phase2_pins_json"));
+                    return new EnforcerResultEntry(status, rawOutput,
+                            findings == null ? List.of() : findings, staleExclusions, phase2Findings,
+                            exclusionsStripped, depMgmtRemoved, phase2Pins);
                 }
             } catch (SQLException | IllegalArgumentException e) {
                 LOGGER.warning(() -> "Failed to load enforcer result for scan " + scanId + ": " + e.getMessage());
@@ -3903,7 +4175,10 @@ public class RedKiteServerMain {
         }
 
         record EnforcerResultEntry(EnforcerStatus status, String rawOutput,
-                                   List<TransitiveConflictFinding> findings, List<String> staleExclusions) {}
+                                   List<TransitiveConflictFinding> findings, List<String> staleExclusions,
+                                   List<TransitiveConflictFinding> phase2Findings,
+                                   int exclusionsStripped, List<String> depMgmtRemoved,
+                                   List<String> phase2Pins) {}
 
     }
 

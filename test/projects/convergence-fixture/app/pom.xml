@@ -17,6 +17,13 @@
       <groupId>com.redkite.fixture</groupId>
       <artifactId>old-wrapper</artifactId>
       <version>${project.version}</version>
+      <!-- redkite:exclusion groupId="org.springframework.boot" artifactId="spring-boot-starter-data-jpa" reason="Enforcer dependency convergence fix by RedKite" -->
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>com.redkite.fixture</groupId>

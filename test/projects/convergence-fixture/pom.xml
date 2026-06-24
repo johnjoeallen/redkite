@@ -20,4 +20,15 @@
     <maven.compiler.release>${java.version}</maven.compiler.release>
     <maven-enforcer-plugin.version>3.6.3</maven-enforcer-plugin.version>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- redkite:dependency-management groupId="org.springframework.boot" artifactId="spring-boot-starter-data-jpa" version="3.5.15" reason="Enforcer dependency convergence fix by RedKite" -->
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-data-jpa</artifactId>
+        <version>3.5.15</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 </project>

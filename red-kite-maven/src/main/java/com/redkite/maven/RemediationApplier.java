@@ -218,6 +218,80 @@ public class RemediationApplier {
     }
 
     /**
+     * Returns G:A:V strings for all entries declared in {@code <dependencyManagement>} sections.
+     */
+    public List<String> extractDepMgmtEntries(String content) {
+        List<String> entries = new ArrayList<>();
+        int pos = 0;
+        while (true) {
+            int s = content.indexOf("<dependencyManagement>", pos);
+            if (s < 0) break;
+            int e = content.indexOf("</dependencyManagement>", s);
+            if (e < 0) break;
+            String block = content.substring(s, e);
+            int dpos = 0;
+            while (true) {
+                int ds = block.indexOf("<dependency>", dpos);
+                if (ds < 0) break;
+                int de = block.indexOf("</dependency>", ds);
+                if (de < 0) break;
+                String dep = block.substring(ds, de);
+                String g = extractSimpleTag(dep, "groupId");
+                String a = extractSimpleTag(dep, "artifactId");
+                String v = extractSimpleTag(dep, "version");
+                if (g != null && a != null && v != null) {
+                    entries.add(g + ":" + a + ":" + v);
+                }
+                dpos = de + 1;
+            }
+            pos = e + 1;
+        }
+        return entries;
+    }
+
+    /** Returns the number of {@code <!-- redkite:exclusion} markers in content. */
+    public int countRedkiteExclusions(String content) {
+        int count = 0;
+        String marker = "<!-- " + EXCLUSION_TAG;
+        int idx = 0;
+        while ((idx = content.indexOf(marker, idx)) != -1) {
+            count++;
+            idx += marker.length();
+        }
+        return count;
+    }
+
+    /** Removes all {@code <dependencyManagement>} blocks from content. */
+    public String stripAllDepManagement(String content) {
+        List<String> lines = toLines(content);
+        List<String> result = new ArrayList<>();
+        boolean inDepMgmt = false;
+        for (String line : lines) {
+            String s = line.strip();
+            if (!inDepMgmt && s.equals("<dependencyManagement>")) {
+                inDepMgmt = true;
+                continue;
+            }
+            if (inDepMgmt) {
+                if (s.equals("</dependencyManagement>")) inDepMgmt = false;
+                continue;
+            }
+            result.add(line);
+        }
+        return String.join(System.lineSeparator(), result);
+    }
+
+    private static String extractSimpleTag(String content, String tag) {
+        String open = "<" + tag + ">";
+        String close = "</" + tag + ">";
+        int s = content.indexOf(open);
+        if (s < 0) return null;
+        int e = content.indexOf(close, s);
+        if (e < 0) return null;
+        return content.substring(s + open.length(), e).trim();
+    }
+
+    /**
      * Returns "groupId:artifactId" for every redkite-managed exclusion comment in the POM.
      */
     public List<String> parseRedkiteExclusions(String content) {
