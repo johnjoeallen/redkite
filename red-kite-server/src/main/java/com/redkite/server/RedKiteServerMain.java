@@ -3747,6 +3747,29 @@ public class RedKiteServerMain {
             };
         }
 
+        /**
+         * Creates the {@code enforcer_results} table with ALL current columns if it does not
+         * already exist. Every migration that ALTERs this table must call this first so that
+         * the subsequent {@code ADD COLUMN IF NOT EXISTS} statements are safe on both fresh
+         * and partially-migrated databases.
+         */
+        private static void ensureEnforcerResultsTable(Statement statement) throws SQLException {
+            statement.executeUpdate("""
+                    create table if not exists enforcer_results (
+                      scan_id uuid primary key,
+                      status varchar(64) not null,
+                      raw_output text not null default '',
+                      findings_blob text not null default '',
+                      stale_exclusions_json text not null default '[]',
+                      phase2_findings_blob text not null default '',
+                      exclusions_stripped int not null default 0,
+                      dep_mgmt_removed_json text not null default '[]',
+                      phase2_pins_json text not null default '[]',
+                      created_at timestamp not null default current_timestamp
+                    )
+                    """);
+        }
+
         private void initializeSchema() {
             try (Connection connection = connection();
                  Statement statement = connection.createStatement()) {
@@ -3774,12 +3797,8 @@ public class RedKiteServerMain {
                 }
                 if (currentVersion < 4) {
                     LOGGER.info("Migrating schema to v4 (stale exclusions)");
-                    // Only ALTER if table already exists; fresh installs get the column via CREATE TABLE below
-                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
-                        if (tbls.next()) {
-                            statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
-                        }
-                    }
+                    ensureEnforcerResultsTable(statement);
+                    statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
                     statement.executeUpdate("merge into rk_schema_version (version) values (4)");
                     currentVersion = 4;
                 }
@@ -3790,44 +3809,36 @@ public class RedKiteServerMain {
                 }
                 if (currentVersion < 6) {
                     LOGGER.info("Migrating schema to v6 (phase2 findings)");
-                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
-                        if (tbls.next()) {
-                            statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
-                        }
-                    }
+                    ensureEnforcerResultsTable(statement);
+                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
                     statement.executeUpdate("merge into rk_schema_version (version) values (6)");
                     currentVersion = 6;
                 }
                 if (currentVersion < 7) {
                     LOGGER.info("Migrating schema to v7 (pristine analysis metadata)");
-                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
-                        if (tbls.next()) {
-                            statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
-                            statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
-                        }
-                    }
+                    ensureEnforcerResultsTable(statement);
+                    statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
+                    statement.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
                     statement.executeUpdate("merge into rk_schema_version (version) values (7)");
                     currentVersion = 7;
                 }
                 if (currentVersion < 8) {
                     LOGGER.info("Migrating schema to v8 (phase2 applied pins)");
-                    try (ResultSet tbls = connection.getMetaData().getTables(null, null, "ENFORCER_RESULTS", new String[]{"TABLE"})) {
-                        if (tbls.next()) {
-                            statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
-                        }
-                    }
+                    ensureEnforcerResultsTable(statement);
+                    statement.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
                     statement.executeUpdate("merge into rk_schema_version (version) values (8)");
                     currentVersion = 8;
                 }
                 if (currentVersion < 9) {
                     LOGGER.info("Migrating schema to v9 (ensure phase2_findings_blob present)");
+                    ensureEnforcerResultsTable(statement);
                     statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
                     statement.executeUpdate("merge into rk_schema_version (version) values (9)");
                     currentVersion = 9;
                 }
                 if (currentVersion < 10) {
                     LOGGER.info("Migrating schema to v10 (ensure all enforcer columns present)");
-                    // v7/v8 metadata-gated migrations may have silently skipped; re-apply all unconditionally.
+                    ensureEnforcerResultsTable(statement);
                     statement.executeUpdate("alter table enforcer_results add column if not exists stale_exclusions_json text not null default '[]'");
                     statement.executeUpdate("alter table enforcer_results add column if not exists phase2_findings_blob text not null default ''");
                     statement.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
@@ -3920,12 +3931,13 @@ public class RedKiteServerMain {
                           updated_at timestamp with time zone not null default current_timestamp
                         )
                         """);
+                // Full schema including FK — safe here because scans table is already created above.
                 statement.executeUpdate("""
                         create table if not exists enforcer_results (
                           scan_id uuid primary key,
                           status varchar(64) not null,
-                          raw_output text not null,
-                          findings_blob text not null,
+                          raw_output text not null default '',
+                          findings_blob text not null default '',
                           stale_exclusions_json text not null default '[]',
                           phase2_findings_blob text not null default '',
                           exclusions_stripped int not null default 0,
