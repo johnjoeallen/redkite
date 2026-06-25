@@ -137,6 +137,18 @@ public class RedKiteServerMain {
     public static void main(String[] args) throws Exception {
         java.nio.file.Path dataDir = java.nio.file.Path.of(System.getProperty("user.home"), ".redkite");
         Files.createDirectories(dataDir);
+
+        for (String arg : args) {
+            if ("--drop-db".equals(arg)) {
+                java.nio.file.Path dbFile = dataDir.resolve("redkite.mv.db");
+                java.nio.file.Path traceFile = dataDir.resolve("redkite.trace.db");
+                boolean deleted = Files.deleteIfExists(dbFile);
+                Files.deleteIfExists(traceFile);
+                System.out.println(deleted ? "Database dropped: " + dbFile : "No database file found at " + dbFile);
+                return;
+            }
+        }
+
         String jdbcUrl = System.getProperty("redkite.db.url",
                 "jdbc:h2:" + dataDir.resolve("redkite") + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE");
         String dbUser = System.getProperty("redkite.db.user", "sa");
@@ -519,9 +531,14 @@ public class RedKiteServerMain {
 
             // Run the enforcer against the original project (not a temp directory) so that
             // parent-POM resolution and source-file lookup always work correctly.
-            // If enforcer:enforce reports no standalone rules, EnforcerRunner falls back to
-            // mvn verify -DskipTests automatically.
-            EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath);
+            // If a previous run established that rules are lifecycle-bound (enforcer:enforce
+            // reports no rules), the project flag is set and we skip straight to verify.
+            String projectId = store.getScan(scanId).projectId();
+            boolean skipDirectEnforce = store.getProjectEnforcerUseVerify(projectId);
+            EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath, skipDirectEnforce);
+            if (enfResult.usedVerifyFallback() && !skipDirectEnforce) {
+                store.setProjectEnforcerUseVerify(projectId);
+            }
             progress.accept("Dependency management 50");
 
             String rawOutput = enfResult.rawOutput();
@@ -548,7 +565,7 @@ public class RedKiteServerMain {
             List<TransitiveConflictFinding> phase2Findings = null;
             List<String> phase2Pins = List.of();
             if (status == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
-                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings);
+                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings, skipDirectEnforce);
                 if (p2 != null) {
                     phase2Findings = p2.remainingFindings();
                     phase2Pins = p2.appliedPins();
@@ -584,7 +601,8 @@ public class RedKiteServerMain {
     private record Phase2Result(List<TransitiveConflictFinding> remainingFindings, List<String> appliedPins) {}
 
     private Phase2Result runPhase2Validation(
-            Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings) {
+            Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings,
+            boolean skipDirectEnforce) {
         try {
             // Compute winner as max version — consistent with pristine analysis (all dep mgmt stripped)
             Map<String, String> pins = new LinkedHashMap<>();
@@ -599,7 +617,7 @@ public class RedKiteServerMain {
                     .toList();
             LOGGER.info(() -> "Phase 2: running enforcer with " + pins.size() + " computed dep-management pin(s)");
             EnforcerRunner.EnforcerRunResult r =
-                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins);
+                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins, skipDirectEnforce);
             if (r.passed()) {
                 LOGGER.info("Phase 2: all conflicts resolved by auto-fix");
                 return new Phase2Result(List.of(), pinsList);
@@ -3355,6 +3373,32 @@ public class RedKiteServerMain {
             }
         }
 
+        synchronized boolean getProjectEnforcerUseVerify(String projectId) {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "select enforcer_use_verify from projects where id = ?")) {
+                ps.setString(1, projectId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() && rs.getBoolean("enforcer_use_verify");
+                }
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to read enforcer_use_verify for project " + projectId + ": " + e.getMessage());
+                return false;
+            }
+        }
+
+        synchronized void setProjectEnforcerUseVerify(String projectId) {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "update projects set enforcer_use_verify = true where id = ?")) {
+                ps.setString(1, projectId);
+                ps.executeUpdate();
+                LOGGER.info(() -> "Recorded enforcer_use_verify=true for project " + projectId);
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to set enforcer_use_verify for project " + projectId + ": " + e.getMessage());
+            }
+        }
+
         synchronized ScanEntry latestScanForProject(String projectId) {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
@@ -3777,7 +3821,8 @@ public class RedKiteServerMain {
                           name varchar(255) not null,
                           root_path varchar(1024) not null unique,
                           created_at timestamp not null default current_timestamp,
-                          updated_at timestamp not null default current_timestamp
+                          updated_at timestamp not null default current_timestamp,
+                          enforcer_use_verify boolean not null default false
                         )
                         """);
 
@@ -3908,6 +3953,7 @@ public class RedKiteServerMain {
                 st.executeUpdate("alter table enforcer_results add column if not exists exclusions_stripped int not null default 0");
                 st.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
                 st.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
+                st.executeUpdate("alter table projects add column if not exists enforcer_use_verify boolean not null default false");
 
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to initialize schema", e);

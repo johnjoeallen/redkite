@@ -91,6 +91,7 @@ public class RemediationApplier {
     public String applyDependencyManagementPin(String content,
                                                String groupId, String artifactId, String version,
                                                String reason) {
+        version = sanitizeVersion(version);
         List<String> lines = toLines(content);
 
         // Check if a redkite-managed entry already exists; update it in-place
@@ -428,5 +429,12 @@ public class RemediationApplier {
     private static String escapeAttr(String value) {
         if (value == null) return "";
         return value.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;");
+    }
+
+    /** Strips Maven tree annotations (e.g. " (managed) <-- ...") from a version string. */
+    static String sanitizeVersion(String version) {
+        if (version == null) return "";
+        int space = version.indexOf(' ');
+        return space > 0 ? version.substring(0, space) : version;
     }
 }

@@ -111,6 +111,11 @@ public class TempPomAnalyzer {
      */
     public EnforcerRunner.EnforcerRunResult runWithPins(Path projectRoot, Path pomPath,
             Map<String, String> pins) throws IOException {
+        return runWithPins(projectRoot, pomPath, pins, false);
+    }
+
+    public EnforcerRunner.EnforcerRunResult runWithPins(Path projectRoot, Path pomPath,
+            Map<String, String> pins, boolean skipDirectEnforce) throws IOException {
         List<Path> allPoms = findAllPoms(projectRoot);
         Path tempRoot = Files.createTempDirectory("redkite-phase2-");
         try {
@@ -131,7 +136,7 @@ public class TempPomAnalyzer {
                 LOGGER.warning(() -> "Symlink creation failed, verify fallback may not compile: " + e.getMessage());
             }
             Path tempPomPath = tempRoot.resolve(projectRoot.relativize(pomPath));
-            return runner.run(projectRoot, tempPomPath);
+            return runner.run(projectRoot, tempPomPath, skipDirectEnforce);
         } finally {
             deleteQuietly(tempRoot);
         }

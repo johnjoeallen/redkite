@@ -170,7 +170,10 @@ public class ConflictOutputParser {
         String[] parts = stripped.split(":");
         if (parts.length >= 3 && parts[0].equals(groupId) && parts[1].equals(artifactId)) {
             // g:a:v or g:a:p:v or g:a:p:v:s
-            return Optional.of(parts.length == 3 ? parts[2] : parts[2].equals("jar") || parts[2].equals("pom") ? parts[3] : parts[2]);
+            String v = parts.length == 3 ? parts[2] : parts[2].equals("jar") || parts[2].equals("pom") ? parts[3] : parts[2];
+            // Maven annotates managed versions with " (managed) <-- ..." — strip everything after the first space
+            int space = v.indexOf(' ');
+            return Optional.of(space > 0 ? v.substring(0, space) : v);
         }
         return Optional.empty();
     }

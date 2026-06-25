@@ -14,27 +14,35 @@ public class EnforcerRunner {
 
     private static final Logger LOGGER = Logger.getLogger(EnforcerRunner.class.getName());
 
-    public record EnforcerRunResult(boolean passed, String rawOutput, String errorDetail) {
+    public record EnforcerRunResult(boolean passed, String rawOutput, String errorDetail, boolean usedVerifyFallback) {
         public static EnforcerRunResult passed(String output) {
-            return new EnforcerRunResult(true, output, null);
+            return new EnforcerRunResult(true, output, null, false);
         }
 
         public static EnforcerRunResult failed(String output) {
-            return new EnforcerRunResult(false, output, null);
+            return new EnforcerRunResult(false, output, null, false);
         }
 
         public static EnforcerRunResult unavailable(String reason) {
-            return new EnforcerRunResult(false, "", reason);
+            return new EnforcerRunResult(false, "", reason, false);
         }
     }
 
     /**
-     * @param projectRoot root of the Maven project
-     * @param pomPath     specific POM to target (may be the root pom.xml or a temp copy)
+     * @param projectRoot      root of the Maven project
+     * @param pomPath          specific POM to target (may be the root pom.xml or a temp copy)
+     * @param skipDirectEnforce when true, skip enforcer:enforce and go straight to verify -DskipTests
+     *                         (use this when a prior run already established that rules are lifecycle-bound)
      */
-    public EnforcerRunResult run(Path projectRoot, Path pomPath) {
+    public EnforcerRunResult run(Path projectRoot, Path pomPath, boolean skipDirectEnforce) {
         String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
+
+        if (skipDirectEnforce) {
+            LOGGER.info(() -> "Skipping enforcer:enforce (known lifecycle-bound) — running mvn verify -DskipTests for " + pomPath);
+            EnforcerRunResult r = execute(mvn, settings, projectRoot, pomPath, "verify", "-DskipTests");
+            return new EnforcerRunResult(r.passed(), r.rawOutput(), r.errorDetail(), true);
+        }
 
         EnforcerRunResult result = execute(mvn, settings, projectRoot, pomPath, "enforcer:enforce");
         if (result.errorDetail() == null && isNoRulesConfigured(result.rawOutput())) {
@@ -42,8 +50,13 @@ public class EnforcerRunner {
             // Fall back to verify which triggers the full lifecycle including enforcer.
             LOGGER.info(() -> "enforcer:enforce reported no rules — falling back to mvn verify -DskipTests for " + pomPath);
             result = execute(mvn, settings, projectRoot, pomPath, "verify", "-DskipTests");
+            return new EnforcerRunResult(result.passed(), result.rawOutput(), result.errorDetail(), true);
         }
         return result;
+    }
+
+    public EnforcerRunResult run(Path projectRoot, Path pomPath) {
+        return run(projectRoot, pomPath, false);
     }
 
     private EnforcerRunResult execute(String mvn, Path settings, Path projectRoot, Path pomPath, String... goals) {
