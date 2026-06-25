@@ -12,3 +12,21 @@ fi
 
 cp "$JAR" "$DIR/scripts/red-kite.jar"
 echo "Built: scripts/red-kite.jar"
+
+# Create distribution zip: scripts + test fixture POMs
+mkdir -p "$DIR/dist"
+ZIP="$DIR/dist/red-kite.zip"
+rm -f "$ZIP"
+
+(
+  cd "$DIR/scripts"
+  zip -q "$ZIP" red-kite.jar red-kite.sh red-kite.bat
+)
+
+(
+  cd "$DIR/test/projects"
+  find convergence-fixture -name "pom.xml" ! -path "*/target/*" | \
+    xargs zip -q "$ZIP"
+)
+
+echo "Built: dist/red-kite.zip"
