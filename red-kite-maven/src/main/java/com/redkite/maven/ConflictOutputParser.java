@@ -166,7 +166,20 @@ public class ConflictOutputParser {
 
     private Optional<String> extractVersion(String line, String groupId, String artifactId) {
         // Handles "+-groupId:artifactId:version" or "+-groupId:artifactId:packaging:version:scope"
+        // For requireUpperBoundDeps, lines show: "g:a:managedV (managed) <-- g:a:requiredV"
+        // The version AFTER <-- is the one that is actually required (the upper bound violation).
         String stripped = line.replaceAll("^[\\s|+\\\\-]*\\+-", "").strip();
+        int arrowIdx = stripped.indexOf(" <-- ");
+        if (arrowIdx >= 0) {
+            // requireUpperBoundDeps path entry — use the required version from after <--
+            String afterArrow = stripped.substring(arrowIdx + 5).strip();
+            String[] ap = afterArrow.split(":");
+            if (ap.length >= 3 && ap[0].equals(groupId) && ap[1].equals(artifactId)) {
+                String v = ap.length == 3 ? ap[2] : ap[2].equals("jar") || ap[2].equals("pom") ? ap[3] : ap[2];
+                int space = v.indexOf(' ');
+                return Optional.of(space > 0 ? v.substring(0, space) : v);
+            }
+        }
         String[] parts = stripped.split(":");
         if (parts.length >= 3 && parts[0].equals(groupId) && parts[1].equals(artifactId)) {
             // g:a:v or g:a:p:v or g:a:p:v:s

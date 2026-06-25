@@ -420,12 +420,14 @@ public class RedKiteServerMain {
                     conflictsByKey.computeIfAbsent(f.groupId() + ":" + f.artifactId(), k -> new ArrayList<>()).add(f);
                 }
             }
+            html.append("<script>const rk_scanPath=").append(jsonStr(projectPath)).append(";</script>");
             html.append("<section class=\"card span-2\">");
             html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
             html.append("</section>");
             html.append("</div>");
             html.append(renderLogModal(report, scanId, enforcerResult));
             html.append(scanOverlayHtml());
+            html.append(applyOverlayHtml());
             html.append(pageShellEnd());
             sendHtml(exchange, 200, html.toString());
             return;
@@ -637,14 +639,15 @@ public class RedKiteServerMain {
      * Prefers an existing explicit dep-management entry in the POM; falls back to the max version.
      */
     private String computeWinnerVersion(TransitiveConflictFinding f, String pomContent) {
-        // Check for an existing <dependencyManagement> pin in the POM
-        String pinned = extractDepMgmtVersion(pomContent, f.groupId(), f.artifactId());
-        if (pinned != null && !pinned.isBlank()) return pinned;
-
-        // Otherwise use the max of resolvedVersion and all conflicting versions
+        // Use the max of resolvedVersion, all conflicting versions, and any existing dep-management pin.
+        // The pin is a candidate, not an override — if child POMs have a higher version it wins.
         String winner = f.resolvedVersion() != null ? f.resolvedVersion() : "";
         for (String v : f.conflictingVersions()) {
             if (compareVersionsSemantic(v, winner) > 0) winner = v;
+        }
+        String pinned = extractDepMgmtVersion(pomContent, f.groupId(), f.artifactId());
+        if (pinned != null && !pinned.isBlank() && compareVersionsSemantic(pinned, winner) > 0) {
+            winner = pinned;
         }
         return winner.isBlank() ? null : winner;
     }
@@ -746,10 +749,7 @@ public class RedKiteServerMain {
             // Write the modified POM
             Files.writeString(targetPom, updatedPom, StandardCharsets.UTF_8);
 
-            // Re-run enforcer check to refresh findings
-            runEnforcerCheck(projectRoot, scanId, msg -> {});
-            Store.EnforcerResultEntry updated = store.getEnforcerResult(scanId);
-            sendJson(exchange, 200, updated != null ? enforcerResultToJson(updated) : "{\"status\":\"ENFORCER_NOT_CONFIGURED\",\"findings\":[]}");
+            sendJson(exchange, 200, "{\"status\":\"ok\"}");
         } catch (Exception e) {
             LOGGER.warning(() -> "Remediation apply failed: " + e.getMessage());
             sendText(exchange, 500, "Apply failed: " + e.getMessage());
@@ -996,7 +996,7 @@ public class RedKiteServerMain {
                 }
                 Map<String, String> patchedFiles = generatePomPatches(
                         scan.report(), sourcePoms, scan.input().workingTreePath(), updates, conflictsByKey);
-                if (patchedFiles.isEmpty()) { sendText(exchange, 400, "No matching source POMs for the selected components"); return; }
+                if (patchedFiles.isEmpty()) { sendJson(exchange, 200, "{}"); return; }
                 StringBuilder json = new StringBuilder("{");
                 boolean first = true;
                 for (Map.Entry<String, String> entry : patchedFiles.entrySet()) {
@@ -1056,7 +1056,7 @@ public class RedKiteServerMain {
             java.nio.file.Path root = java.nio.file.Path.of(scan.input().workingTreePath()).toAbsolutePath().normalize();
             // Body is JSON object: {"relative/path/pom.xml": "content", ...}
             Map<String, String> files = parseJsonStringMap(body);
-            if (files.isEmpty()) { sendText(exchange, 400, "No files in request body"); return; }
+            if (files.isEmpty()) { sendJson(exchange, 200, "{\"written\":[]}"); return; }
             List<String> written = new ArrayList<>();
             for (Map.Entry<String, String> entry : files.entrySet()) {
                 java.nio.file.Path target = root.resolve(entry.getKey()).normalize();
@@ -1094,10 +1094,13 @@ public class RedKiteServerMain {
 
         // Direct dependency upgrades use the existing version patch flow.
         Map<String, List<ScanComponent>> directByFile = new LinkedHashMap<>();
+        Map<String, String> allDirectUpdates = new LinkedHashMap<>();
         for (ScanComponent c : report.components()) {
             if (!c.direct() || c.snapshot() || c.sourceFilePath() == null) continue;
             if (!updateById.containsKey(c.id())) continue;
             directByFile.computeIfAbsent(c.sourceFilePath(), k -> new ArrayList<>()).add(c);
+            String coord = c.coordinate().groupId() + ":" + c.coordinate().artifactId();
+            allDirectUpdates.put(coord, updateById.get(c.id()));
         }
         for (Map.Entry<String, List<ScanComponent>> entry : directByFile.entrySet()) {
             String content = sourcePoms.get(entry.getKey());
@@ -1110,10 +1113,22 @@ public class RedKiteServerMain {
             result.put(entry.getKey(), patchPomXml(content, fileUpdates));
         }
 
-        // Transitive convergence selections are translated into dependencyManagement pins
-        // plus exclusions on the parents introducing the non-selected versions.
+        // Sync dep-management pins in the root POM to match any direct dep upgrades,
+        // so the root POM never overrides a version that was just upgraded in a child module.
         RemediationApplier applier = new RemediationApplier();
         String rootPomKey = selectRootPomKey(sourcePoms, workingTreePath);
+        if (rootPomKey != null && !allDirectUpdates.isEmpty()) {
+            String rootContent = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
+            if (rootContent != null) {
+                String updated = patchPomXml(rootContent, allDirectUpdates);
+                if (!updated.equals(rootContent)) {
+                    result.put(rootPomKey, updated);
+                }
+            }
+        }
+
+        // Transitive convergence selections are translated into dependencyManagement pins
+        // plus exclusions on the parents introducing the non-selected versions.
         for (Map.Entry<Long, String> entry : updateById.entrySet()) {
             ScanComponent component = componentsById.get(entry.getKey());
             if (component == null || component.direct() || component.snapshot()) {
@@ -1130,7 +1145,7 @@ public class RedKiteServerMain {
                 String content = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
                 if (content != null) {
                     String updated = applier.applyDependencyManagementPin(
-                            content, finding.groupId(), finding.artifactId(), selectedVersion,
+                            content, component.coordinate().groupId(), component.coordinate().artifactId(), selectedVersion,
                             "Enforcer dependency convergence fix by RedKite");
                     if (!updated.equals(content)) {
                         result.put(rootPomKey, updated);
@@ -1582,6 +1597,22 @@ public class RedKiteServerMain {
              + "</div></div>";
     }
 
+    private static String applyOverlayHtml() {
+        return "<div id=\"apply-overlay\" class=\"scan-overlay\" style=\"display:none\">"
+             + "<div class=\"scan-overlay-box\">"
+             + "<div style=\"display:flex;align-items:center;gap:10px\">"
+             + "<div class=\"scan-spinner\"></div>"
+             + "<span>Applying fixes…</span>"
+             + "</div>"
+             + "<div id=\"apply-progress-count\" style=\"font-size:.85rem;color:var(--muted);font-weight:400\">0 / 0</div>"
+             + "<div class=\"scan-phase-track\" style=\"width:300px\">"
+             + "<div id=\"apply-progress-bar\" class=\"scan-phase-fill active\" style=\"width:0%\"></div>"
+             + "</div>"
+             + "<div id=\"apply-progress-text\" style=\"font-size:.78rem;color:var(--muted);font-weight:400;"
+             + "font-family:ui-monospace,monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\"></div>"
+             + "</div></div>";
+    }
+
     private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
         StringBuilder html = new StringBuilder();
         html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency management</h2>");
@@ -1669,8 +1700,30 @@ public class RedKiteServerMain {
             if (phase2 != null) {
                 for (TransitiveConflictFinding f : phase2) stillFailing.add(f.groupId() + ":" + f.artifactId());
             }
+            // Build JSON array of {groupId,artifactId,version} for the apply button
+            StringBuilder pinsJson = new StringBuilder("[");
+            boolean firstPin = true;
+            for (String gav : phase2Pins) {
+                int last = gav.lastIndexOf(':');
+                if (last <= 0) continue;
+                String ga = gav.substring(0, last);
+                String ver = gav.substring(last + 1);
+                int colon = ga.indexOf(':');
+                if (colon <= 0) continue;
+                String g = ga.substring(0, colon), a = ga.substring(colon + 1);
+                if (!firstPin) pinsJson.append(",");
+                firstPin = false;
+                pinsJson.append("{\"groupId\":").append(jsonStr(g))
+                        .append(",\"artifactId\":").append(jsonStr(a))
+                        .append(",\"version\":").append(jsonStr(ver)).append("}");
+            }
+            pinsJson.append("]");
             html.append("<div style=\"margin-top:14px;padding:12px 14px;border:1px solid rgba(75,85,99,.35);border-radius:10px;background:rgba(75,85,99,.06)\">");
-            html.append("<div style=\"font-size:.82rem;font-weight:600;color:var(--muted);margin-bottom:8px\">Auto-fix &mdash; computed dep-management pins</div>");
+            html.append("<div style=\"display:flex;align-items:center;justify-content:space-between;margin-bottom:8px\">");
+            html.append("<div style=\"font-size:.82rem;font-weight:600;color:var(--muted)\">Auto-fix &mdash; computed dep-management pins</div>");
+            html.append("<button class=\"button primary\" type=\"button\" onclick=\"applyPhase2Pins(rk_scanId,")
+                    .append(pinsJson.toString().replace("\"", "&quot;")).append(",this)\">Apply</button>");
+            html.append("</div>");
             html.append("<div style=\"display:flex;flex-direction:column;gap:4px\">");
             for (String gav : phase2Pins) {
                 int last = gav.lastIndexOf(':');
@@ -1719,7 +1772,9 @@ public class RedKiteServerMain {
         Map<Long, UpgradeRecommendation> recByComponent = new LinkedHashMap<>();
         for (UpgradeRecommendation rec : report.recommendations()) {
             if (!rec.affectedComponentIds().isEmpty()) {
-                recByComponent.put(rec.affectedComponentIds().get(0), rec);
+                for (Long id : rec.affectedComponentIds()) {
+                    recByComponent.put(id, rec);
+                }
             } else {
                 recByComponent.put(rec.id(), rec);
             }
@@ -1993,6 +2048,30 @@ public class RedKiteServerMain {
             }
             html.append("};");
         }
+        // Coordinate groups: g:a → [compId, ...] for cross-POM sibling syncing
+        {
+            Map<String, List<Long>> coordGroups = new LinkedHashMap<>();
+            for (ComponentView v : views) {
+                ScanComponent c = v.component();
+                if (c.coordinate() == null) continue;
+                String coord = c.coordinate().groupId() + ":" + c.coordinate().artifactId();
+                coordGroups.computeIfAbsent(coord, k -> new ArrayList<>()).add(c.id());
+            }
+            html.append("const rk_coordGroups={");
+            boolean first = true;
+            for (Map.Entry<String, List<Long>> e : coordGroups.entrySet()) {
+                if (e.getValue().size() < 2) continue;
+                if (!first) html.append(",");
+                first = false;
+                html.append(jsonStr(e.getKey())).append(":[");
+                for (int i = 0; i < e.getValue().size(); i++) {
+                    if (i > 0) html.append(",");
+                    html.append(e.getValue().get(i));
+                }
+                html.append("]");
+            }
+            html.append("};");
+        }
         html.append("</script>");
 
         // Component cards
@@ -2001,7 +2080,7 @@ public class RedKiteServerMain {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
             boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
-            html.append(renderComponentCard(view, mod, hasParents));
+            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey));
         }
         html.append("</div>");
 
@@ -2010,10 +2089,14 @@ public class RedKiteServerMain {
         html.append("<div class=\"pom-modal-backdrop\" onclick=\"closePomModal()\"></div>");
         html.append("<div class=\"pom-modal-box\">");
         html.append("<div class=\"pom-modal-head\">");
+        html.append("<div style=\"display:flex;align-items:center;gap:10px;min-width:0;overflow:hidden\">");
         html.append("<span id=\"pom-modal-filename\" class=\"pom-modal-filename\"></span>");
+        html.append("<select id=\"pom-file-sel\" style=\"display:none;padding:4px 10px;border-radius:8px;"
+                + "border:1px solid var(--line);background:var(--surf-nav);color:var(--text);"
+                + "font-size:.82rem;font-family:ui-monospace,monospace;cursor:pointer\" onchange=\"switchPomFile(this.value)\"></select>");
+        html.append("</div>");
         html.append("<div style=\"display:flex;gap:8px;flex-shrink:0\">");
         html.append("<button class=\"button\" type=\"button\" onclick=\"copyPomContent()\">Copy</button>");
-        html.append("<button class=\"button primary\" type=\"button\" id=\"pom-write-btn\" onclick=\"writePomFiles()\">Write to file</button>");
         html.append("<button class=\"button\" type=\"button\" onclick=\"closePomModal()\">Close</button>");
         html.append("</div></div>");
         html.append("<div class=\"pom-modal-body\"><pre id=\"pom-modal-content\"></pre></div>");
@@ -2046,7 +2129,7 @@ public class RedKiteServerMain {
         return sb.toString();
     }
 
-    private String renderComponentCard(ComponentView view, String module, boolean hasChildren) {
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean hasHighSeverityCve = hasHighOrCriticalCve(view.findings());
@@ -2156,8 +2239,13 @@ public class RedKiteServerMain {
                 List<String> directConflictVersions = view.convergenceFinding() != null
                         ? view.convergenceFinding().conflictingVersions() : List.of();
                 String selectedVersion = view.convergenceFinding() != null
-                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings())
+                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings(), vulnsByKey, view.versionMetadata())
                         : (view.recommendation() != null ? view.recommendation().targetVersion() : comp.version());
+                if (view.convergenceFinding() != null && view.recommendation() != null
+                        && view.recommendation().targetVersion() != null
+                        && compareVersionsSemantic(view.recommendation().targetVersion(), selectedVersion != null ? selectedVersion : "") > 0) {
+                    selectedVersion = view.recommendation().targetVersion();
+                }
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
                         view.versionMetadata(), view.recommendation(), view.findings(), false, directConflictVersions,
                         view.convergenceFinding() != null));
@@ -2167,8 +2255,13 @@ public class RedKiteServerMain {
                         ? view.convergenceFinding().conflictingVersions()
                         : List.of();
                 String selectedVersion = view.convergenceFinding() != null
-                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings())
+                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings(), vulnsByKey, view.versionMetadata())
                         : (view.recommendation() != null ? view.recommendation().targetVersion() : comp.version());
+                if (view.convergenceFinding() != null && view.recommendation() != null
+                        && view.recommendation().targetVersion() != null
+                        && compareVersionsSemantic(view.recommendation().targetVersion(), selectedVersion != null ? selectedVersion : "") > 0) {
+                    selectedVersion = view.recommendation().targetVersion();
+                }
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
                         view.versionMetadata(), view.recommendation(), view.findings(), false,
                         conflictVersions, true));
@@ -2355,7 +2448,13 @@ public class RedKiteServerMain {
     }
 
     private String conflictDefaultVersion(TransitiveConflictFinding f, ScanComponent comp,
-            List<VulnerabilityFinding> vulnFindings) {
+            List<VulnerabilityFinding> vulnFindings, Map<String, List<VulnerabilityFinding>> vulnsByKey) {
+        return conflictDefaultVersion(f, comp, vulnFindings, vulnsByKey, null);
+    }
+
+    private String conflictDefaultVersion(TransitiveConflictFinding f, ScanComponent comp,
+            List<VulnerabilityFinding> vulnFindings, Map<String, List<VulnerabilityFinding>> vulnsByKey,
+            MetadataResult versionMeta) {
         String newest = f.resolvedVersion() != null ? f.resolvedVersion() : "";
         for (String v : f.conflictingVersions()) {
             if (compareVersionsSemantic(v, newest) > 0) newest = v;
@@ -2363,19 +2462,82 @@ public class RedKiteServerMain {
         if (comp.version() != null && compareVersionsSemantic(comp.version(), newest) > 0) {
             newest = comp.version();
         }
-        // If the candidate is still within a CVE-affected range, bump to the fix version (same major only)
-        if (vulnFindings != null && comp.coordinate() != null) {
-            for (VulnerabilityFinding finding : vulnFindings) {
-                if (finding.fixedVersion() == null || finding.coordinate() == null) continue;
-                if (!comp.coordinate().groupId().equals(finding.coordinate().groupId())
-                        || !comp.coordinate().artifactId().equals(finding.coordinate().artifactId())) continue;
-                if (sameMajor(newest, finding.fixedVersion())
-                        && compareVersionsSemantic(newest, finding.fixedVersion()) < 0) {
-                    newest = finding.fixedVersion();
+        if (comp.coordinate() == null) return newest.isBlank() ? null : newest;
+
+        // Collect all known vulnerability findings for this artifact across all affected versions.
+        // This lets us do range-based checking: if affectedVersion <= candidate < fixedVersion,
+        // the candidate is still vulnerable even if we have no finding keyed exactly to it.
+        String ga = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
+        List<VulnerabilityFinding> allArtifactVulns = new ArrayList<>();
+        if (vulnFindings != null) allArtifactVulns.addAll(vulnFindings);
+        if (vulnsByKey != null) {
+            String prefix = ga + "@";
+            for (Map.Entry<String, List<VulnerabilityFinding>> e : vulnsByKey.entrySet()) {
+                if (e.getKey().startsWith(prefix)) {
+                    for (VulnerabilityFinding vf : e.getValue()) {
+                        if (vf.coordinate() != null
+                                && comp.coordinate().groupId().equals(vf.coordinate().groupId())
+                                && comp.coordinate().artifactId().equals(vf.coordinate().artifactId())) {
+                            allArtifactVulns.add(vf);
+                        }
+                    }
                 }
             }
         }
-        return newest.isBlank() ? null : newest;
+
+        // Walk up through available versions (same major) until finding a clean one.
+        List<String> upgradePath = (versionMeta != null && versionMeta.upgradePathVersions() != null)
+                ? versionMeta.upgradePathVersions() : List.of();
+        String candidate = newest;
+        int maxPasses = upgradePath.size() + allArtifactVulns.size() + 2;
+        for (int pass = 0; pass < maxPasses; pass++) {
+            // Find the lowest fixedVersion that covers the candidate (affectedVersion <= candidate < fixedVersion, same major)
+            String fixVersion = null;
+            for (VulnerabilityFinding finding : allArtifactVulns) {
+                if (finding.fixedVersion() == null) continue;
+                if (!sameMajor(candidate, finding.fixedVersion())) continue;
+                if (compareVersionsSemantic(candidate, finding.fixedVersion()) >= 0) continue;
+                // candidate < fixedVersion — check range: affectedVersion <= candidate
+                if (finding.affectedVersion() != null
+                        && compareVersionsSemantic(finding.affectedVersion(), candidate) > 0) continue;
+                if (fixVersion == null || compareVersionsSemantic(finding.fixedVersion(), fixVersion) < 0) {
+                    fixVersion = finding.fixedVersion();
+                }
+            }
+            if (fixVersion == null) break; // candidate is clean
+            // Find the lowest available version >= fixVersion within same major
+            String next = null;
+            for (String v : upgradePath) {
+                if (!sameMajor(candidate, v)) continue;
+                if (compareVersionsSemantic(v, fixVersion) >= 0
+                        && (next == null || compareVersionsSemantic(v, next) < 0)) {
+                    next = v;
+                }
+            }
+            if (next == null) next = fixVersion; // no upgrade path entry, use fix directly
+            if (next.equals(candidate)) break;
+            candidate = next;
+        }
+        // Fallback: if candidate is still listed as an affectedVersion in CVE data but no fixedVersion
+        // was resolvable (fixedVersion=null), bump to the lowest same-major version in the upgrade path.
+        if (!allArtifactVulns.isEmpty()) {
+            String finalCandidate = candidate;
+            boolean candidateIsAffected = allArtifactVulns.stream().anyMatch(vf ->
+                    finalCandidate.equals(vf.affectedVersion())
+                    || (vf.affectedVersion() != null
+                        && compareVersionsSemantic(vf.affectedVersion(), finalCandidate) <= 0
+                        && vf.fixedVersion() == null));
+            if (candidateIsAffected) {
+                for (String v : upgradePath) {
+                    if (sameMajor(candidate, v) && compareVersionsSemantic(v, candidate) > 0
+                            && !isPreRelease(v)) {
+                        candidate = v;
+                        break;
+                    }
+                }
+            }
+        }
+        return candidate.isBlank() ? null : candidate;
     }
 
     private boolean sameMajorMinor(String v1, String v2) {
@@ -2800,7 +2962,7 @@ public class RedKiteServerMain {
                 + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
                 + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
                 + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}.badge.conflict-badge{background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;font-size:.72rem;}"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,conflictN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';else if(remMode==='conflict')modeOk=card.dataset.hasconflict==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(card.dataset.hasconflict==='true')conflictN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='conflict')el.textContent=conflictN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const btn=document.getElementById('apply-btn');const conflictItems=[];const chosenParts=[];const allParts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{const card=sel.closest('.rem-card');if(!card||card.style.display==='none')return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp)return;if(card.dataset.conflict){conflictItems.push({sel,card});}else if(sel.value&&sel.value!==comp.v){const entry=encodeURIComponent(compId)+'='+encodeURIComponent(sel.value);allParts.push(entry);if(sel.dataset.chosen==='true')chosenParts.push(entry);}});const parts=chosenParts.length>0?chosenParts:allParts;if(!conflictItems.length&&!parts.length)return;btn.disabled=true;btn.textContent='Applying…';conflictItems.reduce((p,item)=>p.then(()=>{const data=JSON.parse(item.card.dataset.conflict);const chosenVersion=item.sel.value||data.resolvedVersion;const actions=[{scanId:rk_scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:data.groupId,artifactId:data.artifactId,version:chosenVersion}];(data.exclusions||[]).forEach(excl=>{if(excl.introducedVersion!==chosenVersion)actions.push({scanId:rk_scanId,actionType:'ADD_EXCLUSION',groupId:data.groupId,artifactId:data.artifactId,version:excl.introducedVersion,parentGroupId:excl.parentGroupId,parentArtifactId:excl.parentArtifactId});});return actions.reduce((q,payload)=>q.then(()=>fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);}))),Promise.resolve());}),Promise.resolve()).then(()=>{if(conflictItems.length){const msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}if(!parts.length){btn.textContent='Apply selected';updateApplyButton();return Promise.resolve();}btn.textContent='Generating…';return fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{btn.textContent='Apply selected';updateApplyButton();showPomModal(data);});}).catch(err=>{btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to apply.');});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var label=keys.length===1?keys[0]:keys.length+' files';document.getElementById('pom-modal-filename').textContent=label;document.getElementById('pom-modal-content').textContent=files[keys[0]];var wb=document.getElementById('pom-write-btn');if(wb)wb.textContent='Write to file';document.getElementById('pom-modal').style.display='flex';}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(!propKey)return;(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(card.dataset.conflict||(comp&&s.value!==comp.v))any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}function applyRemediationAsync(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';});}function compareVersions(a,b){var pa=a.replace(/-/g,'.').split('.');var pb=b.replace(/-/g,'.').split('.');var n=Math.max(pa.length,pb.length);for(var i=0;i<n;i++){var d=(parseInt(pa[i],10)||0)-(parseInt(pb[i],10)||0);if(d!==0)return d;}return 0;}</script></head><body><div class=\"shell\">"
+                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,conflictN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';else if(remMode==='conflict')modeOk=card.dataset.hasconflict==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(card.dataset.hasconflict==='true')conflictN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);if(btn.dataset.mode==='upgrade')return;const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='conflict')el.textContent=conflictN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;});var ud=document.getElementById('upg-direct-count');if(ud)ud.textContent=upgradeDirectN;var ut=document.getElementById('upg-trans-count');if(ut)ut.textContent=upgradeTransN;}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const btn=document.getElementById('apply-btn');const conflictItems=[];const chosenParts=[];const allParts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{const card=sel.closest('.rem-card');if(!card)return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp)return;if(card.dataset.conflict){conflictItems.push({sel,card});}else if(sel.value&&sel.value!==comp.v){const entry=encodeURIComponent(compId)+'='+encodeURIComponent(sel.value);allParts.push(entry);if(sel.dataset.chosen==='true')chosenParts.push(entry);}});const parts=chosenParts.length>0?chosenParts:allParts;if(!conflictItems.length&&!parts.length)return;const total=conflictItems.length+(parts.length>0?1:0);let done=0;function showApplyOv(label){var ov=document.getElementById('apply-overlay');if(!ov)return;ov.style.display='flex';var txt=document.getElementById('apply-progress-text');if(txt)txt.textContent=label||'';var bar=document.getElementById('apply-progress-bar');if(bar)bar.style.width=(total>0?Math.round(done/total*100):0)+'%';var cnt=document.getElementById('apply-progress-count');if(cnt)cnt.textContent=done+' / '+total;}function hideApplyOv(){var ov=document.getElementById('apply-overlay');if(ov)ov.style.display='none';}showApplyOv('');btn.disabled=true;btn.textContent='Applying…';conflictItems.reduce((p,item)=>p.then(()=>{const data=JSON.parse(item.card.dataset.conflict);const label=data.groupId+':'+data.artifactId;showApplyOv(label);const chosenVersion=item.sel.value||data.resolvedVersion;const actions=[{scanId:rk_scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:data.groupId,artifactId:data.artifactId,version:chosenVersion}];(data.exclusions||[]).forEach(excl=>{if(excl.introducedVersion!==chosenVersion)actions.push({scanId:rk_scanId,actionType:'ADD_EXCLUSION',groupId:data.groupId,artifactId:data.artifactId,version:excl.introducedVersion,parentGroupId:excl.parentGroupId,parentArtifactId:excl.parentArtifactId});});return actions.reduce((q,payload)=>q.then(()=>fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);}))),Promise.resolve()).then(()=>{done++;showApplyOv(label);});}),Promise.resolve()).then(()=>{if(conflictItems.length){const msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}if(!parts.length){hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);return Promise.resolve();}showApplyOv('Writing changes…');return fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{if(!data||!Object.keys(data).length){done++;hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);return;}return fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(()=>{done++;hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);});});}).catch(err=>{hideApplyOv();btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to apply.');triggerScan(rk_scanPath);});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var sel=document.getElementById('pom-file-sel');var fname=document.getElementById('pom-modal-filename');if(keys.length===1){if(fname)fname.textContent=keys[0];if(sel)sel.style.display='none';}else{if(fname)fname.textContent='';if(sel){sel.innerHTML=keys.map(function(k){return'<option value=\"'+k+'\">'+k+'</option>';}).join('');sel.value=keys[0];sel.style.display='';}}document.getElementById('pom-modal-content').textContent=files[keys[0]];document.getElementById('pom-modal').style.display='flex';}function switchPomFile(path){var pre=document.getElementById('pom-modal-content');if(pre&&rk_pomFiles[path])pre.textContent=rk_pomFiles[path];}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(propKey)(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}}); var comp=rk_comps[compId];if(!comp)return;var coord=comp.g+':'+comp.a;(rk_coordGroups[coord]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(card.dataset.conflict||(comp&&s.value!==comp.v))any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}function applyRemediationAsync(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';});}function compareVersions(a,b){var pa=a.replace(/-/g,'.').split('.');var pb=b.replace(/-/g,'.').split('.');var n=Math.max(pa.length,pb.length);for(var i=0;i<n;i++){var d=(parseInt(pa[i],10)||0)-(parseInt(pb[i],10)||0);if(d!==0)return d;}return 0;}function applyPhase2Pins(scanId,pins,btn){if(!pins||!pins.length)return;if(btn){btn.disabled=true;btn.textContent='Applying…';}pins.reduce(function(p,pin){return p.then(function(){return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scanId:scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:pin.groupId,artifactId:pin.artifactId,version:pin.version})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});});});},Promise.resolve()).then(function(){if(btn){btn.textContent='Applied';}triggerScan(rk_scanPath);}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Apply';}alert(err.message||'Failed to apply pins.');});}</script></head><body><div class=\"shell\">"
                 + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-logo\" href=\"/\"><img class=\"brand-icon\" src=\"/logo.svg\" alt=\"RedKite logo\"><div class=\"brand-text\"><span class=\"brand-logo-name\">" + escape(brand) + "</span><span class=\"brand-logo-tag\">Maven Dependency Assistant &mdash; local dependency analysis and upgrade planning for checked-out Maven repositories.</span></div></a></div><div class=\"nav\"><div class=\"theme-picker\" id=\"theme-picker\"><button class=\"button theme-btn\" type=\"button\" onclick=\"toggleThemePicker()\" title=\"Change theme\" aria-label=\"Change theme\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><circle cx=\"4\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"10\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"7\" cy=\"3.5\" r=\"2.5\"/></svg></button><div class=\"theme-swatches\" id=\"theme-swatches\"><button class=\"swatch\" data-theme=\"dark\" onclick=\"setTheme('dark')\" title=\"Dark\" style=\"background:#818cf8\"></button><button class=\"swatch\" data-theme=\"light\" onclick=\"setTheme('light')\" title=\"Light\" style=\"background:#3b6bec\"></button><button class=\"swatch\" data-theme=\"ocean\" onclick=\"setTheme('ocean')\" title=\"Ocean\" style=\"background:#7dd3fc\"></button><button class=\"swatch\" data-theme=\"dusk\" onclick=\"setTheme('dusk')\" title=\"Dusk\" style=\"background:#e879f9\"></button><button class=\"swatch\" data-theme=\"forest\" onclick=\"setTheme('forest')\" title=\"Forest\" style=\"background:#34d399\"></button><button class=\"swatch\" data-theme=\"ember\" onclick=\"setTheme('ember')\" title=\"Ember\" style=\"background:#fbbf24\"></button></div></div></div></div>"
                 + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
     }
