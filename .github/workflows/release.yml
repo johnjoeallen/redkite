@@ -34,9 +34,10 @@ jobs:
           cp scripts/red-kite.sh dist/
           cp scripts/red-kite.bat dist/
           chmod +x dist/red-kite.sh
-          zip -j red-kite-${VERSION}.zip dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat
-          (cd test/projects && find convergence-fixture -name "pom.xml" ! -path "*/target/*" | \
-            xargs zip "../../red-kite-${VERSION}.zip")
+          ZIP="$(pwd)/red-kite-${VERSION}.zip"
+          zip -j "$ZIP" dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat
+          cd test/projects
+          find convergence-fixture -name "pom.xml" ! -path "*/target/*" | xargs zip "$ZIP"
 
       - name: Create GitHub release
         env:
