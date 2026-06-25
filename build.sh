@@ -25,8 +25,12 @@ rm -f "$ZIP"
 
 (
   cd "$DIR/test/projects"
-  find convergence-fixture -name "pom.xml" ! -path "*/target/*" | \
+  find convergence-fixture -name "pom.xml.orig" ! -path "*/target/*" | while read -r f; do
+    cp "$f" "${f%.orig}"
+  done
+  find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" \) ! -path "*/target/*" | \
     xargs zip -q "$ZIP"
+  zip -q "$ZIP" revert-poms.sh
 )
 
 echo "Built: dist/red-kite.zip"
