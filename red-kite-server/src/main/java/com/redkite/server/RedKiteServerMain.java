@@ -56,6 +56,10 @@ import javax.xml.transform.OutputKeys;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
+import org.thymeleaf.TemplateEngine;
+import org.thymeleaf.context.Context;
+import org.thymeleaf.templatemode.TemplateMode;
+import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -78,6 +82,9 @@ public class RedKiteServerMain {
     private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
     private final java.nio.file.Path prefsFile;
     private volatile String theme = "dark";
+    private final TemplateEngine templateEngine;
+    private final String inlineCss;
+    private final String inlineJs;
 
     private static final class ScanJob {
         enum Status { RUNNING, DONE, ERROR }
@@ -102,9 +109,38 @@ public class RedKiteServerMain {
         this.prefsFile = java.nio.file.Path.of(System.getProperty("redkite.prefs.file",
                 defaultDataDir.resolve("preferences.properties").toString()));
         this.theme = loadTheme();
+        this.inlineCss = loadClasspathResource("static/styles.css");
+        this.inlineJs = loadClasspathResource("static/scripts.js");
+        ClassLoaderTemplateResolver resolver = new ClassLoaderTemplateResolver();
+        resolver.setPrefix("templates/");
+        resolver.setSuffix(".html");
+        resolver.setTemplateMode(TemplateMode.HTML);
+        resolver.setCharacterEncoding("UTF-8");
+        resolver.setCacheable(false);
+        this.templateEngine = new TemplateEngine();
+        this.templateEngine.setTemplateResolver(resolver);
         this.server = HttpServer.create(new InetSocketAddress(port), 0);
         this.server.setExecutor(Executors.newCachedThreadPool());
         registerContexts();
+    }
+
+    private static String loadClasspathResource(String path) throws IOException {
+        try (InputStream is = RedKiteServerMain.class.getClassLoader().getResourceAsStream(path)) {
+            if (is == null) throw new IOException("Classpath resource not found: " + path);
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private String renderPage(String templateName, String title, String subtitle, String bodyContent) {
+        Context ctx = new Context();
+        ctx.setVariable("brand", BRAND);
+        ctx.setVariable("title", title);
+        ctx.setVariable("subtitle", subtitle);
+        ctx.setVariable("theme", theme);
+        ctx.setVariable("inlineCss", inlineCss);
+        ctx.setVariable("inlineJs", inlineJs);
+        ctx.setVariable("bodyContent", bodyContent);
+        return templateEngine.process(templateName, ctx);
     }
 
     private String loadTheme() {
@@ -208,23 +244,22 @@ public class RedKiteServerMain {
             sendText(exchange, 405, "Method not allowed");
             return;
         }
-        StringBuilder html = new StringBuilder();
-        html.append(pageShellStart(BRAND, "Projects", "Local Maven dependency analysis, version checks, and upgrade planning."));
+        StringBuilder body = new StringBuilder();
         // Scan new project section
-        html.append("<section class=\"card\" style=\"margin-bottom:18px\">");
-        html.append("<h2>Analyse project</h2>");
-        html.append("<div class=\"scan-path-row\">");
-        html.append("<input id=\"scan-path\" class=\"scan-path-input\" type=\"text\" placeholder=\"/full/path/to/project\" autocomplete=\"off\" spellcheck=\"false\" onkeydown=\"if(event.key==='Enter')startScan()\"/>");
-        html.append("<button class=\"button primary\" type=\"button\" onclick=\"startScan()\">Analyse</button>");
-        html.append("</div>");
-        html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none\"></div>");
-        html.append("</section>");
+        body.append("<section class=\"card\" style=\"margin-bottom:18px\">");
+        body.append("<h2>Analyse project</h2>");
+        body.append("<div class=\"scan-path-row\">");
+        body.append("<input id=\"scan-path\" class=\"scan-path-input\" type=\"text\" placeholder=\"/full/path/to/project\" autocomplete=\"off\" spellcheck=\"false\" onkeydown=\"if(event.key==='Enter')startScan()\"/>");
+        body.append("<button class=\"button primary\" type=\"button\" onclick=\"startScan()\">Analyse</button>");
+        body.append("</div>");
+        body.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none\"></div>");
+        body.append("</section>");
 
         // Existing projects
-        html.append("<section class=\"card\"><h2>Projects</h2><div class=\"list\">");
+        body.append("<section class=\"card\"><h2>Projects</h2><div class=\"list\">");
         try {
             for (ProjectEntry project : store.listProjects()) {
-                html.append("<div class=\"list-row\">")
+                body.append("<div class=\"list-row\">")
                         .append("<a href=\"/projects/").append(project.id()).append("\" class=\"list-row-link\">")
                         .append("<span class=\"list-title\">").append(escape(project.name())).append("</span>")
                         .append("<span class=\"list-meta\">").append(escape(project.rootPath())).append("</span>")
@@ -234,23 +269,23 @@ public class RedKiteServerMain {
             }
         } catch (Exception e) {
             LOGGER.warning(() -> "Unable to list projects for dashboard: " + e.getMessage());
-            html.append("<div class=\"result-row\"><div><strong>No project data</strong><div class=\"muted\">")
+            body.append("<div class=\"result-row\"><div><strong>No project data</strong><div class=\"muted\">")
                     .append(escape(e.getMessage()))
                     .append("</div></div><div class=\"badge warn\">database</div></div>");
         }
-        html.append("</div></section>");
+        body.append("</div></section>");
 
         // Blocking overlay shown during scan
-        html.append(scanOverlayHtml());
+        body.append(scanOverlayHtml());
 
-        html.append("<script>");
-        html.append("function startScan(){var path=document.getElementById('scan-path').value.trim();if(!path){showScanError('Enter the full path to the project.');return;}hideScanError();triggerScan(path);}");
-        html.append("function showScanError(msg){var el=document.getElementById('scan-error');if(el){el.textContent=msg;el.style.display='block';}}");
-        html.append("function hideScanError(){var el=document.getElementById('scan-error');if(el){el.textContent='';el.style.display='none';}}");
-        html.append("</script>");
+        body.append("<script>");
+        body.append("function startScan(){var path=document.getElementById('scan-path').value.trim();if(!path){showScanError('Enter the full path to the project.');return;}hideScanError();triggerScan(path);}");
+        body.append("function showScanError(msg){var el=document.getElementById('scan-error');if(el){el.textContent=msg;el.style.display='block';}}");
+        body.append("function hideScanError(){var el=document.getElementById('scan-error');if(el){el.textContent='';el.style.display='none';}}");
+        body.append("</script>");
 
-        html.append(pageShellEnd());
-        sendHtml(exchange, 200, html.toString());
+        sendHtml(exchange, 200, renderPage("home", "Projects",
+                "Local Maven dependency analysis, version checks, and upgrade planning.", body.toString()));
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {
@@ -277,84 +312,82 @@ public class RedKiteServerMain {
             java.nio.file.Path settingsPath = MavenSettingsReader.resolveSettingsFile(projectRoot);
             List<MavenSettingsReader.RepoConfig> repoConfigs = MavenSettingsReader.discoverRepositoryConfigs(projectRoot);
             java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
-            StringBuilder html = new StringBuilder();
-            html.append(pageShellStart(BRAND, project.name(), "Project dashboard"));
-            html.append("<div class=\"page-grid\">");
+            StringBuilder body = new StringBuilder();
+            body.append("<div class=\"page-grid\">");
 
             // Header panel — name, path, scan button, settings, repos
-            html.append("<section class=\"card span-2\">");
-            html.append("<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap\">");
-            html.append("<div><h1>").append(escape(project.name())).append("</h1>");
-            html.append("<p class=\"muted\" style=\"margin:2px 0 0\">").append(escape(project.rootPath())).append("</p></div>");
-            html.append("<div style=\"display:flex;gap:8px;flex-wrap:wrap\">");
-            html.append("<button class=\"button primary\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(project.rootPath()))).append(")\">Analyse</button>");
-            html.append("<button class=\"button danger\" type=\"button\" onclick=\"deleteProject(").append(escape(jsString(project.id()))).append(",").append(escape(jsString(project.name()))).append(")\">Delete project</button>");
-            html.append("</div>");
-            html.append("</div>");
-            html.append("<div class=\"proj-meta\">");
-            html.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Settings</span>");
+            body.append("<section class=\"card span-2\">");
+            body.append("<div style=\"display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap\">");
+            body.append("<div><h1>").append(escape(project.name())).append("</h1>");
+            body.append("<p class=\"muted\" style=\"margin:2px 0 0\">").append(escape(project.rootPath())).append("</p></div>");
+            body.append("<div style=\"display:flex;gap:8px;flex-wrap:wrap\">");
+            body.append("<button class=\"button primary\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(project.rootPath()))).append(")\">Analyse</button>");
+            body.append("<button class=\"button danger\" type=\"button\" onclick=\"deleteProject(").append(escape(jsString(project.id()))).append(",").append(escape(jsString(project.name()))).append(")\">Delete project</button>");
+            body.append("</div>");
+            body.append("</div>");
+            body.append("<div class=\"proj-meta\">");
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Settings</span>");
             if (settingsPath != null) {
-                html.append("<code class=\"proj-meta-val\">").append(escape(settingsPath.toAbsolutePath().toString())).append("</code>");
+                body.append("<code class=\"proj-meta-val\">").append(escape(settingsPath.toAbsolutePath().toString())).append("</code>");
             } else {
-                html.append("<span class=\"proj-meta-val muted\">none (using Maven Central)</span>");
+                body.append("<span class=\"proj-meta-val muted\">none (using Maven Central)</span>");
             }
-            html.append("</div>");
-            html.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Repositories</span>");
-            html.append("<div class=\"proj-meta-repos\">");
+            body.append("</div>");
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Repositories</span>");
+            body.append("<div class=\"proj-meta-repos\">");
             for (MavenSettingsReader.RepoConfig repo : repoConfigs) {
-                html.append("<code class=\"proj-meta-val\">").append(escape(repo.url())).append("</code>");
+                body.append("<code class=\"proj-meta-val\">").append(escape(repo.url())).append("</code>");
             }
-            html.append("</div></div>");
-            html.append("</div>");
-            html.append("</section>");
+            body.append("</div></div>");
+            body.append("</div>");
+            body.append("</section>");
 
             if (latestScan != null) {
                 ScanReport report = latestScan.report();
-                html.append("<section class=\"card\"><h2>Latest analysis</h2>");
-                html.append("<p class=\"proj-meta-val muted\" style=\"margin-bottom:10px\">").append(fmt.format(latestScan.createdAt())).append("</p>");
-                html.append(statGrid(
+                body.append("<section class=\"card\"><h2>Latest analysis</h2>");
+                body.append("<p class=\"proj-meta-val muted\" style=\"margin-bottom:10px\">").append(fmt.format(latestScan.createdAt())).append("</p>");
+                body.append(statGrid(
                         statCard("Components", String.valueOf(report.components().size())),
                         statCard("Recommendations", String.valueOf(report.recommendations().size())),
                         statCard("Status", report.complete() ? "Complete" : isBuildFailed(report) ? "Failed" : "Incomplete")));
-                html.append("<p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
-                html.append("</section>");
+                body.append("<p class=\"muted\">").append(escape(report.completenessMessage())).append("</p>");
+                body.append("</section>");
             }
-            html.append("<section class=\"card\"><h2>Analysis history</h2>");
+            body.append("<section class=\"card\"><h2>Analysis history</h2>");
             if (scans.isEmpty()) {
-                html.append("<p class=\"muted\">No analyses yet.</p>");
+                body.append("<p class=\"muted\">No analyses yet.</p>");
             } else {
                 List<String> scanIds = scans.stream().map(ScanEntry::id).toList();
                 Map<String, Store.EnforcerResultEntry> enforcerResults = store.getEnforcerResults(scanIds);
-                html.append("<div class=\"scan-history-list\">");
+                body.append("<div class=\"scan-history-list\">");
                 for (int i = scans.size() - 1; i >= 0; i--) {
                     ScanEntry s = scans.get(i);
                     ScanReport r = s.report();
                     boolean failed = isBuildFailed(r);
                     String statusLabel = r.complete() ? "Complete" : failed ? "Failed" : "Incomplete";
                     String statusClass = r.complete() ? "success" : failed ? "scan-failed" : "warn";
-                    html.append("<a class=\"scan-history-row\" href=\"/scans/").append(s.id()).append("\">");
-                    html.append("<span class=\"scan-history-ts\">").append(fmt.format(s.createdAt())).append("</span>");
-                    html.append("<div style=\"display:flex;gap:6px;align-items:center\">");
-                    html.append("<span class=\"badge ").append(statusClass).append("\">").append(statusLabel).append("</span>");
-                    html.append(enforcerBadge(enforcerResults.get(s.id())));
-                    html.append("</div>");
-                    if (i == scans.size() - 1) html.append("<span class=\"scan-history-latest\">latest</span>");
-                    html.append("</a>");
+                    body.append("<a class=\"scan-history-row\" href=\"/scans/").append(s.id()).append("\">");
+                    body.append("<span class=\"scan-history-ts\">").append(fmt.format(s.createdAt())).append("</span>");
+                    body.append("<div style=\"display:flex;gap:6px;align-items:center\">");
+                    body.append("<span class=\"badge ").append(statusClass).append("\">").append(statusLabel).append("</span>");
+                    body.append(enforcerBadge(enforcerResults.get(s.id())));
+                    body.append("</div>");
+                    if (i == scans.size() - 1) body.append("<span class=\"scan-history-latest\">latest</span>");
+                    body.append("</a>");
                 }
-                html.append("</div>");
+                body.append("</div>");
             }
-            html.append("</section>");
-            html.append("</div>");
+            body.append("</section>");
+            body.append("</div>");
 
             // Scan overlay
-            html.append(scanOverlayHtml());
-            html.append("<script>");
-            html.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
-            html.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
-            html.append("function deleteProject(id,name){if(!confirm('Delete project \"'+name+'\" and all its analyses?\\n\\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}");
-            html.append("</script>");
-            html.append(pageShellEnd());
-            sendHtml(exchange, 200, html.toString());
+            body.append(scanOverlayHtml());
+            body.append("<script>");
+            body.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
+            body.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
+            body.append("function deleteProject(id,name){if(!confirm('Delete project \"'+name+'\" and all its analyses?\\n\\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}");
+            body.append("</script>");
+            sendHtml(exchange, 200, renderPage("project", project.name(), "Project dashboard", body.toString()));
             return;
         }
         sendText(exchange, 404, "Not found");
@@ -383,36 +416,35 @@ public class RedKiteServerMain {
                 metadataByComponent.computeIfAbsent(metadataResult.componentId(), key -> new ArrayList<>()).add(metadataResult);
             }
             Store.EnforcerResultEntry enforcerResult = store.getEnforcerResult(scanId);
-            StringBuilder html = new StringBuilder();
-            html.append(pageShellStart(BRAND, "Analysis", "Dependency inventory and upgrade recommendations."));
             ProjectEntry project = store.getProject(report.projectId());
             String projectName = project != null ? project.name() : projectPath;
-            html.append("<div class=\"page-grid\">");
-            html.append("<section class=\"card span-2\"><div class=\"headline\">");
+            StringBuilder body = new StringBuilder();
+            body.append("<div class=\"page-grid\">");
+            body.append("<section class=\"card span-2\"><div class=\"headline\">");
             java.time.format.DateTimeFormatter reportFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
-            html.append("<div>");
-            html.append("<p class=\"eyebrow\">").append(escape(reportFmt.format(report.createdAt()))).append("</p>");
+            body.append("<div>");
+            body.append("<p class=\"eyebrow\">").append(escape(reportFmt.format(report.createdAt()))).append("</p>");
             if (project != null) {
-                html.append("<h1 style=\"font-size:1.5rem\"><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
+                body.append("<h1 style=\"font-size:1.5rem\"><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
             } else {
-                html.append("<h1 style=\"font-size:1.5rem\">").append(escape(projectName)).append("</h1>");
+                body.append("<h1 style=\"font-size:1.5rem\">").append(escape(projectName)).append("</h1>");
             }
-            html.append("</div>");
-            html.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");
-            html.append(report.complete() ? "<span class=\"badge success\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Complete</span>"
+            body.append("</div>");
+            body.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");
+            body.append(report.complete() ? "<span class=\"badge success\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Complete</span>"
                     : isBuildFailed(report) ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Failed</span>"
                     : "<span class=\"badge warn\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Incomplete</span>");
-            html.append(enforcerBadge(enforcerResult));
-            html.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Analyse</button>");
-            html.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
-            html.append("</div>");
-            html.append("</div>");
-            html.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
-            html.append("</section>");
+            body.append(enforcerBadge(enforcerResult));
+            body.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Analyse</button>");
+            body.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
+            body.append("</div>");
+            body.append("</div>");
+            body.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
+            body.append("</section>");
             if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
-                html.append("<section class=\"card span-2\">");
-                html.append(renderEnforcerSection(scanId, enforcerResult));
-                html.append("</section>");
+                body.append("<section class=\"card span-2\">");
+                body.append(renderEnforcerSection(scanId, enforcerResult));
+                body.append("</section>");
             }
             Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
             if (enforcerResult != null) {
@@ -420,16 +452,16 @@ public class RedKiteServerMain {
                     conflictsByKey.computeIfAbsent(f.groupId() + ":" + f.artifactId(), k -> new ArrayList<>()).add(f);
                 }
             }
-            html.append("<script>const rk_scanPath=").append(jsonStr(projectPath)).append(";</script>");
-            html.append("<section class=\"card span-2\">");
-            html.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
-            html.append("</section>");
-            html.append("</div>");
-            html.append(renderLogModal(report, scanId, enforcerResult));
-            html.append(scanOverlayHtml());
-            html.append(applyOverlayHtml());
-            html.append(pageShellEnd());
-            sendHtml(exchange, 200, html.toString());
+            body.append("<script>const rk_scanPath=").append(jsonStr(projectPath)).append(";</script>");
+            body.append("<section class=\"card span-2\">");
+            body.append(renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
+            body.append("</section>");
+            body.append("</div>");
+            body.append(renderLogModal(report, scanId, enforcerResult));
+            body.append(scanOverlayHtml());
+            body.append(applyOverlayHtml());
+            sendHtml(exchange, 200, renderPage("scan", "Analysis",
+                    "Dependency inventory and upgrade recommendations.", body.toString()));
             return;
         }
         sendText(exchange, 404, "Not found");
@@ -2786,184 +2818,6 @@ public class RedKiteServerMain {
         }
     }
 
-    private String pageShellStart(String brand, String title, String subtitle) {
-        return "<html data-theme=\"" + theme + "\"><head><meta charset=\"utf-8\"/>"
-                + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>"
-                + "<title>RedKite - Maven Dependency Assistant</title>"
-                + "<style>"
-                + "html { color-scheme:dark; --bg:#0f0f11; --panel:#1c1c1f; --panel-2:#252528; --text:#f2f2f4; --muted:#9090a0; --line:#38383d; --accent:#818cf8; --accent-2:#c084fc; --good:#34d399; --warn:#fbbf24; --surf-nav:rgba(28,28,31,.8); --surf-hero:linear-gradient(135deg,rgba(28,28,31,.95),rgba(15,15,17,.95)); --surf-card:linear-gradient(180deg,rgba(28,28,31,.92),rgba(15,15,17,.92)); --surf-input:rgba(10,10,12,.9); --body-top:#090909; --accent-glow:rgba(129,140,248,.12); }"
-                + "[data-theme=ocean] { color-scheme:dark; --bg:#0b1020; --panel:#121a32; --panel-2:#18213d; --text:#eef2ff; --muted:#a7b0d4; --line:#263252; --accent:#7dd3fc; --accent-2:#a78bfa; --surf-nav:rgba(18,26,50,.72); --surf-hero:linear-gradient(135deg,rgba(18,26,50,.95),rgba(15,22,41,.95)); --surf-card:linear-gradient(180deg,rgba(18,26,50,.92),rgba(13,20,39,.92)); --surf-input:rgba(8,15,30,.9); --body-top:#070b16; --accent-glow:rgba(125,211,252,.15); }"
-                + "[data-theme=light] { color-scheme:light; --bg:#f0f4ff; --panel:#ffffff; --panel-2:#e8edf8; --text:#1e2550; --muted:#6270a8; --line:#cfd8f0; --accent:#3b6bec; --accent-2:#7c3aed; --surf-nav:rgba(255,255,255,.85); --surf-hero:linear-gradient(135deg,rgba(255,255,255,.97),rgba(232,237,248,.97)); --surf-card:linear-gradient(180deg,rgba(255,255,255,.97),rgba(240,244,255,.95)); --surf-input:#ffffff; --body-top:#dce5ff; --accent-glow:rgba(59,107,236,.1); }"
-                + "[data-theme=dusk] { color-scheme:dark; --bg:#13091e; --panel:#1c0f2e; --panel-2:#261541; --text:#f5eeff; --muted:#b89fd8; --line:#3d2060; --accent:#e879f9; --accent-2:#fb7185; --surf-nav:rgba(28,15,46,.72); --surf-hero:linear-gradient(135deg,rgba(28,15,46,.95),rgba(19,9,30,.95)); --surf-card:linear-gradient(180deg,rgba(28,15,46,.92),rgba(19,9,30,.92)); --surf-input:rgba(13,5,22,.9); --body-top:#0d0415; --accent-glow:rgba(232,121,249,.15); }"
-                + "[data-theme=forest] { color-scheme:dark; --bg:#061210; --panel:#0c1f1a; --panel-2:#122b24; --text:#ecfdf5; --muted:#7dd4a8; --line:#1a4535; --accent:#34d399; --accent-2:#38bdf8; --surf-nav:rgba(12,31,26,.72); --surf-hero:linear-gradient(135deg,rgba(12,31,26,.95),rgba(6,18,16,.95)); --surf-card:linear-gradient(180deg,rgba(12,31,26,.92),rgba(6,18,16,.92)); --surf-input:rgba(4,12,10,.9); --body-top:#030a08; --accent-glow:rgba(52,211,153,.15); }"
-                + "[data-theme=ember] { color-scheme:dark; --bg:#110d03; --panel:#1c1605; --panel-2:#281f07; --text:#fffbeb; --muted:#d4a72c; --line:#3d2e07; --accent:#fbbf24; --accent-2:#fb923c; --surf-nav:rgba(28,22,5,.72); --surf-hero:linear-gradient(135deg,rgba(28,22,5,.95),rgba(17,13,3,.95)); --surf-card:linear-gradient(180deg,rgba(28,22,5,.92),rgba(17,13,3,.92)); --surf-input:rgba(10,7,0,.9); --body-top:#090601; --accent-glow:rgba(251,191,36,.15); }"
-                + "* { box-sizing:border-box; }"
-                + "body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, var(--accent-glow), transparent 28%), linear-gradient(180deg, var(--body-top), var(--bg)); color:var(--text); }"
-                + "a { color:inherit; text-decoration:none; }"
-                + ".shell { width: 100%; max-width: 1400px; margin: 0 auto; padding: 28px 32px 48px; box-sizing: border-box; }"
-                + ".topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; gap:20px; }"
-                + ".brand { display:flex; align-items:center; }"
-                + ".brand-logo { text-decoration:none; display:flex; flex-direction:row; align-items:center; gap:10px; }"
-                + ".brand-icon { height:42px; width:auto; display:block; }"
-                + ".brand-text { display:flex; flex-direction:column; gap:2px; }"
-                + ".brand-logo-name { font-size:1.1rem; font-weight:700; color:var(--accent); letter-spacing:-.01em; line-height:1.2; }"
-                + ".brand-logo-tag { font-size:.72rem; color:var(--muted); line-height:1.3; }"
-                + ".nav { display:flex; gap:12px; flex-wrap:wrap; }"
-                + ".nav a, .button { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background: var(--surf-nav); }"
-                + ".nav a:hover, .button:hover { border-color: rgba(125,211,252,.5); transform: translateY(-1px); }"
-                + ".button:disabled { opacity:.35; cursor:not-allowed; pointer-events:none; }"
-                + ".button.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color:#08111f; font-weight:700; border-color: transparent; }"
-                + ".button.danger { border-color:rgba(220,38,38,.4); color:#fca5a5; } .button.danger:hover { border-color:rgba(220,38,38,.7); background:rgba(220,38,38,.12); }"
-                + ".hero { display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin:18px 0 28px; padding:28px; border:1px solid var(--line); border-radius:24px; background: var(--surf-hero); box-shadow: 0 18px 60px rgba(0,0,0,.25); }"
-                + ".hero h1, h1 { margin:0; font-size: clamp(2rem, 3vw, 3.5rem); }"
-                + ".hero p, p { line-height:1.6; color:var(--muted); }"
-                + ".hero-actions { display:flex; gap:12px; flex-wrap:wrap; }"
-                + ".page-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:18px; }"
-                + ".span-2 { grid-column: span 2; }"
-                + ".card { padding:20px; border:1px solid var(--line); border-radius:22px; background: var(--surf-card); box-shadow: 0 12px 40px rgba(0,0,0,.18); }"
-                + ".card h2 { margin-top:0; font-size:1rem; letter-spacing:.04em; text-transform:uppercase; color:var(--accent); }"
-                + ".headline { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px; }"
-                + ".eyebrow { margin:0 0 6px; color:var(--accent); text-transform:uppercase; letter-spacing:.16em; font-size:.72rem; }"
-                + ".muted { color:var(--muted); }"
-                + ".subhead { margin: 0 0 12px; }"
-                + ".mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }"
-                + ".stack { display:flex; flex-direction:column; gap:12px; }"
-                + ".list { display:flex; flex-direction:column; gap:12px; }"
-                + ".list-row, .result-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:14px 16px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
-                + ".list-row:hover, .result-row:hover { border-color: rgba(125,211,252,.45); }"
-                + ".list-row-link { flex:1; display:flex; flex-direction:column; gap:2px; min-width:0; }"
-                + ".list-title { display:block; font-weight:700; margin-bottom:4px; }"
-                + ".list-meta { display:block; color:var(--muted); font-size:.95rem; }"
-                + ".inventory-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:14px; }"
-                + ".inventory-tabs { display:flex; flex-wrap:wrap; gap:10px; grid-column: 1 / -1; margin-bottom:6px; }"
-                + ".inventory-tab { cursor:pointer; display:inline-flex; gap:8px; align-items:center; }"
-                + ".inventory-tab.active { border-color: rgba(125,211,252,.55); box-shadow: inset 0 0 0 1px rgba(125,211,252,.18); }"
-                + ".tab-count { display:inline-flex; align-items:center; justify-content:center; min-width: 1.7rem; padding:2px 8px; border-radius:999px; background: rgba(255,255,255,.08); color: var(--text); font-size:.82rem; }"
-                + ".inventory-group { padding:16px; border:1px solid var(--line); border-radius:20px; background: rgba(255,255,255,.02); }"
-                + ".inventory-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }"
-                + ".inventory-header h3 { margin:0; font-size:1.05rem; color:var(--text); text-transform:none; }"
-                + ".inventory-items { display:flex; flex-direction:column; gap:12px; }"
-                + ".inventory-row { padding:14px 14px 12px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
-                + ".inventory-main { display:flex; flex-direction:column; gap:4px; }"
-                + ".inventory-title { font-weight:700; font-size:1rem; }"
-                + ".inventory-subtitle { color:var(--muted); }"
-                + ".inventory-meta { color:var(--muted); font-size:.9rem; }"
-                + ".inventory-badges { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }"
-                + ".inventory-note { margin-top:10px; color:var(--muted); font-size:.92rem; }"
-                + ".badge { display:inline-flex; align-items:center; justify-content:center; padding:6px 10px; border-radius:999px; border:1px solid var(--line); background: rgba(255,255,255,.04); font-size:.78rem; letter-spacing:.06em; text-transform:uppercase; }"
-                + ".badge.success { background: rgba(52,211,153,.16); border-color: rgba(52,211,153,.35); color: #9ef2c8; }"
-                + ".badge.warn { background: rgba(251,191,36,.16); border-color: rgba(251,191,36,.35); color: #fde68a; }"
-                + ".badge.scan-failed { background:rgba(220,38,38,.16); border-color:rgba(220,38,38,.4); color:#fca5a5; }"
-                + ".proj-meta { display:flex; flex-direction:column; gap:8px; margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }"
-                + ".proj-meta-row { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }"
-                + ".proj-meta-label { font-size:.75rem; font-weight:600; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); min-width:90px; flex-shrink:0; }"
-                + ".proj-meta-val { font-family:ui-monospace,monospace; font-size:.82rem; color:var(--text); }"
-                + ".proj-meta-repos { display:flex; flex-direction:column; gap:3px; }"
-                + ".scan-history-list { display:flex; flex-direction:column; gap:6px; }"
-                + ".scan-history-row { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.02); text-decoration:none; color:var(--text); transition:border-color .15s,background .15s; }"
-                + ".scan-history-row:hover { border-color:rgba(129,140,248,.4); background:rgba(129,140,248,.06); }"
-                + ".scan-history-ts { font-family:ui-monospace,monospace; font-size:.82rem; color:var(--muted); flex:1; }"
-                + ".scan-history-latest { font-size:.75rem; color:var(--accent); opacity:.7; }"
-                + ".badge.neutral { background: rgba(167,139,250,.12); border-color: rgba(167,139,250,.25); color: #d8c8ff; }"
-                + ".stat-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; }"
-                + ".stat { padding:14px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
-                + ".stat strong { display:block; font-size:1.4rem; margin-top:6px; }"
-                + ".tree, .tree ul { list-style:none; margin:0; padding-left:18px; }"
-                + ".tree-node { margin:12px 0; }"
-                + ".tree-card { padding:14px 16px; border:1px solid var(--line); border-radius:18px; background: rgba(255,255,255,.02); }"
-                + ".tree-meta { margin-top:10px; color:var(--muted); font-size:.92rem; }"
-                + ".selectable { cursor:pointer; width:100%; text-align:left; }"
-                + ".selectable input { transform: translateY(1px); margin-right:8px; }"
-                + ".selectable-target { display:flex; flex-direction:column; gap:6px; flex: 1 1 auto; }"
-                + ".upgrade-choice { display:flex; flex-direction:column; gap:8px; min-width: 13rem; }"
-                + ".upgrade-choice select { width:100%; padding:10px 12px; border-radius:12px; border:1px solid var(--line); background: var(--surf-input); color: var(--text); }"
-                + ".version-selector { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }"
-                + ".version-label { color:var(--muted); font-size:.85rem; text-transform:uppercase; letter-spacing:.08em; }"
-                + ".version-choice { display:inline-flex; align-items:center; gap:6px; padding:7px 10px; border-radius:999px; border:1px solid var(--line); background: rgba(255,255,255,.04); color:var(--text); }"
-                + ".version-choice.current { opacity:.8; }"
-                + ".version-choice.active { border-color: rgba(125,211,252,.65); background: rgba(125,211,252,.15); color: #d9f5ff; }"
-                + ".version-choice.cve { border-color: rgba(248,113,113,.6); }"
-                + ".version-choice .pill { display:inline-flex; align-items:center; justify-content:center; padding:2px 7px; border-radius:999px; background: rgba(255,255,255,.12); font-size:.72rem; text-transform:uppercase; }"
-                + ".footer { margin-top:24px; color:var(--muted); font-size:.9rem; }"
-                + ".inventory-group.is-hidden, .inventory-row.is-hidden { display:none; }"
-                + ".rem-banner { padding:14px 18px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.02); margin-bottom:16px; display:flex; flex-direction:column; gap:10px; }"
-                + ".rem-banner-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
-                + ".rem-stat { font-size:.95rem; } .rem-stat strong { font-size:1.1rem; }"
-                + ".sev-chip { display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:999px; font-size:.8rem; font-weight:600; }"
-                + ".sev-chip.sev-critical,.sev-badge.sev-critical { background:rgba(220,38,38,.2); border:1px solid rgba(220,38,38,.45); color:#fca5a5; }"
-                + ".sev-chip.sev-high,.sev-badge.sev-high { background:rgba(234,88,12,.2); border:1px solid rgba(234,88,12,.45); color:#fdba74; }"
-                + ".sev-chip.sev-medium,.sev-badge.sev-medium { background:rgba(234,179,8,.18); border:1px solid rgba(234,179,8,.4); color:#fde68a; }"
-                + ".sev-chip.sev-low,.sev-badge.sev-low { background:rgba(59,130,246,.18); border:1px solid rgba(59,130,246,.35); color:#93c5fd; }"
-                + ".sev-chip.sev-unknown,.sev-badge.sev-unknown { background:rgba(107,114,128,.18); border:1px solid rgba(107,114,128,.4); color:#d1d5db; }"
-                + ".sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }"
-                + ".sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }"
-                + ".sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }"
-                + ".rem-module-select { padding:8px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surf-nav); color:var(--text); font-size:.9rem; cursor:pointer; outline:none; margin-bottom:12px; }"
-                + ".rem-module-select:focus { border-color:rgba(125,211,252,.55); }"
-                + ".rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }"
-                + ".pom-actions { display:flex; gap:10px; align-items:center; margin-bottom:20px; }"
-                + ".rem-list { display:flex; flex-direction:column; gap:10px; }"
-                + ".rem-card { padding:15px 18px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.02); display:flex; flex-direction:column; gap:9px; }"
-                + ".rem-card.clean { opacity:.7; }"
-                + ".rem-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap; }"
-                + ".rem-title { font-weight:700; font-size:1rem; font-family:ui-monospace,monospace; }"
-                + ".rem-badges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }"
-                + ".sev-badge { display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:999px; font-size:.82rem; font-weight:700; }"
-                + ".rem-meta { font-size:.93rem; color:var(--muted); display:flex; flex-wrap:wrap; gap:10px; align-items:center; }"
-                + ".rem-meta strong { color:var(--text); }"
-                + ".card-expand-row { display:flex; justify-content:flex-end; margin-top:8px; }"
-                + ".card-expand-btn { width:24px; height:24px; border-radius:50%; background:none; border:1px solid var(--line); color:var(--muted); cursor:pointer; font-size:.9rem; line-height:1; padding:0; transition:all .15s; }"
-                + ".card-expand-btn:hover { border-color:var(--accent); color:var(--accent); }"
-                + ".dep-tree-panel { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); display:flex; flex-direction:column; gap:8px; }"
-                + ".sub-card { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.015); }"
-                + ".card-highlight { outline:2px solid var(--accent) !important; outline-offset:3px; }"
-                + ".rem-cves { font-size:.85rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }"
-                + ".rem-reasons { display:flex; flex-wrap:wrap; gap:6px; }"
-                + ".reason-chip { padding:3px 9px; border-radius:999px; border:1px solid rgba(167,139,250,.3); background:rgba(167,139,250,.1); color:#d8c8ff; font-size:.78rem; }"
-                + ".reason-chip-btn { cursor:pointer; transition:border-color .15s,background .15s; }"
-                + ".reason-chip-btn:hover { border-color:rgba(167,139,250,.7); background:rgba(167,139,250,.22); }"
-                + ".reason-chip-btn.selected { background:rgba(167,139,250,.35); border-color:rgba(167,139,250,.8); color:#ede9fe; }"
-                + ".rem-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding-top:2px; }"
-                + ".action-btn { display:inline-flex; align-items:center; padding:7px 15px; border-radius:12px; font-size:.86rem; font-weight:600; border:1px solid transparent; cursor:pointer; text-decoration:none; }"
-                + ".action-btn:hover { filter:brightness(1.12); }"
-                + ".action-btn.sev-critical { background:rgba(220,38,38,.25); color:#fca5a5; border-color:rgba(220,38,38,.45); }"
-                + ".action-btn.sev-high { background:rgba(234,88,12,.25); color:#fdba74; border-color:rgba(234,88,12,.45); }"
-                + ".action-btn.sev-medium { background:rgba(234,179,8,.2); color:#fde68a; border-color:rgba(234,179,8,.4); }"
-                + ".action-btn.sev-low { background:rgba(59,130,246,.2); color:#93c5fd; border-color:rgba(59,130,246,.35); }"
-                + ".action-btn.sev-unknown { background:rgba(107,114,128,.2); color:#d1d5db; border-color:rgba(107,114,128,.4); }"
-                + ".action-btn.sev-none { background:rgba(52,211,153,.14); color:#6ee7b7; border-color:rgba(52,211,153,.3); }"
-                + ".action-btn.sev-snap { background:rgba(139,92,246,.2); color:#c4b5fd; border-color:rgba(139,92,246,.4); }"
-                + ".version-sel-wrap { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }"
-                + ".version-sel { padding:7px 10px; border-radius:12px; border:1px solid var(--line); background:var(--surf-input); color:var(--text); font-size:.88rem; min-width:200px; max-width:100%; }"
-                + ".version-current { padding:4px 10px; border-radius:999px; border:1px solid var(--line); font-size:.86rem; color:var(--muted); display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }"
-                + ".version-current.cve { border-color:rgba(248,113,113,.6); color:#fca5a5; }"
-                + ".version-note { font-size:.9rem; color:var(--muted); }"
-                + "@media (max-width: 700px) { .page-grid { grid-template-columns: 1fr; } .span-2 { grid-column: auto; } .hero { flex-direction:column; align-items:flex-start; } .inventory-grid { grid-template-columns: 1fr; } }"
-                + ".scan-path-row { display:flex; gap:10px; align-items:center; }"
-                + ".scan-path-input { flex:1 1 auto; padding:10px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surf-input); color:var(--text); font-size:.97rem; font-family:ui-monospace,monospace; outline:none; }"
-                + ".scan-path-input:focus { border-color:rgba(125,211,252,.55); }"
-                + ".scan-error { margin-top:10px; color:#fca5a5; font-size:.9rem; padding:10px 14px; border-radius:12px; background:rgba(220,38,38,.12); border:1px solid rgba(220,38,38,.3); }"
-                + ".scan-overlay { position:fixed; inset:0; background:rgba(7,11,22,.82); backdrop-filter:blur(4px); z-index:9999; display:flex; align-items:center; justify-content:center; }"
-                + ".scan-overlay-box { display:flex; flex-direction:column; gap:14px; align-items:center; padding:36px 48px; border:1px solid var(--line); border-radius:24px; background:var(--panel); font-size:1.05rem; font-weight:600; }"
-                + "@keyframes rk-spin { to { transform:rotate(360deg); } }"
-                + ".scan-spinner { width:28px; height:28px; border:3px solid rgba(125,211,252,.2); border-top-color:var(--accent); border-radius:50%; animation:rk-spin .8s linear infinite; flex-shrink:0; }"
-                + ".scan-phase-track{height:4px;border-radius:2px;background:rgba(255,255,255,.08);overflow:hidden;}"
-                + ".scan-phase-fill{height:100%;border-radius:2px;transition:width .4s ease;}"
-                + ".scan-phase-fill.active{background:var(--accent);}"
-                + ".scan-phase-fill.done{background:rgba(34,197,94,.75);}"
-                + ".scan-phase-fill.pending{width:0!important;background:transparent;}"
-                + ".pom-modal { position:fixed; inset:0; z-index:9990; display:flex; align-items:center; justify-content:center; }"
-                + ".pom-modal-backdrop { position:absolute; inset:0; background:rgba(7,11,22,.85); backdrop-filter:blur(6px); cursor:pointer; }"
-                + ".pom-modal-box { position:relative; z-index:1; background:var(--panel); border:1px solid var(--line); border-radius:22px; width:min(900px,92vw); max-height:85vh; display:flex; flex-direction:column; box-shadow:0 24px 80px rgba(0,0,0,.4); overflow:hidden; }"
-                + ".pom-modal-head { display:flex; justify-content:space-between; align-items:center; padding:16px 20px; border-bottom:1px solid var(--line); gap:12px; flex-shrink:0; }"
-                + ".pom-modal-filename { font-family:ui-monospace,monospace; font-size:.9rem; color:var(--accent); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }"
-                + ".pom-modal-body { flex:1; overflow:auto; background:rgba(0,0,0,.3); }"
-                + ".pom-modal-body pre { margin:0; padding:20px; font-family:ui-monospace,monospace; font-size:.83rem; line-height:1.65; white-space:pre; color:var(--text); }"
-                + "[data-theme=light] .nav a:hover,[data-theme=light] .button:hover{border-color:rgba(59,107,236,.5);}[data-theme=light] .list-row:hover,[data-theme=light] .result-row:hover{border-color:rgba(59,107,236,.45);}[data-theme=light] .list-row,[data-theme=light] .result-row,[data-theme=light] .rem-card,[data-theme=light] .inventory-group,[data-theme=light] .inventory-row,[data-theme=light] .rem-banner,[data-theme=light] .stat,[data-theme=light] .tree-card,[data-theme=light] .sub-card{background:rgba(0,0,0,.03);}[data-theme=light] .tab-count{background:rgba(0,0,0,.1);}[data-theme=light] .badge{background:rgba(0,0,0,.06);}[data-theme=light] .badge.success{background:rgba(22,163,74,.12);border-color:rgba(22,163,74,.35);color:#15803d;}[data-theme=light] .badge.warn{background:rgba(180,83,9,.1);border-color:rgba(180,83,9,.3);color:#b45309;}[data-theme=light] .badge.scan-failed{background:rgba(220,38,38,.1);border-color:rgba(220,38,38,.3);color:#dc2626;}[data-theme=light] .scan-history-row{background:rgba(0,0,0,.03);}[data-theme=light] .scan-history-row:hover{border-color:rgba(59,107,236,.45);background:rgba(59,107,236,.06);}[data-theme=light] .badge.neutral{background:rgba(124,58,237,.1);border-color:rgba(124,58,237,.25);color:#6d28d9;}[data-theme=light] .inventory-tab.active{border-color:rgba(59,107,236,.55);box-shadow:inset 0 0 0 1px rgba(59,107,236,.18);}[data-theme=light] .version-choice{background:rgba(0,0,0,.04);}[data-theme=light] .version-choice.active{border-color:rgba(59,107,236,.65);background:rgba(59,107,236,.1);color:var(--text);}[data-theme=light] .button.primary{color:#fff;}[data-theme=light] .rem-module-select:focus{border-color:rgba(59,107,236,.55);}[data-theme=light] .scan-path-input:focus{border-color:rgba(59,107,236,.55);}.theme-picker{position:relative;}.theme-swatches{position:absolute;right:0;top:calc(100% + 8px);display:none;gap:8px;padding:10px 14px;border:1px solid var(--line);border-radius:16px;background:var(--panel);box-shadow:0 8px 32px rgba(0,0,0,.3);z-index:200;}.swatch{width:22px;height:22px;border-radius:50%;border:2px solid transparent;cursor:pointer;transition:transform .15s,border-color .15s;outline:none;padding:0;}.swatch:hover{transform:scale(1.2);}.swatch.active{border-color:var(--text);box-shadow:0 0 0 2px var(--panel);}.theme-btn{padding:9px 11px;display:inline-flex;align-items:center;gap:6px;font-size:.85rem;}.log-modal-box{max-width:min(760px,94vw);}.log-body{flex:1;overflow-y:auto;display:flex;flex-direction:column;}.log-section{padding:18px 22px;border-bottom:1px solid var(--line);}.log-section:last-child{border-bottom:none;}.log-section-warn{background:rgba(255,180,0,.06);}.log-section-title{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:10px;display:flex;align-items:center;gap:8px;}.log-title-warn{color:#c97b00;}[data-theme=light] .log-title-warn{color:#9a5800;}.log-text{margin:0 0 6px;color:var(--muted);font-size:.9rem;line-height:1.55;}.log-meta-text{margin:4px 0 0;color:var(--muted);font-size:.82rem;}.log-code-list{display:flex;flex-direction:column;gap:4px;margin-top:8px;}.log-code-line{font-family:ui-monospace,monospace;font-size:.8rem;color:var(--text);background:rgba(0,0,0,.25);padding:5px 10px;border-radius:6px;white-space:pre-wrap;word-break:break-all;}[data-theme=light] .log-code-line{background:rgba(0,0,0,.06);}.log-issue-list{display:flex;flex-direction:column;gap:8px;margin-top:4px;}.log-issue-row{padding:10px 14px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:6px;}[data-theme=light] .log-issue-row{background:rgba(0,0,0,.03);}.log-issue-name{font-family:ui-monospace,monospace;font-size:.86rem;color:var(--text);}.log-issue-badges{display:flex;flex-wrap:wrap;gap:6px;}.log-issue-msg{font-size:.83rem;color:var(--muted);}.badge.conflict-badge{background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;font-size:.72rem;}"
-                + "</style><script>let inventoryModule='all';let inventoryKind='all';function setActiveTabs(selector, attr, value){document.querySelectorAll(selector).forEach(b=>b.classList.toggle('active', b.dataset[attr]===value));}function applyInventoryFilters(){setActiveTabs('.module-tabs .inventory-tab','module',inventoryModule);setActiveTabs('.kind-tabs .inventory-tab','kind',inventoryKind);document.querySelectorAll('.inventory-group').forEach(group=>{const moduleOk=inventoryModule==='all'||group.dataset.module===inventoryModule;let visible=0;group.querySelectorAll('.inventory-row').forEach(row=>{const kindOk=inventoryKind==='all'||(row.dataset.kind||'transitive')===inventoryKind;const show=moduleOk&&kindOk;row.classList.toggle('is-hidden',!show);if(show)visible++;});group.classList.toggle('is-hidden', !moduleOk||visible===0);});}function filterInventoryModule(module){inventoryModule=module;applyInventoryFilters();}function filterInventoryKind(kind){inventoryKind=kind;applyInventoryFilters();}function selectVersionChoice(button, selectorId){const selector=document.querySelector('[data-selector-id=\"'+selectorId+'\"]');if(!selector){return;}selector.querySelectorAll('.version-choice').forEach(b=>b.classList.toggle('active', b===button));const hidden=document.getElementById(selectorId);if(hidden){hidden.value=button.dataset.version||'';}}let remMode='upgrade';let remModule='all';function applyRemediationFilters(){let cveN=0,snapN=0,upgradeDirectN=0,upgradeTransN=0,transitiveN=0,cleanN=0,conflictN=0,allN=0;document.querySelectorAll('.rem-list>.rem-card').forEach(card=>{const modOk=remModule==='all'||card.dataset.module===remModule;let modeOk=true;const isUpgrade=card.dataset.clean!=='true'&&card.dataset.hasvuln!=='true'&&card.dataset.kind!=='snapshot';if(remMode==='cve')modeOk=card.dataset.hasvuln==='true';else if(remMode==='snapshot')modeOk=card.dataset.kind==='snapshot';else if(remMode==='upgrade')modeOk=isUpgrade;else if(remMode==='transitive')modeOk=card.dataset.kind==='transitive';else if(remMode==='clean')modeOk=card.dataset.clean==='true';else if(remMode==='conflict')modeOk=card.dataset.hasconflict==='true';card.style.display=modOk&&modeOk?'':'none';if(modOk){if(card.dataset.hasvuln==='true')cveN++;if(card.dataset.kind==='snapshot')snapN++;if(card.dataset.hasconflict==='true')conflictN++;if(isUpgrade){if(card.dataset.kind==='declared')upgradeDirectN++;else upgradeTransN++;}if(card.dataset.kind==='transitive')transitiveN++;if(card.dataset.clean==='true')cleanN++;allN++;}});document.querySelectorAll('.rem-toggle-btn').forEach(btn=>{btn.classList.toggle('primary',btn.dataset.mode===remMode);const el=btn.querySelector('.tab-count');if(!el)return;if(btn.dataset.mode==='cve')el.textContent=cveN;else if(btn.dataset.mode==='conflict')el.textContent=conflictN;else if(btn.dataset.mode==='snapshot')el.textContent=snapN;else if(btn.dataset.mode==='transitive')el.textContent=transitiveN;else if(btn.dataset.mode==='clean')el.textContent=cleanN;else if(btn.dataset.mode==='all')el.textContent=allN;else if(btn.dataset.mode==='upgrade')el.textContent=upgradeDirectN+upgradeTransN;});}function setRemediationMode(mode){remMode=mode;applyRemediationFilters();}function filterRemediationModule(mod){remModule=mod;applyRemediationFilters();}function applyPomChanges(){const btn=document.getElementById('apply-btn');const conflictItems=[];const chosenParts=[];const allParts=[];document.querySelectorAll('.rem-list select.version-sel').forEach(sel=>{const card=sel.closest('.rem-card');if(!card)return;const compId=card.dataset.compId;const comp=rk_comps[compId];if(!comp)return;if(card.dataset.conflict){conflictItems.push({sel,card});}else if(sel.value&&sel.value!==comp.v){const entry=encodeURIComponent(compId)+'='+encodeURIComponent(sel.value);allParts.push(entry);if(sel.dataset.chosen==='true')chosenParts.push(entry);}});const parts=chosenParts.length>0?chosenParts:allParts;if(!conflictItems.length&&!parts.length)return;const total=conflictItems.length+(parts.length>0?1:0);let done=0;function showApplyOv(label){var ov=document.getElementById('apply-overlay');if(!ov)return;ov.style.display='flex';var txt=document.getElementById('apply-progress-text');if(txt)txt.textContent=label||'';var bar=document.getElementById('apply-progress-bar');if(bar)bar.style.width=(total>0?Math.round(done/total*100):0)+'%';var cnt=document.getElementById('apply-progress-count');if(cnt)cnt.textContent=done+' / '+total;}function hideApplyOv(){var ov=document.getElementById('apply-overlay');if(ov)ov.style.display='none';}showApplyOv('');btn.disabled=true;btn.textContent='Applying…';conflictItems.reduce((p,item)=>p.then(()=>{const data=JSON.parse(item.card.dataset.conflict);const label=data.groupId+':'+data.artifactId;showApplyOv(label);const chosenVersion=item.sel.value||data.resolvedVersion;const actions=[{scanId:rk_scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:data.groupId,artifactId:data.artifactId,version:chosenVersion}];(data.exclusions||[]).forEach(excl=>{if(excl.introducedVersion!==chosenVersion)actions.push({scanId:rk_scanId,actionType:'ADD_EXCLUSION',groupId:data.groupId,artifactId:data.artifactId,version:excl.introducedVersion,parentGroupId:excl.parentGroupId,parentArtifactId:excl.parentArtifactId});});return actions.reduce((q,payload)=>q.then(()=>fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);}))),Promise.resolve()).then(()=>{done++;showApplyOv(label);});}),Promise.resolve()).then(()=>{if(conflictItems.length){const msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}if(!parts.length){hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);return Promise.resolve();}showApplyOv('Writing changes…');return fetch('/api/scans/pom?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:parts.join('&')}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(data=>{if(!data||!Object.keys(data).length){done++;hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);return;}return fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.ok?r.json():r.text().then(t=>{throw new Error(t);})).then(()=>{done++;hideApplyOv();btn.textContent='Apply selected';updateApplyButton();triggerScan(rk_scanPath);});});}).catch(err=>{hideApplyOv();btn.textContent='Apply selected';updateApplyButton();alert(err.message||'Failed to apply.');triggerScan(rk_scanPath);});}var rk_pomFiles={};function showPomModal(files){var keys=Object.keys(files);if(!keys.length)return;rk_pomFiles=files;var sel=document.getElementById('pom-file-sel');var fname=document.getElementById('pom-modal-filename');if(keys.length===1){if(fname)fname.textContent=keys[0];if(sel)sel.style.display='none';}else{if(fname)fname.textContent='';if(sel){sel.innerHTML=keys.map(function(k){return'<option value=\"'+k+'\">'+k+'</option>';}).join('');sel.value=keys[0];sel.style.display='';}}document.getElementById('pom-modal-content').textContent=files[keys[0]];document.getElementById('pom-modal').style.display='flex';}function switchPomFile(path){var pre=document.getElementById('pom-modal-content');if(pre&&rk_pomFiles[path])pre.textContent=rk_pomFiles[path];}function closePomModal(){document.getElementById('pom-modal').style.display='none';}function closeLogModal(){document.getElementById('log-modal').style.display='none';}function writePomFiles(){if(!Object.keys(rk_pomFiles).length)return;var btn=document.getElementById('pom-write-btn');if(btn){btn.disabled=true;btn.textContent='Writing...';}fetch('/api/scans/pom/write?scanId='+rk_scanId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rk_pomFiles)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){closePomModal();}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Write to file';}alert('Write failed: '+(err.message||err));});}function copyPomContent(){var pre=document.getElementById('pom-modal-content');if(!pre)return;navigator.clipboard.writeText(pre.textContent).then(function(){closePomModal();}).catch(function(){});}function lockChip(chip,text){if(!chip)return;chip.textContent=text;chip.classList.add('selected');chip.onclick=null;chip.style.cursor='default';}function syncPropSiblings(compId,version){var propKey=rk_compPropKey[compId];if(propKey)(rk_propGroups[propKey]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}}); var comp=rk_comps[compId];if(!comp)return;var coord=comp.g+':'+comp.a;(rk_coordGroups[coord]||[]).forEach(function(sibId){if(String(sibId)===String(compId))return;var sibSel=document.getElementById('view_'+sibId);if(!sibSel)return;for(var i=0;i<sibSel.options.length;i++){if(sibSel.options[i].value===version){sibSel.selectedIndex=i;sibSel.dataset.chosen='true';var sibCard=sibSel.closest('.rem-card');lockChip(sibCard&&sibCard.querySelector('.reason-chip-btn'),'Upgrading to '+version);break;}}});}function onVersionSelect(sel){sel.dataset.chosen='true';var card=sel.closest('.rem-card');var compId=card&&card.dataset.compId;lockChip(card&&card.querySelector('.reason-chip-btn'),'Upgrading to '+sel.value);syncPropSiblings(compId,sel.value);updateApplyButton();}function applyUpgrade(compId,version,chip){lockChip(chip,'Upgrading to '+version);const sel=document.getElementById('view_'+compId);if(sel&&sel.tagName==='SELECT'){for(var i=0;i<sel.options.length;i++){if(sel.options[i].value===version){sel.selectedIndex=i;sel.dataset.chosen='true';break;}}syncPropSiblings(compId,version);updateApplyButton();sel.scrollIntoView({behavior:'smooth',block:'nearest'});}}function toggleTree(btn){const panel=btn.parentElement.nextElementSibling;if(!panel||!panel.classList.contains('dep-tree-panel'))return;if(panel.style.display!=='none'){panel.style.display='none';btn.textContent='+';return;}if(!panel.hasChildNodes()){const id=btn.dataset.compId;const visited=new Set();let p=btn.closest('.sub-card,.rem-card');while(p){visited.add(p.dataset.compId);p=p.parentElement&&p.parentElement.closest('.sub-card,.rem-card');}panel.innerHTML=(rk_edges[id]||[]).filter(c=>!visited.has(String(c))).map(c=>renderSubCard(String(c),new Set(visited))).join('');}panel.style.display='block';btn.textContent='−';}function renderSubCard(id,visited){const comp=rk_comps[id];if(!comp)return'';const parents=(rk_edges[id]||[]).filter(c=>!visited.has(String(c)));const sevCls='sev-'+comp.sev;const kindCls=comp.kind==='snapshot'?'warn':comp.kind==='declared'?'success':'neutral';const expand=parents.length?'<div class=\"card-expand-row\"><button class=\"card-expand-btn\" type=\"button\" data-comp-id=\"'+id+'\" onclick=\"toggleTree(this)\">+</button></div><div class=\"dep-tree-panel\" style=\"display:none\"></div>':'';var versionMeta;if(comp.kind==='declared'&&comp.rec){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.rec+'</strong></span>';}else if(comp.kind==='declared'&&comp.latest){versionMeta='<span>Current: <strong>'+comp.v+'</strong> &rarr; <strong>'+comp.latest+'</strong> <span class=\"muted\">(major)</span></span>';}else if(comp.kind==='declared'){versionMeta='<span>Current: <strong>'+comp.v+'</strong> <span class=\"muted\">(at latest)</span></span>';}else{versionMeta='<span>Current: <strong>'+comp.v+'</strong></span>';}var kindLbl=comp.kind;return'<div class=\"sub-card\" data-comp-id=\"'+id+'\"><div class=\"rem-header\"><span class=\"rem-title\">'+comp.g+':'+comp.a+'</span><div class=\"rem-badges\"><span class=\"sev-badge '+sevCls+'\">'+comp.icon+' '+comp.label+'</span><span class=\"badge '+kindCls+'\">'+kindLbl+'</span></div></div><div class=\"rem-meta\">'+versionMeta+'</div>'+expand+'</div>';}function updateApplyButton(){var btn=document.getElementById('apply-btn');if(!btn||btn.dataset.nopom)return;var any=false;document.querySelectorAll('.rem-list select.version-sel').forEach(function(s){if(!s.value)return;var card=s.closest('.rem-card');if(!card||card.style.display==='none')return;var comp=rk_comps[card.dataset.compId];if(card.dataset.conflict||(comp&&s.value!==comp.v))any=true;});btn.disabled=!any;}function setTheme(t){document.documentElement.setAttribute('data-theme',t);fetch('/api/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})});document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});var p=document.getElementById('theme-swatches');if(p)p.style.display='none';}function toggleThemePicker(){var p=document.getElementById('theme-swatches');if(p)p.style.display=p.style.display==='flex'?'none':'flex';}document.addEventListener('click',function(e){var p=document.getElementById('theme-swatches');if(p&&!e.target.closest('#theme-picker'))p.style.display='none';});window.addEventListener('DOMContentLoaded',function(){applyInventoryFilters();applyRemediationFilters();updateApplyButton();var t=document.documentElement.getAttribute('data-theme')||'dark';document.querySelectorAll('.swatch').forEach(function(s){s.classList.toggle('active',s.dataset.theme===t);});});function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Scan failed.';e.style.display='block';}});}function clearCache(btn){var orig=btn.textContent;btn.disabled=true;btn.textContent='Clearing…';fetch('/api/metadata/clear',{method:'POST'}).finally(function(){btn.disabled=false;btn.textContent=orig;});}function renderScanPhases(phases){var el=document.getElementById('scan-phases');if(!el)return;el.innerHTML=phases.map(function(p){var pct=p.pct||0;var isDone=p.status==='done';var isPending=p.status==='pending';var fillCls=isDone?'done':isPending?'pending':'active';var col=isPending?'var(--muted)':'var(--text)';var wt=isPending?400:500;var lbl=isDone?'✓':pct+'%';return'<div style=\"display:flex;flex-direction:column;gap:5px\"><div style=\"display:flex;justify-content:space-between;font-size:.82rem;font-weight:'+wt+';color:'+col+'\"><span>'+p.name+'</span><span>'+lbl+'</span></div><div class=\"scan-phase-track\"><div class=\"scan-phase-fill '+fillCls+'\" style=\"width:'+pct+'%\"></div></div></div>';}).join('');}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error('Status check failed ('+r.status+'): '+t);});return r.json();}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else if(d.status==='error'){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=d.message||'Scan failed.';e.style.display='block';}}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';var e=document.getElementById('scan-error');if(e){e.textContent=err.message||'Status check failed.';e.style.display='block';}});}function applyRemediation(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';var msg=document.getElementById('enforcer-apply-msg');if(msg)msg.style.display='block';}).catch(function(err){btn.disabled=false;btn.textContent='Failed';alert('Apply failed: '+(err.message||err));});}function applyRemediationAsync(btn){var d=btn.dataset;var payload={scanId:d.scanId,actionType:d.action,groupId:d.groupId,artifactId:d.artifactId};if(d.version)payload.version=d.version;if(d.parentGroupId)payload.parentGroupId=d.parentGroupId;if(d.parentArtifactId)payload.parentArtifactId=d.parentArtifactId;btn.disabled=true;btn.textContent='Applying…';return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(){btn.textContent='Applied';});}function compareVersions(a,b){var pa=a.replace(/-/g,'.').split('.');var pb=b.replace(/-/g,'.').split('.');var n=Math.max(pa.length,pb.length);for(var i=0;i<n;i++){var d=(parseInt(pa[i],10)||0)-(parseInt(pb[i],10)||0);if(d!==0)return d;}return 0;}function applyPhase2Pins(scanId,pins,btn){if(!pins||!pins.length)return;if(btn){btn.disabled=true;btn.textContent='Applying…';}pins.reduce(function(p,pin){return p.then(function(){return fetch('/api/scans/remediation/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scanId:scanId,actionType:'ADD_DEPENDENCY_MANAGEMENT',groupId:pin.groupId,artifactId:pin.artifactId,version:pin.version})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});});});},Promise.resolve()).then(function(){if(btn){btn.textContent='Applied';}triggerScan(rk_scanPath);}).catch(function(err){if(btn){btn.disabled=false;btn.textContent='Apply';}alert(err.message||'Failed to apply pins.');});}</script></head><body><div class=\"shell\">"
-                + "<div class=\"topbar\"><div class=\"brand\"><a class=\"brand-logo\" href=\"/\"><img class=\"brand-icon\" src=\"/logo.svg\" alt=\"RedKite logo\"><div class=\"brand-text\"><span class=\"brand-logo-name\">" + escape(brand) + "</span><span class=\"brand-logo-tag\">Maven Dependency Assistant &mdash; local dependency analysis and upgrade planning for checked-out Maven repositories.</span></div></a></div><div class=\"nav\"><div class=\"theme-picker\" id=\"theme-picker\"><button class=\"button theme-btn\" type=\"button\" onclick=\"toggleThemePicker()\" title=\"Change theme\" aria-label=\"Change theme\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"currentColor\"><circle cx=\"4\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"10\" cy=\"9.5\" r=\"2.5\"/><circle cx=\"7\" cy=\"3.5\" r=\"2.5\"/></svg></button><div class=\"theme-swatches\" id=\"theme-swatches\"><button class=\"swatch\" data-theme=\"dark\" onclick=\"setTheme('dark')\" title=\"Dark\" style=\"background:#818cf8\"></button><button class=\"swatch\" data-theme=\"light\" onclick=\"setTheme('light')\" title=\"Light\" style=\"background:#3b6bec\"></button><button class=\"swatch\" data-theme=\"ocean\" onclick=\"setTheme('ocean')\" title=\"Ocean\" style=\"background:#7dd3fc\"></button><button class=\"swatch\" data-theme=\"dusk\" onclick=\"setTheme('dusk')\" title=\"Dusk\" style=\"background:#e879f9\"></button><button class=\"swatch\" data-theme=\"forest\" onclick=\"setTheme('forest')\" title=\"Forest\" style=\"background:#34d399\"></button><button class=\"swatch\" data-theme=\"ember\" onclick=\"setTheme('ember')\" title=\"Ember\" style=\"background:#fbbf24\"></button></div></div></div></div>"
-                + "<div class=\"subhead muted\">" + escape(subtitle) + "</div>";
-    }
 
     private String renderLogModal(ScanReport report, String scanId, Store.EnforcerResultEntry enforcerResult) {
         Map<Long, ScanComponent> byId = new LinkedHashMap<>();
@@ -3177,10 +3031,6 @@ public class RedKiteServerMain {
         html.append("</div>"); // pom-modal-box
         html.append("</div>"); // log-modal
         return html.toString();
-    }
-
-    private String pageShellEnd() {
-        return "<div class=\"footer\">RedKite &mdash; Maven Dependency Assistant</div></div></body></html>";
     }
 
     private void handleLogo(HttpExchange exchange) throws IOException {
