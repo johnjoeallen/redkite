@@ -1595,7 +1595,7 @@ public class RedKiteServerMain {
         if (e == null) return "";
         return switch (e.status()) {
             case ENFORCER_RUN_PASSED ->
-                "<span class=\"badge success\" title=\"Dependency management check passed\">Dep. mgmt ✓</span>";
+                "<span class=\"badge success\" title=\"Dependency management check passed\">No conflicts</span>";
             case ENFORCER_RUN_FAILED_WITH_FINDINGS -> {
                 int n = e.findings().size();
                 List<TransitiveConflictFinding> phase2 = e.phase2Findings();
