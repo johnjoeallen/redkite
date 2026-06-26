@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" th:fragment="page(title, subtitle, bodyContent)" th:attr="data-theme=${theme}">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>RedKite - Maven Dependency Assistant</title>
+    <style th:utext="${inlineCss}">/* css loaded at runtime */</style>
+    <script th:utext="${inlineJs}">/* js loaded at runtime */</script>
+</head>
+<body>
+<div class="shell">
+    <div class="topbar">
+        <div class="brand">
+            <a class="brand-logo" href="/">
+                <img class="brand-icon" src="/logo.svg" alt="RedKite logo"/>
+                <div class="brand-text">
+                    <span class="brand-logo-name" th:text="${brand}">RedKite</span>
+                    <span class="brand-logo-tag">Maven Dependency Assistant &mdash; local dependency analysis and upgrade planning for checked-out Maven repositories.</span>
+                </div>
+            </a>
+        </div>
+        <div class="nav">
+            <div class="theme-picker" id="theme-picker">
+                <button class="button theme-btn" type="button" onclick="toggleThemePicker()" title="Change theme" aria-label="Change theme">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                        <circle cx="4" cy="9.5" r="2.5"/>
+                        <circle cx="10" cy="9.5" r="2.5"/>
+                        <circle cx="7" cy="3.5" r="2.5"/>
+                    </svg>
+                </button>
+                <div class="theme-swatches" id="theme-swatches">
+                    <button class="swatch" data-theme="dark" onclick="setTheme('dark')" title="Dark" style="background:#818cf8"></button>
+                    <button class="swatch" data-theme="light" onclick="setTheme('light')" title="Light" style="background:#3b6bec"></button>
+                    <button class="swatch" data-theme="ocean" onclick="setTheme('ocean')" title="Ocean" style="background:#7dd3fc"></button>
+                    <button class="swatch" data-theme="dusk" onclick="setTheme('dusk')" title="Dusk" style="background:#e879f9"></button>
+                    <button class="swatch" data-theme="forest" onclick="setTheme('forest')" title="Forest" style="background:#34d399"></button>
+                    <button class="swatch" data-theme="ember" onclick="setTheme('ember')" title="Ember" style="background:#fbbf24"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="subhead muted" th:text="${subtitle}"></div>
+
+    <!-- Page-specific body content injected here -->
+    <div th:utext="${bodyContent}"></div>
+
+    <div class="footer">RedKite &mdash; Maven Dependency Assistant</div>
+</div>
+</body>
+</html>
