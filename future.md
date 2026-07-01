@@ -1,5 +1,3 @@
-Understood — GitHub Markdown only, no Word docs.
-
 # RedKite Assist — Dependency Remediation Model
 RedKite Assist is a local Maven dependency analysis and remediation assistant. It compares Maven dependency models, validates the current project, lets the user choose a remediation strategy, applies changes safely, validates the result, and records outcomes.
 It is not a black-box upgrader. It separates facts, intent, changes, validation, and history.
