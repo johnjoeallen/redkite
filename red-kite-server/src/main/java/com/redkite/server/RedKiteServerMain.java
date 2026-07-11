@@ -80,6 +80,21 @@ public class RedKiteServerMain {
     private final Store store;
     private final HttpServer server;
     private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
+
+    private static final class ApplyJob {
+        enum Status { RUNNING, DONE, FAILED, ERROR }
+        enum Phase { PRE_VALIDATE, APPLYING, POST_VALIDATE }
+        volatile Status status = Status.RUNNING;
+        volatile Phase phase = Phase.PRE_VALIDATE;
+        volatile boolean baselinePassed = true;
+        volatile String failureMessage;
+        volatile String attribution;
+        volatile String revertedVersion;
+        volatile String failedVersion;
+        volatile String failureSignature;
+    }
+
+    private final ConcurrentHashMap<String, ApplyJob> applyJobs = new ConcurrentHashMap<>();
     private final java.nio.file.Path prefsFile;
     private volatile String theme = "dark";
     private final TemplateEngine templateEngine;
@@ -215,6 +230,8 @@ public class RedKiteServerMain {
         server.createContext("/api/prefs", exchange -> safeHandle(exchange, this::handleApiPrefs));
         server.createContext("/api/scans/enforcer", exchange -> safeHandle(exchange, this::handleApiEnforcerResults));
         server.createContext("/api/scans/remediation/apply", exchange -> safeHandle(exchange, this::handleApiRemediationApply));
+        server.createContext("/api/scans/remediation/apply-batch", exchange -> safeHandle(exchange, this::handleApiRemediationApplyBatch));
+        server.createContext("/api/scans/remediation/apply-status", exchange -> safeHandle(exchange, this::handleApiRemediationApplyStatus));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -587,8 +604,9 @@ public class RedKiteServerMain {
                 findings = new ConflictOutputParser().parse(rawOutput);
                 if (findings.isEmpty()) {
                     status = EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE;
+                    String tail = rawOutput.length() > 2000 ? rawOutput.substring(rawOutput.length() - 2000) : rawOutput;
                     LOGGER.warning(() -> "Enforcer ran but produced no parseable conflict findings for scan "
-                            + scanId + ". Raw output length: " + rawOutput.length());
+                            + scanId + ". Raw output (last 2000 chars):\n" + tail);
                 } else {
                     status = EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS;
                 }
@@ -619,7 +637,8 @@ public class RedKiteServerMain {
             store.saveEnforcerResult(scanId, status, rawOutput, findings, staleExclusions, phase2Findings,
                     meta.exclusionsStripped(), meta.depMgmtEntries(), phase2Pins);
         } catch (Exception e) {
-            LOGGER.warning(() -> "Enforcer check failed for scan " + scanId + ": " + e.getMessage());
+            LOGGER.log(java.util.logging.Level.WARNING,
+                    "Enforcer check failed for scan " + scanId, e);
             store.saveEnforcerResult(scanId, EnforcerStatus.ENFORCER_RUN_FAILED_UNAVAILABLE, "",
                     List.of(), List.of(), null, 0, List.of(), List.of());
         }
@@ -786,6 +805,197 @@ public class RedKiteServerMain {
             LOGGER.warning(() -> "Remediation apply failed: " + e.getMessage());
             sendText(exchange, 500, "Apply failed: " + e.getMessage());
         }
+    }
+
+    private void handleApiRemediationApplyBatch(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) { sendText(exchange, 405, "Method not allowed"); return; }
+        String body = readBody(exchange);
+        String scanId = parseJsonField(body, "scanId");
+        if (scanId == null) { sendText(exchange, 400, "Missing scanId"); return; }
+
+        List<Map<String, String>> actions = parseJsonObjectArray(body, "remediationActions");
+        String patchesSection = extractJsonValue(body, "pomPatches");
+        Map<String, String> pomPatches = patchesSection != null ? parseJsonStringMap(patchesSection) : Map.of();
+
+        String jobId = UUID.randomUUID().toString();
+        ApplyJob job = new ApplyJob();
+        applyJobs.put(jobId, job);
+        sendJson(exchange, 200, "{\"jobId\":\"" + jobId + "\"}");
+
+        try {
+            ScanEntry scanEntry = store.getScan(scanId);
+            Path projectRoot = Path.of(scanEntry.input().workingTreePath()).toAbsolutePath().normalize();
+            Path rootPom = projectRoot.resolve("pom.xml");
+
+            new Thread(() -> {
+                try {
+                    com.redkite.maven.ValidationRunner runner = new com.redkite.maven.ValidationRunner();
+                    RemediationApplier applier = new RemediationApplier();
+
+                    // --- PRE-VALIDATE ---
+                    // Non-blocking: a failing baseline means we may be applying fixes to a broken project,
+                    // which is a valid use case. We record the result and continue; post-validate is the
+                    // authoritative gate.
+                    job.phase = ApplyJob.Phase.PRE_VALIDATE;
+                    com.redkite.maven.ValidationRunner.ValidationResult pre = runner.validateWithStartup(projectRoot, rootPom, 90);
+                    job.baselinePassed = pre.passed();
+                    if (!pre.passed()) {
+                        LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
+                    }
+
+                    // --- APPLYING ---
+                    job.phase = ApplyJob.Phase.APPLYING;
+
+                    // Determine all POMs that will be modified and save their originals.
+                    Map<Path, String> originals = new java.util.LinkedHashMap<>();
+                    for (Map<String, String> action : actions) {
+                        Path targetPom = resolveActionPomPath(projectRoot, action.get("pomFile"));
+                        if (!originals.containsKey(targetPom))
+                            originals.put(targetPom, Files.readString(targetPom, StandardCharsets.UTF_8));
+                    }
+                    for (String relPath : pomPatches.keySet()) {
+                        Path target = projectRoot.resolve(relPath).normalize();
+                        if (!target.startsWith(projectRoot)) continue;
+                        if (!originals.containsKey(target))
+                            originals.put(target, Files.exists(target) ? Files.readString(target, StandardCharsets.UTF_8) : "");
+                    }
+
+                    // Record what the original dep-management versions were (for revert reporting).
+                    Map<String, String> originalDepMgmtVersions = new java.util.LinkedHashMap<>();
+                    for (Map<String, String> action : actions) {
+                        if (!"ADD_DEPENDENCY_MANAGEMENT".equals(action.get("actionType"))) continue;
+                        String gId = action.get("groupId"), aId = action.get("artifactId");
+                        if (gId == null || aId == null) continue;
+                        Path targetPom = resolveActionPomPath(projectRoot, action.get("pomFile"));
+                        String orig = originals.get(targetPom);
+                        if (orig != null) {
+                            String existing = extractDepMgmtVersion(orig, gId, aId);
+                            originalDepMgmtVersions.put(gId + ":" + aId, existing);
+                        }
+                    }
+
+                    // Apply each action in memory, accumulating changes per file.
+                    Map<Path, String> modified = new java.util.LinkedHashMap<>(originals);
+                    String reason = "Remediation applied by RedKite";
+                    for (Map<String, String> action : actions) {
+                        Path targetPom = resolveActionPomPath(projectRoot, action.get("pomFile"));
+                        String current = modified.get(targetPom);
+                        String updated;
+                        if ("ADD_EXCLUSION".equals(action.get("actionType"))) {
+                            String pg = action.get("parentGroupId"), pa = action.get("parentArtifactId");
+                            String g = action.get("groupId"), a = action.get("artifactId");
+                            if (pg == null || pa == null || g == null || a == null) continue;
+                            updated = applier.applyExclusion(current, pg, pa, g, a, reason);
+                        } else if ("ADD_DEPENDENCY_MANAGEMENT".equals(action.get("actionType"))) {
+                            String g = action.get("groupId"), a = action.get("artifactId"), v = action.get("version");
+                            if (g == null || a == null || v == null) continue;
+                            updated = applier.applyDependencyManagementPin(current, g, a, v, reason);
+                        } else {
+                            continue;
+                        }
+                        modified.put(targetPom, updated);
+                    }
+                    for (Map.Entry<String, String> patch : pomPatches.entrySet()) {
+                        Path target = projectRoot.resolve(patch.getKey()).normalize();
+                        if (target.startsWith(projectRoot)) modified.put(target, patch.getValue());
+                    }
+
+                    // Write all changes to disk.
+                    for (Map.Entry<Path, String> entry : modified.entrySet()) {
+                        Files.writeString(entry.getKey(), entry.getValue(), StandardCharsets.UTF_8);
+                    }
+
+                    // --- POST-VALIDATE ---
+                    job.phase = ApplyJob.Phase.POST_VALIDATE;
+                    com.redkite.maven.ValidationRunner.ValidationResult post = runner.validateWithStartup(projectRoot, rootPom, 90);
+                    if (!post.passed()) {
+                        // Restore originals.
+                        for (Map.Entry<Path, String> entry : originals.entrySet()) {
+                            Files.writeString(entry.getKey(), entry.getValue(), StandardCharsets.UTF_8);
+                        }
+                        // Only attribute to our changes if the baseline was passing before we applied them.
+                        String attr = job.baselinePassed
+                                ? com.redkite.maven.ValidationRunner.attributeFailure(post.rawOutput())
+                                : null;
+                        String failedVer = null, revertedVer = null;
+                        if (attr != null) {
+                            for (Map<String, String> action : actions) {
+                                String g = action.get("groupId"), a = action.get("artifactId");
+                                if (g != null && a != null && (g + ":" + a).equals(attr)) {
+                                    failedVer = action.get("version");
+                                    revertedVer = originalDepMgmtVersions.get(attr);
+                                    break;
+                                }
+                            }
+                        }
+                        job.attribution = attr;
+                        job.failedVersion = failedVer;
+                        job.revertedVersion = revertedVer;
+                        String baselineNote = job.baselinePassed ? "" : " (project was already failing before changes)";
+                        job.failureMessage = "Post-apply validation failed (" + post.phase() + ")" + baselineNote + ": " + post.failureSignature();
+                        job.failureSignature = post.failureSignature();
+                        job.status = ApplyJob.Status.FAILED;
+                        return;
+                    }
+
+                    job.status = ApplyJob.Status.DONE;
+                } catch (Throwable e) {
+                    job.failureMessage = causeChain(e);
+                    job.status = ApplyJob.Status.ERROR;
+                }
+            }, "redkite-apply-" + jobId).start();
+        } catch (Exception e) {
+            applyJobs.remove(jobId);
+            LOGGER.warning(() -> "Failed to start apply job: " + e.getMessage());
+            sendText(exchange, 500, "Failed to start apply: " + e.getMessage());
+        }
+    }
+
+    private void handleApiRemediationApplyStatus(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) { sendText(exchange, 405, "Method not allowed"); return; }
+        String jobId = queryParam(exchange.getRequestURI().getQuery(), "jobId");
+        if (jobId == null) { sendText(exchange, 400, "Missing jobId"); return; }
+        ApplyJob job = applyJobs.get(jobId);
+        if (job == null) { sendText(exchange, 404, "Job not found"); return; }
+        switch (job.status) {
+            case RUNNING -> {
+                String phase = switch (job.phase) {
+                    case PRE_VALIDATE -> "pre-validate";
+                    case APPLYING -> "applying";
+                    case POST_VALIDATE -> "post-validate";
+                };
+                sendJson(exchange, 200, "{\"status\":\"running\",\"phase\":" + jsonStr(phase) + "}");
+            }
+            case DONE -> {
+                boolean baselinePassed = job.baselinePassed;
+                applyJobs.remove(jobId);
+                sendJson(exchange, 200, "{\"status\":\"done\",\"baselinePassed\":" + baselinePassed + "}");
+            }
+            case FAILED -> {
+                applyJobs.remove(jobId);
+                StringBuilder sb = new StringBuilder("{\"status\":\"failed\"");
+                sb.append(",\"message\":").append(jsonStr(job.failureMessage));
+                sb.append(",\"failureSignature\":").append(jsonStr(job.failureSignature));
+                if (job.attribution != null) sb.append(",\"attribution\":").append(jsonStr(job.attribution));
+                if (job.failedVersion != null) sb.append(",\"failedVersion\":").append(jsonStr(job.failedVersion));
+                if (job.revertedVersion != null) sb.append(",\"revertedVersion\":").append(jsonStr(job.revertedVersion));
+                sb.append("}");
+                sendJson(exchange, 200, sb.toString());
+            }
+            case ERROR -> {
+                applyJobs.remove(jobId);
+                sendJson(exchange, 200, "{\"status\":\"error\",\"message\":" + jsonStr(job.failureMessage) + "}");
+            }
+        }
+    }
+
+    private static Path resolveActionPomPath(Path projectRoot, String pomFile) {
+        if (pomFile != null && !pomFile.isBlank()) {
+            Path p = Path.of(pomFile);
+            if (p.isAbsolute()) return p;
+            return projectRoot.resolve(p).normalize();
+        }
+        return projectRoot.resolve("pom.xml");
     }
 
     private String enforcerResultToJson(Store.EnforcerResultEntry entry) {
@@ -1489,6 +1699,59 @@ public class RedKiteServerMain {
     }
 
     /** Parse a flat JSON object whose keys and values are all strings, e.g. {"a/pom.xml":"content"}. */
+    private static String extractJsonValue(String json, String key) {
+        if (json == null) return null;
+        int keyIdx = json.indexOf("\"" + key + "\"");
+        if (keyIdx < 0) return null;
+        int colon = json.indexOf(':', keyIdx + key.length() + 2);
+        if (colon < 0) return null;
+        int start = colon + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) start++;
+        if (start >= json.length()) return null;
+        char opening = json.charAt(start);
+        if (opening == '{') return extractBalanced(json, start, '{', '}');
+        if (opening == '[') return extractBalanced(json, start, '[', ']');
+        return null;
+    }
+
+    private static String extractBalanced(String json, int start, char open, char close) {
+        int depth = 0;
+        boolean inString = false;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (inString) {
+                if (c == '\\') { i++; continue; }
+                if (c == '"') inString = false;
+            } else {
+                if (c == '"') inString = true;
+                else if (c == open) depth++;
+                else if (c == close) { if (--depth == 0) return json.substring(start, i + 1); }
+            }
+        }
+        return null;
+    }
+
+    private static List<Map<String, String>> parseJsonObjectArray(String json, String key) {
+        String array = extractJsonValue(json, key);
+        if (array == null || array.length() < 2) return List.of();
+        List<Map<String, String>> result = new java.util.ArrayList<>();
+        int depth = 0;
+        int objStart = -1;
+        boolean inString = false;
+        for (int i = 0; i < array.length(); i++) {
+            char c = array.charAt(i);
+            if (inString) {
+                if (c == '\\') { i++; continue; }
+                if (c == '"') inString = false;
+            } else {
+                if (c == '"') inString = true;
+                else if (c == '{') { if (depth++ == 0) objStart = i; }
+                else if (c == '}') { if (--depth == 0 && objStart >= 0) { result.add(parseJsonObject(array.substring(objStart, i + 1))); objStart = -1; } }
+            }
+        }
+        return result;
+    }
+
     private static Map<String, String> parseJsonStringMap(String json) {
         Map<String, String> result = new LinkedHashMap<>();
         if (json == null || json.isBlank()) return result;
@@ -1496,17 +1759,28 @@ public class RedKiteServerMain {
         while (i < json.length()) {
             int kq1 = json.indexOf('"', i);
             if (kq1 < 0) break;
+            int kq2 = skipJsonString(json, kq1 + 1);  // position of closing quote
             String key = readJsonString(json, kq1 + 1);
-            int kq2 = kq1 + 1 + key.length() + 1;
-            int colon = json.indexOf(':', kq2);
+            int colon = json.indexOf(':', kq2 + 1);
             if (colon < 0) break;
             int vq1 = json.indexOf('"', colon + 1);
             if (vq1 < 0) break;
+            int vq2 = skipJsonString(json, vq1 + 1);  // position of closing quote
             String value = readJsonString(json, vq1 + 1);
             result.put(key, value);
-            i = vq1 + 1 + value.length() + 1;
+            i = vq2 + 1;
         }
         return result;
+    }
+
+    /** Returns the index of the closing {@code "} for a JSON string starting at {@code from} (after the opening quote). */
+    private static int skipJsonString(String json, int from) {
+        for (int i = from; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '\\') { i++; continue; }
+            if (c == '"') return i;
+        }
+        return json.length();
     }
 
     private static String readJsonString(String json, int from) {

@@ -66,9 +66,15 @@ Each project has a page showing:
 
 ## Apply Upgrades
 
-In the analysis, use the module dropdown to select a POM, adjust target versions in the dropdowns, and click **Apply selected**. A popup shows the updated POM XML — click **Copy** to put it on the clipboard or **Write to file** to overwrite the file directly.
+In the analysis, adjust target versions in the dropdowns and click **Apply selected**. RedKite runs a bracketed validation sequence:
 
-The generated POM normalises all declared dependencies that have an explicit literal version to `${artifactId.version}` property references. Dependencies being upgraded are set to the selected version; all other declared versions are extracted as-is into properties. This keeps the applied change minimal and reviewable while moving the project towards consistent property-based version management.
+1. Builds the project in its current state (`mvn clean install -DskipTests`)
+2. Writes all POM changes to disk
+3. Builds again to confirm the changes produce a working build
+
+A progress overlay shows the current phase. If post-apply validation fails, RedKite reverts all POM changes and reports the failure with the attributed dependency where possible. If the project was already failing before apply, that is noted and the revert logic still runs.
+
+Version upgrades normalise any literal `<version>` tag to a `${artifactId.version}` property reference and set the property value to the chosen version. Dep-management pins and exclusions are written directly into the appropriate POM.
 
 Use **Clear cache** to flush the cached version and vulnerability metadata and force a fresh fetch on the next analysis.
 

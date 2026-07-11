@@ -1,0 +1,181 @@
+package com.redkite.maven;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
+
+/**
+ * Runs {@code mvn clean install} (and optionally {@code spring-boot:run}) against a Maven project
+ * to validate that it builds and starts successfully.
+ */
+public class ValidationRunner {
+
+    private static final Logger LOGGER = Logger.getLogger(ValidationRunner.class.getName());
+    private static final Pattern SPRING_STARTED = Pattern.compile("Started .+ in [\\d.]+ seconds");
+    private static final Pattern TOMCAT_STARTED = Pattern.compile("Tomcat started on port");
+    private static final String SPRING_BOOT_PLUGIN = "spring-boot-maven-plugin";
+
+    public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
+
+    /** Runs {@code mvn clean install} and returns the result. */
+    public ValidationResult validate(Path projectRoot, Path pomPath) {
+        String mvn = isMvnCmd();
+        Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+        LOGGER.info(() -> "Validation build: " + String.join(" ", command));
+        try {
+            Process process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int exit = process.waitFor();
+            boolean passed = exit == 0;
+            if (passed) {
+                LOGGER.info(() -> "Validation build passed for " + pomPath);
+            } else {
+                LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
+            }
+            return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output));
+        } catch (IOException | InterruptedException e) {
+            LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
+            return new ValidationResult(false, "build", "", e.getMessage());
+        }
+    }
+
+    /**
+     * Runs {@code mvn clean install} then, if {@code spring-boot-maven-plugin} is detected in the
+     * root POM, also runs {@code mvn spring-boot:run} and waits for the startup signal or timeout.
+     * The spawned process is always killed before returning.
+     */
+    public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds) {
+        ValidationResult buildResult = validate(projectRoot, pomPath);
+        if (!buildResult.passed()) return buildResult;
+
+        String pomContent;
+        try {
+            pomContent = Files.readString(pomPath, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return buildResult;
+        }
+        if (!pomContent.contains(SPRING_BOOT_PLUGIN)) {
+            LOGGER.info(() -> "No " + SPRING_BOOT_PLUGIN + " detected in " + pomPath + "; skipping startup validation");
+            return buildResult;
+        }
+
+        LOGGER.info(() -> "Running startup validation (spring-boot:run) for " + pomPath
+                + " with timeout " + timeoutSeconds + "s");
+        String mvn = isMvnCmd();
+        Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, "spring-boot:run");
+
+        try {
+            Process process = new ProcessBuilder(command)
+                    .redirectErrorStream(true)
+                    .start();
+
+            StringBuffer startupOutput = new StringBuffer();
+            AtomicBoolean started = new AtomicBoolean(false);
+
+            Thread readerThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        startupOutput.append(line).append('\n');
+                        if (SPRING_STARTED.matcher(line).find() || TOMCAT_STARTED.matcher(line).find()) {
+                            started.set(true);
+                            break;
+                        }
+                    }
+                } catch (IOException ignored) {}
+            }, "rk-startup-reader");
+            readerThread.setDaemon(true);
+            readerThread.start();
+            readerThread.join((long) timeoutSeconds * 1000);
+            process.destroyForcibly();
+            process.waitFor();
+            readerThread.join(5000L);
+
+            String output = startupOutput.toString();
+            boolean passed = started.get();
+            LOGGER.info(() -> "Startup validation " + (passed ? "passed" : "failed/timed-out") + " for " + pomPath);
+            return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output));
+        } catch (IOException | InterruptedException e) {
+            LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
+            return new ValidationResult(false, "startup", "", e.getMessage());
+        }
+    }
+
+    /**
+     * Attempts to attribute a build/startup failure to a specific dependency by scanning the Maven
+     * output for resolution error patterns. Returns {@code "groupId:artifactId"} on a strong match,
+     * or {@code null} if the failure cannot be attributed.
+     */
+    public static String attributeFailure(String rawOutput) {
+        if (rawOutput == null || rawOutput.isEmpty()) return null;
+        for (String marker : List.of("Could not resolve artifact", "Could not find artifact")) {
+            int idx = rawOutput.indexOf(marker);
+            if (idx >= 0) {
+                String after = rawOutput.substring(idx + marker.length()).stripLeading();
+                int end = indexOfAny(after, " \n\r\t");
+                String artifact = end > 0 ? after.substring(0, end) : after;
+                if (artifact.contains(":")) return toGroupArtifact(artifact);
+            }
+        }
+        return null;
+    }
+
+    private static String toGroupArtifact(String coords) {
+        String[] parts = coords.split(":");
+        return parts.length >= 2 ? parts[0] + ":" + parts[1] : null;
+    }
+
+    private static int indexOfAny(String s, String chars) {
+        for (int i = 0; i < s.length(); i++) {
+            if (chars.indexOf(s.charAt(i)) >= 0) return i;
+        }
+        return -1;
+    }
+
+    static String extractSignature(String output) {
+        if (output == null || output.isEmpty()) return null;
+        for (String line : output.split("\n")) {
+            String t = line.trim();
+            if (t.startsWith("[ERROR]") && t.length() > "[ERROR]".length() + 1) return t;
+        }
+        int ex = output.indexOf("Exception");
+        if (ex >= 0) {
+            int lineStart = output.lastIndexOf('\n', ex) + 1;
+            int lineEnd = output.indexOf('\n', ex);
+            if (lineEnd > lineStart) return output.substring(lineStart, lineEnd).trim();
+        }
+        return output.length() > 500 ? output.substring(output.length() - 500).trim() : output.trim();
+    }
+
+    private static String isMvnCmd() {
+        return System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
+    }
+
+    private static List<String> buildCommand(String mvn, Path settings, Path projectRoot, Path pomPath,
+                                             String... goals) {
+        List<String> command = new ArrayList<>();
+        command.add(mvn);
+        if (settings != null && MavenSettingsReader.isProjectLocalSettings(settings, projectRoot)) {
+            command.add("-s");
+            command.add(settings.toString());
+        }
+        command.add("-f");
+        command.add(pomPath.toString());
+        command.add("--no-transfer-progress");
+        for (String goal : goals) command.add(goal);
+        return command;
+    }
+}

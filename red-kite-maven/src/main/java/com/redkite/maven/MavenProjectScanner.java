@@ -51,16 +51,30 @@ public class MavenProjectScanner {
             List<DependencyEdge> edges = new ArrayList<>();
             List<String> treeParseWarnings = new ArrayList<>();
 
+            // Pre-pass: build the complete project-module map before processing any dependencies,
+            // so cross-module dependencies (e.g. app → old-wrapper) can be identified and skipped.
+            Map<Path, PomModel> parsedPoms = new LinkedHashMap<>();
+            for (Path pom : pomFiles) {
+                PomModel model = parsePom(pom);
+                parsedPoms.put(pom, model);
+                models.put(key(model.groupId(), model.artifactId()), model);
+            }
+            Set<String> projectModuleKeys = models.keySet();
+            LOGGER.info(() -> "Project module keys (will be excluded from SNAPSHOT list): " + projectModuleKeys);
+
             AtomicLong nextId = new AtomicLong(1L);
             for (Path pom : pomFiles) {
+                PomModel model = parsedPoms.get(pom);
                 LOGGER.info(() -> "Parsing POM " + root.relativize(pom));
-                PomModel model = parsePom(pom);
-                models.put(key(model.groupId(), model.artifactId()), model);
                 String relativePom = sourceFile(root, pom);
                 hashes.put(relativePom, sha256(pom));
                 for (PomModel.PomDependency dep : model.dependencies()) {
                     if (isSelfDependency(model, dep)) {
                         LOGGER.info(() -> "Skipping self dependency declared in " + relativePom + ": " + dep.groupId() + ":" + dep.artifactId());
+                        continue;
+                    }
+                    if (projectModuleKeys.contains(key(dep.groupId(), dep.artifactId()))) {
+                        LOGGER.info(() -> "Skipping project-module dependency declared in " + relativePom + ": " + dep.groupId() + ":" + dep.artifactId());
                         continue;
                     }
                     LOGGER.info(() -> "Top-level dependency declared in " + relativePom + ": " + dep.groupId() + ":" + dep.artifactId() + " version=" + dep.version() + " scope=" + dep.scope() + " source=" + dep.versionSource());
@@ -134,7 +148,7 @@ public class MavenProjectScanner {
                     }
                 } else {
                     progress.accept("Running dependency:tree for " + relativePom + "…");
-                    treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId));
+                    treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId, projectModuleKeys));
                 }
             }
 
@@ -178,6 +192,18 @@ public class MavenProjectScanner {
                 }
             }
 
+            // Defensive final pass: remove any project-module coordinates that slipped through
+            // any code path above (direct deps, aggregator dep-management, tree nodes, etc.).
+            componentsByKey.entrySet().removeIf(e -> {
+                ScanComponent c = e.getValue();
+                String coordKey = key(c.coordinate().groupId(), c.coordinate().artifactId());
+                if (projectModuleKeys.contains(coordKey)) {
+                    LOGGER.info(() -> "Final filter removed project-module component: " + coordKey + " (map key=" + e.getKey() + ")");
+                    return true;
+                }
+                return false;
+            });
+
             if (componentsByKey.isEmpty()) {
                 LOGGER.warning(() -> "No dependencies discovered in " + root + "; creating placeholder component");
                 componentsByKey.put("pom.xml|unknown:unknown|unknown|false", new ScanComponent(
@@ -204,7 +230,7 @@ public class MavenProjectScanner {
         }
     }
 
-    private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId) {
+    private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId, Set<String> projectModuleKeys) {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
             String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
@@ -248,6 +274,13 @@ public class MavenProjectScanner {
                 }
                 while (ancestry.size() > node.depth()) {
                     ancestry.remove(ancestry.size() - 1);
+                }
+                // Project-module nodes (e.g. app → old-wrapper) are skipped as components but
+                // their depth slot is held in ancestry so their children resolve at the right level.
+                if (projectModuleKeys.contains(key(node.groupId(), node.artifactId()))) {
+                    LOGGER.info(() -> "Skipping project-module tree node: " + node.groupId() + ":" + node.artifactId());
+                    ancestry.add(ancestry.get(ancestry.size() - 1)); // inherit parent slot
+                    continue;
                 }
                 String parentId = ancestry.get(ancestry.size() - 1);
                 boolean direct = node.depth() == 1;
@@ -760,15 +793,14 @@ public class MavenProjectScanner {
 
     private String optionalText(Element parent, String tag) {
         NodeList nodes = parent.getElementsByTagName(tag);
-        if (nodes.getLength() == 0) {
-            return null;
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Node node = nodes.item(i);
+            if (node.getParentNode() == parent) {
+                String text = node.getTextContent();
+                return text == null ? null : text.trim();
+            }
         }
-        Node node = nodes.item(0);
-        if (node.getParentNode() != parent && !"dependency".equals(parent.getTagName()) && !"parent".equals(parent.getTagName())) {
-            return null;
-        }
-        String text = node.getTextContent();
-        return text == null ? null : text.trim();
+        return null;
     }
 
     private String key(String groupId, String artifactId) {
