@@ -105,6 +105,8 @@ a { color:inherit; text-decoration:none; }
 .sev-chip.sev-none,.sev-badge.sev-none { background:rgba(52,211,153,.12); border:1px solid rgba(52,211,153,.3); color:#6ee7b7; }
 .sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }
 .sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }
+.sev-chip.sev-declared { background:rgba(20,184,166,.18); border:1px solid rgba(20,184,166,.4); color:#5eead4; }
+.sev-chip.sev-recommended { background:rgba(52,211,153,.16); border:1px solid rgba(52,211,153,.35); color:#6ee7b7; }
 .rem-module-select { padding:8px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surf-nav); color:var(--text); font-size:.9rem; cursor:pointer; outline:none; margin-bottom:12px; }
 .rem-module-select:focus { border-color:rgba(125,211,252,.55); }
 .rem-toggle { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }

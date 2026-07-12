@@ -1,5 +1,8 @@
 package com.redkite.core.domain;
 
+import java.util.List;
+import java.util.Map;
+
 public record ReportSummary(
         int totalComponents,
         int needsRemediation,
@@ -11,5 +14,8 @@ public record ReportSummary(
         int unknownCount,
         int snapshotCount,
         int declaredVersionWarningCount,
-        int staleMetadataCount) {
+        int staleMetadataCount,
+        int recommendationCount,
+        Map<AdvisorySeverity, List<String>> dependenciesBySeverity,
+        Map<RemediationReason, List<String>> dependenciesByReason) {
 }

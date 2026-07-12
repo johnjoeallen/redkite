@@ -3,8 +3,10 @@ package com.redkite.core.service;
 import com.redkite.core.domain.*;
 
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 public final class RemediationClassifier {
@@ -55,6 +57,9 @@ public final class RemediationClassifier {
         int snapshotCount = 0;
         int declaredVersionCount = 0;
         int staleMetadataCount = 0;
+        int recommendationCount = 0;
+        Set<String> seenRecommended = new LinkedHashSet<>();
+        Map<RemediationReason, List<String>> depsByReason = new EnumMap<>(RemediationReason.class);
 
         for (ScanComponent component : report.components()) {
             String key = uniqueKey(component);
@@ -65,14 +70,47 @@ public final class RemediationClassifier {
                     report.recommendations(),
                     report.metadataResults());
             if (status.needsRemediation()) needsRemediationCount++;
-            if (status.isSnapshot()) snapshotCount++;
-            if (status.hasDeclaredVersionDeclaration()) declaredVersionCount++;
-            if (status.hasStaleMetadata()) staleMetadataCount++;
+            String dependency = component.coordinate().groupId() + ":" + component.coordinate().artifactId()
+                    + "@" + component.version();
+            if (status.isSnapshot()) {
+                snapshotCount++;
+                depsByReason.computeIfAbsent(RemediationReason.SNAPSHOT, k -> new ArrayList<>()).add(dependency);
+            }
+            if (status.hasDeclaredVersionDeclaration()) {
+                declaredVersionCount++;
+                depsByReason.computeIfAbsent(RemediationReason.DECLARED_VERSION, k -> new ArrayList<>()).add(dependency);
+            }
+            // Matches the "Upgrade recommended" reason in classify(): only counted here when it's
+            // not already covered by the vulnerability or snapshot buckets, so a component isn't
+            // double-labeled across banners for essentially the same underlying issue. Deduped by
+            // dependency (like the CVE severity counts below) — the same transitive dependency
+            // recommended for upgrade in many modules is one real upgrade opportunity, not one
+            // per module, so it should only be counted once here.
+            if (status.hasUpgradeRecommendation() && !status.hasVulnerability() && !status.isSnapshot()
+                    && seenRecommended.add(dependency)) {
+                recommendationCount++;
+                depsByReason.computeIfAbsent(RemediationReason.UPGRADE_RECOMMENDED, k -> new ArrayList<>()).add(dependency);
+            }
+            if (status.hasStaleMetadata()) {
+                staleMetadataCount++;
+                depsByReason.computeIfAbsent(RemediationReason.STALE_METADATA, k -> new ArrayList<>()).add(dependency);
+            }
         }
 
+        // A vulnerability finding is duplicated once per module a dependency resolves into
+        // (the same groupId:artifactId:version can appear as a distinct ScanComponent per
+        // module). Dedupe by advisory + coordinate + affected version so a single CVE is only
+        // counted once, regardless of how many modules pulled in the vulnerable dependency.
         int criticalCount = 0, highCount = 0, mediumCount = 0, lowCount = 0, unknownCount = 0;
+        Set<String> seenFindings = new LinkedHashSet<>();
+        Map<AdvisorySeverity, List<String>> depsBySeverity = new EnumMap<>(AdvisorySeverity.class);
         for (VulnerabilityFinding f : report.vulnerabilityFindings()) {
-            switch (AdvisoryClassifier.severity(f)) {
+            String dependency = f.coordinate().groupId() + ":" + f.coordinate().artifactId() + "@" + f.affectedVersion();
+            String findingKey = (f.advisoryId() == null ? "" : f.advisoryId()) + "|" + dependency;
+            if (!seenFindings.add(findingKey)) continue;
+
+            AdvisorySeverity severity = AdvisoryClassifier.severity(f);
+            switch (severity) {
                 case CRITICAL -> criticalCount++;
                 case HIGH -> highCount++;
                 case MEDIUM -> mediumCount++;
@@ -81,11 +119,13 @@ public final class RemediationClassifier {
                 default -> {
                 }
             }
+            depsBySeverity.computeIfAbsent(severity, k -> new ArrayList<>()).add(dependency);
         }
 
         return new ReportSummary(total, needsRemediationCount, total - needsRemediationCount,
                 criticalCount, highCount, mediumCount, lowCount, unknownCount,
-                snapshotCount, declaredVersionCount, staleMetadataCount);
+                snapshotCount, declaredVersionCount, staleMetadataCount, recommendationCount,
+                depsBySeverity, depsByReason);
     }
 
     private static List<VulnerabilityFinding> findingsFor(

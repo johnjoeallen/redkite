@@ -199,4 +199,35 @@ class RemediationClassifierTest {
         ReportSummary summary = RemediationClassifier.summarize(report);
         assertEquals(1, summary.totalComponents());
     }
+
+    @Test
+    void sameCveAcrossModulesIsCountedOnceInSeverityTotals() {
+        // Same vulnerable dependency resolved transitively into two different modules
+        // produces two ScanComponent/finding entries for the same advisory.
+        ScanComponent moduleA = new ScanComponent(1L, new ComponentCoordinate("com.example", "vuln-lib"),
+                "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-a/pom.xml", null,
+                Map.of(), false, null, null);
+        ScanComponent moduleB = new ScanComponent(2L, new ComponentCoordinate("com.example", "vuln-lib"),
+                "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-b/pom.xml", null,
+                Map.of(), false, null, null);
+        VulnerabilityFinding findingInA = new VulnerabilityFinding("ADV-001", "MEDIUM",
+                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null,
+                false, null, List.of("CVE-2023-1234"), null);
+        VulnerabilityFinding findingInB = new VulnerabilityFinding("ADV-001", "MEDIUM",
+                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null,
+                false, null, List.of("CVE-2023-1234"), null);
+
+        ScanReport report = minimalReport(
+                List.of(moduleA, moduleB),
+                List.of(findingInA, findingInB),
+                List.of(),
+                List.of());
+
+        ReportSummary summary = RemediationClassifier.summarize(report);
+
+        assertEquals(2, summary.totalComponents());
+        assertEquals(1, summary.mediumCount());
+        assertEquals(List.of("com.example:vuln-lib@1.0.0"),
+                summary.dependenciesBySeverity().get(AdvisorySeverity.MEDIUM));
+    }
 }

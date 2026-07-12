@@ -2067,6 +2067,19 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
+    private static String sevChipTitle(ReportSummary summary, AdvisorySeverity severity) {
+        List<String> deps = summary.dependenciesBySeverity().getOrDefault(severity, List.of());
+        if (deps.isEmpty()) return "";
+        return " title=\"" + escape(String.join("\n", deps)) + "\"";
+    }
+
+    private static String reasonChipTitle(ReportSummary summary, RemediationReason reason) {
+        List<String> deps = summary.dependenciesByReason().getOrDefault(reason, List.of());
+        if (deps.isEmpty()) return "";
+        return " title=\"" + escape(String.join("\n", deps)) + "\"";
+    }
+
+
     private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms, Map<String, List<TransitiveConflictFinding>> conflictsByKey) {
         ReportSummary summary = RemediationClassifier.summarize(report);
         List<ScanComponent> components = report.components();
@@ -2169,13 +2182,23 @@ public class RedKiteServerMain {
         html.append("<span class=\"rem-stat muted\">").append(summary.clean()).append(" clean</span>");
         html.append("</div>");
         html.append("<div class=\"rem-banner-row\">");
-        if (summary.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\">&#9762; ").append(summary.criticalCount()).append(" Critical</span>");
-        if (summary.highCount() > 0) html.append("<span class=\"sev-chip sev-high\">&#9760; ").append(summary.highCount()).append(" High</span>");
-        if (summary.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\">&#9888; ").append(summary.mediumCount()).append(" Medium</span>");
-        if (summary.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\">&#x2139; ").append(summary.lowCount()).append(" Low</span>");
-        if (summary.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\">? ").append(summary.unknownCount()).append(" Unknown</span>");
-        if (summary.snapshotCount() > 0) html.append("<span class=\"sev-chip sev-snap\">&#9889; ").append(summary.snapshotCount()).append(" Snapshot</span>");
-        if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
+        if (summary.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\"").append(sevChipTitle(summary, AdvisorySeverity.CRITICAL)).append(">&#9762; ").append(summary.criticalCount()).append(" Critical</span>");
+        if (summary.highCount() > 0) html.append("<span class=\"sev-chip sev-high\"").append(sevChipTitle(summary, AdvisorySeverity.HIGH)).append(">&#9760; ").append(summary.highCount()).append(" High</span>");
+        if (summary.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\"").append(sevChipTitle(summary, AdvisorySeverity.MEDIUM)).append(">&#9888; ").append(summary.mediumCount()).append(" Medium</span>");
+        if (summary.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\"").append(sevChipTitle(summary, AdvisorySeverity.LOW)).append(">&#x2139; ").append(summary.lowCount()).append(" Low</span>");
+        if (summary.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\"").append(sevChipTitle(summary, AdvisorySeverity.UNKNOWN)).append(">? ").append(summary.unknownCount()).append(" Unknown</span>");
+        html.append("</div>");
+        // Breakdown of "need remediation" by reason, mirroring the OR-conditions in
+        // RemediationClassifier.classify() exactly, except vulnerabilities — those are covered
+        // by the deduped-by-CVE severity row above, so they're not repeated here. A component
+        // can trip more than one reason at once (e.g. a snapshot with a known CVE), so these
+        // chips can legitimately sum to more than "need remediation", and a component whose
+        // only reason is a vulnerability won't appear in this row (see the severity row instead).
+        html.append("<div class=\"rem-banner-row\">");
+        if (summary.snapshotCount() > 0) html.append("<span class=\"sev-chip sev-snap\"").append(reasonChipTitle(summary, RemediationReason.SNAPSHOT)).append(">&#9889; ").append(summary.snapshotCount()).append(" Snapshot</span>");
+        if (summary.declaredVersionWarningCount() > 0) html.append("<span class=\"sev-chip sev-declared\"").append(reasonChipTitle(summary, RemediationReason.DECLARED_VERSION)).append(">&#128196; ").append(summary.declaredVersionWarningCount()).append(" Declared version</span>");
+        if (summary.recommendationCount() > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(summary.recommendationCount()).append(" Upgrade recommended</span>");
+        if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\"").append(reasonChipTitle(summary, RemediationReason.STALE_METADATA)).append(">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
         html.append("</div>");
         html.append("</div>");
 
@@ -2218,16 +2241,17 @@ public class RedKiteServerMain {
         }
 
         // Filter toggle: CVE | Conflict | Snapshot | Upgrade | Transitive | Clean | All
-        long cveCount = views.stream().filter(v -> v.status().hasVulnerability()).count();
+        long cveCount = views.stream().filter(RedKiteServerMain::hasFixableCve).count();
         long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
         long transitiveCount = views.stream().filter(v -> !v.component().direct() && !v.component().snapshot()).count();
-        long cleanCount = views.stream().filter(v -> !v.status().needsRemediation() && v.convergenceFinding() == null).count();
+        long cleanCount = views.stream().filter(this::isCardClean).count();
+        long upgradeCount = views.stream().filter(v -> isUpgradeRecommendedOnly(v.status())).count();
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cve\" onclick=\"setRemediationMode('cve')\">CVE <span class=\"tab-count\">").append(cveCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"conflict\" onclick=\"setRemediationMode('conflict')\">&#9651; Conflict <span class=\"tab-count\">").append(conflictCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
-        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable <span class=\"tab-count\" id=\"upg-all-count\">0</span></button>");
+        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable <span class=\"tab-count\" id=\"upg-all-count\">").append(upgradeCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"transitive\" onclick=\"setRemediationMode('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"clean\" onclick=\"setRemediationMode('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
@@ -2433,29 +2457,58 @@ public class RedKiteServerMain {
         return sb.toString();
     }
 
+    /** Whether a vulnerability on this component has a fix available via an upgrade — i.e. an
+     *  UpgradeRecommendation was resolved for it. Recommendations are only ever created with
+     *  reason CVE_FIX when the component has a vulnerability, so the presence of a recommendation
+     *  here is sufficient without checking the reason explicitly. */
+    private static boolean hasFixableCve(ComponentView view) {
+        return view.status().hasVulnerability() && view.recommendation() != null;
+    }
+
+    /** Matches the "Upgrade recommended" reason counted in RemediationClassifier.summarize() —
+     *  the single source of truth for both the "Upgrade recommended" banner chip and the
+     *  Upgradeable tab, so the two numbers never diverge like they did when the tab computed
+     *  its own definition client-side. */
+    private static boolean isUpgradeRecommendedOnly(RemediationStatus status) {
+        return status.hasUpgradeRecommendation() && !status.hasVulnerability() && !status.isSnapshot();
+    }
+
+    /** Whether a card is treated as "clean" for tab-filtering/counting purposes — the single
+     *  source of truth shared by the banner counts and the per-card rendering, so the CVE and
+     *  Clean tabs can never double-count the same card. */
+    private boolean isCardClean(ComponentView view) {
+        ScanComponent comp = view.component();
+        RemediationStatus status = view.status();
+        boolean clean = !status.needsRemediation();
+        // Non-conflict transitive deps are only actionable when their CVE has a fix available —
+        // suppress upgrade-only recommendations and unfixable CVEs to avoid noise.
+        if (!comp.direct() && view.convergenceFinding() == null
+                && !hasFixableCve(view) && !status.isSnapshot()) {
+            clean = true;
+        }
+        return clean && view.convergenceFinding() == null;
+    }
+
     private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
-        boolean hasHighSeverityCve = hasHighOrCriticalCve(view.findings());
-        boolean clean = !status.needsRemediation();
-        // Non-conflict transitive deps are only actionable for HIGH/CRITICAL CVEs — suppress
-        // upgrade-only and low-severity recommendations to avoid noise.
-        if (!comp.direct() && view.convergenceFinding() == null && !hasHighSeverityCve && !status.isSnapshot()) {
-            clean = true;
-        }
+        boolean hasFixableCve = hasFixableCve(view);
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
 
         StringBuilder html = new StringBuilder();
         String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
-        boolean upgradeOnly = status.hasUpgradeRecommendation()
-                && !status.hasVulnerability() && !status.isSnapshot()
-                && !status.hasDeclaredVersionDeclaration() && !status.hasStaleMetadata();
+        boolean upgradeOnly = isUpgradeRecommendedOnly(status);
         boolean actionableConvergence = view.convergenceFinding() != null;
         String conflictJson = actionableConvergence ? buildConflictJson(view.convergenceFinding()) : "";
-        html.append("<div class=\"rem-card").append(clean && !actionableConvergence ? " clean" : "").append("\" data-clean=\"").append(clean && !actionableConvergence)
+        boolean dataClean = isCardClean(view);
+        // CVE tab membership = has a vulnerability AND a fix is available via upgrade. A
+        // component with an unfixable or not-yet-fixable CVE is excluded here (it still shows
+        // under "All"), and isCardClean() guarantees clean/hasvuln stay mutually exclusive.
+        boolean dataHasVuln = hasFixableCve;
+        html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
-                .append("\" data-hasvuln=\"").append(status.hasVulnerability())
+                .append("\" data-hasvuln=\"").append(dataHasVuln)
                 .append("\" data-upgradeonly=\"").append(upgradeOnly)
                 .append("\" data-hasconflict=\"").append(actionableConvergence)
                 .append("\" data-coord=\"").append(escape(coordStr))
@@ -2470,7 +2523,7 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-header\">");
         html.append("<span class=\"rem-title\">").append(escape(coordStr)).append("</span>");
         html.append("<div class=\"rem-badges\">");
-        html.append(severityBadgeHtml(status.highestSeverity(), clean));
+        html.append(severityBadgeHtml(status.highestSeverity(), dataClean));
         String kindClass = comp.snapshot() ? "warn" : comp.direct() ? "success" : "neutral";
         String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
         html.append("<span class=\"badge ").append(kindClass).append("\">").append(kindLabel).append("</span>");
@@ -2532,10 +2585,11 @@ public class RedKiteServerMain {
         }
 
         // Show version selector for: direct deps with metadata or conflict, transitive conflict deps,
-        // and transitive deps with HIGH/CRITICAL CVE (where an upgrade is actionable).
+        // and transitive deps with a fixable CVE or a plain upgrade recommendation (either way,
+        // there's a concrete target version to apply).
         boolean showVersionSelector = view.convergenceFinding() != null
                 || (comp.direct() && view.versionMetadata() != null)
-                || (!comp.direct() && hasHighSeverityCve && view.versionMetadata() != null);
+                || (!comp.direct() && (hasFixableCve || isUpgradeRecommendedOnly(status)) && view.versionMetadata() != null);
         if (showVersionSelector) {
             html.append("<div class=\"rem-actions\">");
             if (comp.direct()) {
