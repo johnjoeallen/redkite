@@ -14,6 +14,7 @@ It analyses local working copies, builds a dependency inventory, checks Maven Ce
 - fetches and caches version metadata from Maven Central
 - fetches and caches vulnerability data from OSV.dev
 - recommends upgrades grouped by module with per-component version selectors
+- resolves known CVEs in three tiers — an upgrade that clears the vulnerability, a downgrade below where it was introduced if no upgrade fixes it, or a best-effort suggestion at the lowest achievable severity if neither fully resolves it — each verified live so the suggested version doesn't carry an unrelated CVE of its own
 - generates an updated POM preview in-browser — all declared dependencies are normalised to `${artifactId.version}` property references, with upgraded versions set to the selected value
 - keeps all data on the developer machine
 
@@ -76,6 +77,8 @@ A progress overlay shows the current phase. If post-apply validation fails, RedK
 
 Version upgrades normalise any literal `<version>` tag to a `${artifactId.version}` property reference and set the property value to the chosen version. Dep-management pins and exclusions are written directly into the appropriate POM.
 
+Apply conflict fixes (dep-management pins and exclusions) before applying general upgrades. Conflicts pin a dependency to a specific resolved version across modules — applying an unrelated upgrade first can shift what "resolved" means and invalidate the conflict fix, forcing you to re-check convergence after the fact.
+
 Use **Clear cache** to flush the cached version and vulnerability metadata and force a fresh fetch on the next analysis.
 
 ## Configuration
@@ -95,6 +98,10 @@ java -Dredkite.port=8080 -jar red-kite.jar
 | `redkite.prefs.file` | `~/.redkite/preferences.properties` |
 | `redkite.osv.url` | `https://api.osv.dev` |
 | `redkite.version.lookback` | `10` — how many older releases the version-selector dropdown offers below the current version |
+
+### Config Page
+
+The gear icon in the top nav opens `/config`, where the vulnerability and version metadata cache TTLs can be changed at runtime (stored in the database, seeded from the compiled-in defaults on first run) — presets from 15 minutes to 1 day. Changes apply to the next lookup; no restart needed.
 
 ## Build From Source
 

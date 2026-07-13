@@ -26,8 +26,8 @@ Domain records and stateless classifiers. No I/O. All records implement `Seriali
 | `ScanInput` | Full project snapshot: all components, edges, POM contents, git metadata |
 | `ScanReport` | Analysis result: components enriched with metadata, recommendations, vulnerability findings |
 | `TransitiveConflictFinding` | One enforcer conflict: coordinates, resolved version, conflicting versions, raw path text |
-| `VulnerabilityFinding` | One OSV advisory: ID, severity, CVEs, affected version, fixed version |
-| `UpgradeRecommendation` | Upgrade target and reason for one component |
+| `VulnerabilityFinding` | One OSV advisory: ID, severity, CVEs, affected version, fixed version, introduced version (lower bound of the range containing the affected version — used to search for a downgrade fix) |
+| `UpgradeRecommendation` | Upgrade target and reason for one component — reason distinguishes an upgrade fix, a downgrade fix, or a best-effort lowest-severity suggestion |
 | `RemediationStatus` | Classification of what action a component needs |
 | `RemediationClassifier` | Stateless classifier: produces `RemediationStatus` from component + findings |
 | `AdvisoryClassifier` | Picks highest severity across a list of `VulnerabilityFinding` |
@@ -43,7 +43,7 @@ All Maven subprocess invocation and POM file manipulation.
 | `EnforcerRunner` | Runs `mvn enforcer:enforce` or falls back to `mvn verify -DskipTests` |
 | `EnforcerDetector` | Detects whether `maven-enforcer-plugin` is configured in the project |
 | `TempPomAnalyzer` | Creates stripped temp POM trees for pristine / phase-2 enforcer runs |
-| `RemediationApplier` | Inserts dep-management pins and exclusions into POM XML with marker comments |
+| `RemediationApplier` | Inserts dep-management pins and exclusions into POM XML with marker comments; pins always use a hardcoded `<version>`, never a `${...}` property |
 | `ValidationRunner` | Runs `mvn clean install -DskipTests -Denforcer.skip=true` (and optionally `spring-boot:run`) to validate a project build |
 | `PomModel` | In-memory representation of a parsed POM |
 | `MavenSettingsReader` | Reads `~/.m2/settings.xml` for repository URLs and credentials |
@@ -55,12 +55,13 @@ External data providers with two-level caching (in-memory + H2).
 | Class | Purpose |
 |---|---|
 | `HttpVersionMetadataProvider` | Fetches `maven-metadata.xml` from Maven Central / Artifactory |
-| `HttpVulnerabilityProvider` | Queries OSV `POST /v1/query`; caches responses for 24 hours |
-| `CacheAwareMetadataService` | Thin orchestrator delegating to both providers |
+| `HttpVulnerabilityProvider` | Queries OSV `POST /v1/query`; caches responses (TTL from `rk_config`, default 24h — see Configurable Cache TTLs) |
+| `CacheTtlConfig` | Reads a cache TTL override from `rk_config` for a given key, falling back to the compiled-in default; read fresh on every call, not cached |
+| `CacheAwareMetadataService` | Thin orchestrator delegating to both providers (currently unused — no call sites) |
 
 ### `red-kite-server`
 
-Single class `RedKiteServerMain` (~4200 lines) containing:
+Single class `RedKiteServerMain` (~5000 lines) containing:
 - HTTP server setup and request routing
 - Scan job orchestration (background thread pool)
 - `Store` inner class: all H2 persistence
@@ -140,12 +141,14 @@ Responses cached for 24 hours in memory and H2.
 
 ### Phase 3 — Upgrade Recommendation
 
-`selectUpgradeTarget()` for each component with upgrade potential:
+Components without a known CVE go through `selectUpgradeTarget()`:
 1. Prefer `latestSameMajorVersion` if it differs from current
-2. Otherwise walk `upgradePathVersions` stopping at a CVE-clean version
+2. Otherwise walk `upgradePathVersions`, picking the closest same-major-minor candidate, else the next candidate
 3. Fall back to `latestVersion` (potentially a major bump)
 
-Reason codes: `CVE_FIX` → `PATCH_AVAILABLE` → `MINOR_AVAILABLE` → `MAJOR_AVAILABLE` → `SNAPSHOT_REPLACEMENT`
+Reason codes: `PATCH_AVAILABLE` / `MINOR_AVAILABLE` / `MAJOR_AVAILABLE` / `SNAPSHOT_REPLACEMENT`
+
+Components with a known CVE go through `resolveCveFix()` instead — a three-tier resolver (see "CVE Fix Resolution" below) that tries an upgrade, then a downgrade, then a bounded best-effort search, verifying each candidate is itself free of unrelated vulnerabilities before recommending it.
 
 `ScanReport` is built and stored (base64 Java serialization in H2).
 
@@ -270,6 +273,8 @@ This produces a stepped upgrade path (e.g. `[2.14.3, 2.15.4, 2.16.2, 2.17.3, 2.1
 
 ### Upgrade Target Selection (`selectUpgradeTarget`)
 
+Used only for components with **no known CVE**.
+
 ```
 if latestSameMajorVersion > currentVersion:
     candidate = latestSameMajorVersion
@@ -278,14 +283,47 @@ else if upgradePathVersions is not empty:
 else:
     candidate = latestVersion              // possibly a major bump
 
-if candidate has CVE vulnerabilities:
-    walk upgradePathVersions looking for a CVE-clean version >= candidate
-    prefer lowest clean version that is still same-major
-
 return UpgradeRecommendation(target=candidate, reason=...)
 ```
 
-Reason codes in priority order: `CVE_FIX` > `PATCH_AVAILABLE` > `MINOR_AVAILABLE` > `MAJOR_AVAILABLE` > `SNAPSHOT_REPLACEMENT`
+Reason codes in priority order: `PATCH_AVAILABLE` > `MINOR_AVAILABLE` > `MAJOR_AVAILABLE` > `SNAPSHOT_REPLACEMENT`
+
+### CVE Fix Resolution (`resolveCveFix`)
+
+Used for components **with** a known CVE, in place of `selectUpgradeTarget`. Three tiers, tried in order, each using data already fetched for the current version (no extra network calls except tier 3):
+
+```
+Tier 1 — Upgrade (RecommendationReason.CVE_FIX):
+    requiredFix = max(fixedVersion across all findings for this component)
+    if any finding has no fixedVersion (open-ended/unbounded advisory):
+        tier fails entirely — an upgrade can never resolve an unbounded CVE
+    else:
+        candidates = available versions >= requiredFix, ascending (closest first)
+        return the first candidate verified live to have ZERO vulnerability
+        findings of its own (not just clear of the original CVE's range)
+
+Tier 2 — Downgrade (RecommendationReason.CVE_FIX_DOWNGRADE):
+    requiredBelow = min(introducedVersion across all findings)
+    if any finding has no introducedVersion (affected since inception):
+        tier fails entirely — no downgrade can escape it
+    else:
+        candidates = available versions < requiredBelow, descending (closest first)
+        return the first candidate verified live to be fully clean
+
+Tier 3 — Best effort (RecommendationReason.CVE_BEST_EFFORT):
+    candidates = nearest ~6 versions above current + nearest 3 below + the true
+                 latest release, live-queried for their own worst severity
+    upgrade candidates are checked before any downgrade candidate, so a tie
+    always resolves toward the upgrade
+    a candidate is accepted only if its severity is no worse than current's;
+    ties are broken toward whichever candidate is closest to current
+    (an upgrade tying current's severity is still worth suggesting — likely
+    carries other unrelated fixes; a downgrade tying current's severity is not,
+    since it's pure downside with no CVE benefit — downgrade ties are rejected)
+    return null if nothing at least as good as current is found (→ CVE Nofix)
+```
+
+The version dropdown's fixability status (`CVE Upgrade` / `CVE Downgrade` / `CVE Nofix` tabs) is derived directly from which tier produced the recommendation, folding `CVE_BEST_EFFORT` into Upgrade or Downgrade by whether its target is above or below the current version — `CVE Nofix` means no recommendation was found at all (tier 3 also failed).
 
 ### Remediation Classification (`RemediationClassifier`)
 
@@ -299,7 +337,9 @@ A component `needsRemediation()` if any of these are true:
 | `hasUpgradeRecommendation` | An `UpgradeRecommendation` exists |
 | `hasStaleMetadata` | Metadata cache is `STALE`, `MISSING`, `ERROR_CACHED`, or provider returned a rate-limit/error status |
 
-**UI override:** Transitive dependencies without HIGH/CRITICAL CVE are force-marked `data-clean="true"` in the UI regardless of `needsRemediation()`, suppressing them from the upgrade tab. Only transitives with HIGH/CRITICAL CVE or an active conflict are surfaced.
+**UI override (`isCardClean`):** A non-conflicted transitive dependency is force-marked `data-clean="true"` regardless of `needsRemediation()` unless it has a *fixable* CVE (a resolved `UpgradeRecommendation` from `resolveCveFix`'s upgrade or downgrade tier — a `CVE_BEST_EFFORT` suggestion does **not** count as fixable here) or is a SNAPSHOT. This is fixability-based, not severity-based — a Low-severity CVE with an available fix is surfaced; a Critical-severity CVE with no available fix is suppressed as noise. Direct dependencies are never suppressed this way.
+
+The remediation panel's filter tabs are: `CVE Upgrade` / `CVE Downgrade` / `CVE Nofix` (mutually exclusive, derived from which `resolveCveFix` tier produced the recommendation — see "CVE Fix Resolution"), `Conflict`, `Snapshot`, `Upgradeable` (a plain, non-CVE `UpgradeRecommendation`), `Transitive`, `Clean`, `All`.
 
 ---
 
@@ -394,14 +434,16 @@ After the enforcer run, RedKite identifies any previously applied RedKite-manage
 ### Applying Remediations
 
 **Dep-management pin** (`RemediationApplier.applyDependencyManagementPin()`):
-- If a `<!-- redkite:dependency-management groupId="..." artifactId="..." ... -->` marker already exists for this artifact, the version in the following `<version>` tag is updated in place
+- Marker format: `<!-- redkite:dependency-management pin groupId="..." artifactId="..." version="..." reason="..." — remove this comment to prevent RedKite managing this dependency -->`. Detection (finding an existing pin to update) matches on the `redkite:dependency-management` prefix without requiring the `pin` suffix, so pins written before that rename are still recognized and updated in place rather than duplicated.
+- If a marker already exists for this artifact, the version in the following `<version>` tag is updated in place
 - Otherwise a new `<dependency>` block is inserted before `</dependencies>` in the existing `<dependencyManagement>`, or a full `<dependencyManagement>` block is inserted before `</project>` if none exists
+- The `<version>` is always a hardcoded literal, never a `${...}` property — `patchPomXml()`'s literal-to-property normalisation pass explicitly skips any `<dependency>` element immediately preceded by this marker comment (`isRedkiteDepMgmtPin`), so applying an unrelated upgrade elsewhere in the POM can't silently convert a pin into a property reference
 
 **Exclusion** (`RemediationApplier.applyExclusion()`):
 - Inserts an `<exclusions>` block inside the matching `<dependency>` entry in `<dependencies>`, tagged with `<!-- redkite:exclusion ... -->` for future stale detection
 
 **POM upgrade** (`patchPomXml()`):
-- For `VersionSource.LITERAL`: normalises the literal `<version>` to a `${artifactId.version}` property reference, then sets the property value
+- For `VersionSource.LITERAL` (excluding RedKite dependency-management pins, see above): normalises the literal `<version>` to a `${artifactId.version}` property reference, then sets the property value
 - For `VersionSource.PROPERTY`: updates the referenced property value directly
 - Uses Java DOM parse + serialise; does not modify unrelated POM structure
 
@@ -478,7 +520,15 @@ rk_version_cache
 rk_vuln_cache
   cache_key varchar PK             ← "groupId:artifactId@version"
   response_json text               ← raw OSV response body
-  expires_at_epoch_ms bigint       ← 24-hour TTL
+  expires_at_epoch_ms bigint       ← TTL from rk_config, default 24h
+
+rk_config
+  config_key varchar PK            ← e.g. "cache.ttl.vulnerability.fresh"
+  config_value varchar             ← minutes, as a string
+  updated_at timestamp
+                                   [seeded with each key's compiled-in default
+                                    on startup, only if the row is missing —
+                                    never overwrites a value set from /config]
 
 metadata_cache_entries             ← per-component metadata log per scan
 provider_rate_limit_state          ← rate-limit tracking (not actively enforced)
@@ -510,6 +560,8 @@ rk_schema_version                  ← migration gate (current: v2)
 | `POST` | `/api/metadata/clear` | Clear version and vulnerability caches |
 | `DELETE` | `/api/projects/{id}` | Delete project and all its scans |
 | `POST` | `/api/prefs` | Save UI preferences (theme) |
+| `GET` | `/config` | Config page: edit cache TTLs (`rk_config`) |
+| `POST` | `/api/config` | Save cache TTL values, redirects back to `/config` |
 
 All endpoints are unauthenticated. The server is intended for local use only.
 
@@ -519,12 +571,15 @@ All endpoints are unauthenticated. The server is intended for local use only.
 
 | Data | In-memory cache | H2 cache | TTL |
 |---|---|---|---|
-| Version metadata | `LinkedHashMap` (unbounded) | `rk_version_cache` | Until `POST /api/metadata/clear` |
-| Vulnerability data | `HashMap` (unbounded) | `rk_vuln_cache` | 24 hours |
+| Version metadata (Maven Central) | `LinkedHashMap` (unbounded) | `rk_version_cache` | configurable via `/config`, default 24h |
+| Version metadata (internal/local repos) | `LinkedHashMap` (unbounded) | `rk_version_cache` | configurable, default 1h — shorter since these can change more frequently |
+| Version metadata (artifact not found) | `LinkedHashMap` (unbounded) | `rk_version_cache` | configurable, default 6h |
+| Version metadata (provider error) | `LinkedHashMap` (unbounded) | `rk_version_cache` | configurable, default 15m |
+| Vulnerability data | `HashMap` (unbounded) | `rk_vuln_cache` | configurable via `/config`, default 24h |
 | Scan results | — | `scans` table | 7 per project |
 | Enforcer results | — | `enforcer_results` | Per scan |
 
-The in-memory cache is checked first on every request. The H2 cache is checked on cache miss. External network calls are made only on H2 miss or TTL expiry.
+`POST /api/metadata/clear` force-clears both caches immediately regardless of TTL. The in-memory cache is checked first on every request. The H2 cache is checked on cache miss. External network calls are made only on H2 miss or TTL expiry. TTL values are read fresh from `rk_config` on every lookup via `CacheTtlConfig` (see `red-kite-metadata`), so a change made on `/config` takes effect on the very next lookup — no restart, no in-memory caching of the TTL setting itself.
 
 ---
 
