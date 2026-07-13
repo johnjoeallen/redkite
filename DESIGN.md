@@ -550,9 +550,9 @@ rk_schema_version                  ← migration gate (current: v2)
 | `GET` | `/health` | Liveness check → `"ok"` |
 | `POST` | `/api/scan` | Start scan job → `{"jobId":"..."}` |
 | `GET` | `/api/scan-status?jobId=` | Poll scan progress → `{status, phases[]}` or `{status:"done", scanId}` |
-| `GET` | `/api/scans/pom?scanId=` | Download patched POM(s) |
-| `POST` | `/api/scans/pom?scanId=` | Generate POM patch → `{filePath: patchedXml}` |
-| `POST` | `/api/scans/pom/write?scanId=` | Write patched POMs to disk |
+| `POST` | `/api/scans/pom?scanId=` | Generate POM patch → `{filePath: patchedXml}` (called internally by **Apply selected** to compute patches before submitting the apply-batch job; the result is not shown to the user) |
+| `GET` | `/api/scans/pom?scanId=` | Download patched POM(s) — handler still present but no longer linked from the UI (see note below) |
+| `POST` | `/api/scans/pom/write?scanId=` | Write patched POMs to disk — handler still present but no longer linked from the UI (see note below) |
 | `POST` | `/api/scans/remediation/apply` | Apply one dep-management pin or exclusion to disk (no validation) |
 | `POST` | `/api/scans/remediation/apply-batch` | Start bracketed validate→apply→validate job → `{"jobId":"..."}` |
 | `GET` | `/api/scans/remediation/apply-status?jobId=` | Poll apply job → `{status, phase}` or `{status:"done"}` or `{status:"failed",...}` |
@@ -585,7 +585,9 @@ All endpoints are unauthenticated. The server is intended for local use only.
 
 ## Apply Changes Flow
 
-When the user clicks **Apply selected**, `POST /api/scans/remediation/apply-batch` enqueues a background job and returns `{"jobId":"..."}`. The browser polls `GET /api/scans/remediation/apply-status?jobId=...` every 500 ms and updates the overlay text to reflect the current phase.
+When the user clicks **Apply selected**, the browser first calls `POST /api/scans/pom` to compute the patched POM XML, then immediately submits it to `POST /api/scans/remediation/apply-batch`, which enqueues a background job and returns `{"jobId":"..."}`. The browser polls `GET /api/scans/remediation/apply-status?jobId=...` every 500 ms and updates the overlay text to reflect the current phase.
+
+There is no longer a preview step between computing the patch and applying it — the patched POM XML is not shown to the user before the apply job runs. The client-side preview modal (`showPomModal`/`writePomFiles`/`copyPomContent` in `scripts.js`, the `#pom-modal` markup in `RedKiteServerMain`) and the `GET /api/scans/pom` / `POST /api/scans/pom/write` handlers it used are still present in the code but are dead — nothing in the current UI opens the modal or links to them.
 
 ### Job phases
 

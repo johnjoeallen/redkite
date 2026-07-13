@@ -15,7 +15,7 @@ It analyses local working copies, builds a dependency inventory, checks Maven Ce
 - fetches and caches vulnerability data from OSV.dev
 - recommends upgrades grouped by module with per-component version selectors
 - resolves known CVEs in three tiers — an upgrade that clears the vulnerability, a downgrade below where it was introduced if no upgrade fixes it, or a best-effort suggestion at the lowest achievable severity if neither fully resolves it — each verified live so the suggested version doesn't carry an unrelated CVE of its own
-- generates an updated POM preview in-browser — all declared dependencies are normalised to `${artifactId.version}` property references, with upgraded versions set to the selected value
+- applies selected upgrades directly to the POMs on disk, validating the build before and after
 - keeps all data on the developer machine
 
 ## Requirements
@@ -75,7 +75,7 @@ In the analysis, adjust target versions in the dropdowns and click **Apply selec
 
 A progress overlay shows the current phase. If post-apply validation fails, RedKite reverts all POM changes and reports the failure with the attributed dependency where possible. If the project was already failing before apply, that is noted and the revert logic still runs.
 
-Version upgrades normalise any literal `<version>` tag to a `${artifactId.version}` property reference and set the property value to the chosen version. Dep-management pins and exclusions are written directly into the appropriate POM.
+Version upgrades normalise any literal `<version>` tag to a `${artifactId.version}` property reference and set the property value to the chosen version. Dep-management pins and exclusions are written directly into the appropriate POM — conflict pins always use an explicit, hardcoded version number, never a `${...}` property reference.
 
 Apply conflict fixes (dep-management pins and exclusions) before applying general upgrades. Conflicts pin a dependency to a specific resolved version across modules — applying an unrelated upgrade first can shift what "resolved" means and invalidate the conflict fix, forcing you to re-check convergence after the fact.
 
