@@ -35,6 +35,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -48,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -76,6 +78,22 @@ public class RedKiteServerMain {
     }
 
     private static final Set<String> VALID_THEMES = Set.of("dark", "light", "ocean", "dusk", "forest", "ember");
+
+    private record ConfigTtlEntry(String key, String label, Duration defaultValue) {}
+
+    /** The cache TTLs editable from the /config page — single source of truth shared by the
+     *  first-run seeding logic and the config page's rendering, so the two never drift apart. */
+    private static final List<ConfigTtlEntry> CONFIG_TTL_ENTRIES = List.of(
+            new ConfigTtlEntry(HttpVulnerabilityProvider.CONFIG_KEY_FRESH_TTL,
+                    "Vulnerability lookup cache (OSV.dev)", HttpVulnerabilityProvider.DEFAULT_FRESH_TTL),
+            new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_FRESH_TTL,
+                    "Version metadata cache (Maven Central)", HttpVersionMetadataProvider.DEFAULT_FRESH_TTL),
+            new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_LOCAL_TTL,
+                    "Version metadata cache (internal/local repositories)", HttpVersionMetadataProvider.DEFAULT_LOCAL_TTL),
+            new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_NEGATIVE_TTL,
+                    "Version metadata cache (artifact not found)", HttpVersionMetadataProvider.DEFAULT_NEGATIVE_TTL),
+            new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_ERROR_TTL,
+                    "Version metadata cache (provider error)", HttpVersionMetadataProvider.DEFAULT_ERROR_TTL));
 
     private final Store store;
     private final HttpServer server;
@@ -232,6 +250,8 @@ public class RedKiteServerMain {
         server.createContext("/api/scans/remediation/apply", exchange -> safeHandle(exchange, this::handleApiRemediationApply));
         server.createContext("/api/scans/remediation/apply-batch", exchange -> safeHandle(exchange, this::handleApiRemediationApplyBatch));
         server.createContext("/api/scans/remediation/apply-status", exchange -> safeHandle(exchange, this::handleApiRemediationApplyStatus));
+        server.createContext("/config", exchange -> safeHandle(exchange, this::handleConfig));
+        server.createContext("/api/config", exchange -> safeHandle(exchange, this::handleApiConfig));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -1196,6 +1216,66 @@ public class RedKiteServerMain {
         sendJson(exchange, 200, "{\"theme\":" + jsonStr(t) + "}");
     }
 
+    private void handleConfig(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        Map<String, String> values;
+        try {
+            values = store.loadConfigValues();
+        } catch (SQLException e) {
+            sendText(exchange, 500, BRAND + " error: " + escape(e.getMessage()));
+            return;
+        }
+        StringBuilder body = new StringBuilder();
+        body.append("<section class=\"card\">");
+        body.append("<h2>Cache TTLs</h2>");
+        body.append("<p class=\"muted\">How long metadata lookups are cached before being refreshed, in minutes. ")
+                .append("Changes apply to the next lookup — no restart needed.</p>");
+        body.append("<form method=\"POST\" action=\"/api/config\">");
+        for (ConfigTtlEntry entry : CONFIG_TTL_ENTRIES) {
+            String current = values.getOrDefault(entry.key(), Long.toString(entry.defaultValue().toMinutes()));
+            body.append("<div class=\"config-row\">");
+            body.append("<label for=\"").append(escape(entry.key())).append("\">").append(escape(entry.label())).append("</label>");
+            body.append("<div class=\"config-row-input\">");
+            body.append("<input type=\"number\" min=\"1\" step=\"1\" id=\"").append(escape(entry.key()))
+                    .append("\" name=\"").append(escape(entry.key())).append("\" value=\"").append(escape(current)).append("\"/>");
+            body.append("<span class=\"muted\">minutes</span>");
+            body.append("</div></div>");
+        }
+        body.append("<button class=\"button primary\" type=\"submit\">Save</button>");
+        body.append("</form>");
+        body.append("</section>");
+        sendHtml(exchange, 200, renderPage("config", "Configuration", "Cache TTL settings", body.toString()));
+    }
+
+    private void handleApiConfig(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        Map<String, String> form = parseForm(readBody(exchange));
+        Set<String> validKeys = CONFIG_TTL_ENTRIES.stream().map(ConfigTtlEntry::key).collect(Collectors.toSet());
+        try {
+            for (Map.Entry<String, String> field : form.entrySet()) {
+                if (!validKeys.contains(field.getKey())) continue;
+                long minutes;
+                try {
+                    minutes = Long.parseLong(field.getValue().trim());
+                } catch (NumberFormatException e) {
+                    continue; // skip invalid entries rather than fail the whole save
+                }
+                if (minutes < 1) continue;
+                store.updateConfigValue(field.getKey(), Long.toString(minutes));
+            }
+        } catch (SQLException e) {
+            sendText(exchange, 500, BRAND + " error: " + escape(e.getMessage()));
+            return;
+        }
+        sendRedirect(exchange, "/config");
+    }
+
     private void handleApiMetadataClear(HttpExchange exchange) throws IOException {
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
             sendText(exchange, 405, "Method not allowed");
@@ -1690,6 +1770,12 @@ public class RedKiteServerMain {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
+    }
+
+    private static void sendRedirect(HttpExchange exchange, String location) throws IOException {
+        exchange.getResponseHeaders().set("Location", location);
+        exchange.sendResponseHeaders(303, -1);
+        exchange.getResponseBody().close();
     }
 
     private static <T extends java.io.Serializable> void sendBase64(HttpExchange exchange, int status, T body) throws IOException {
@@ -3709,6 +3795,7 @@ public class RedKiteServerMain {
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"), this::dbConnection);
             initializeSchema();
+            seedConfigDefaults();
         }
 
         /** Re-resolve settings from the project root before a scan. No-op when overridden by system property. */
@@ -4569,6 +4656,14 @@ public class RedKiteServerMain {
                         )
                         """);
 
+                st.executeUpdate("""
+                        create table if not exists rk_config (
+                          config_key varchar(100) primary key,
+                          config_value varchar(255) not null,
+                          updated_at timestamp with time zone not null default current_timestamp
+                        )
+                        """);
+
                 // --- reconcile columns that were added to existing tables after initial release ---
                 // ADD COLUMN IF NOT EXISTS is a no-op when the column already exists, so these
                 // run on every startup without harm. New installs never reach these (the CREATE
@@ -4582,6 +4677,50 @@ public class RedKiteServerMain {
 
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to initialize schema", e);
+            }
+        }
+
+        /** Inserts each configurable TTL's compiled-in default into rk_config, but only if that
+         *  key has no row yet — never overwrites a value the user has already changed from the
+         *  config page. Runs on every startup; idempotent after the first. */
+        private void seedConfigDefaults() {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "insert into rk_config (config_key, config_value) " +
+                         "select ?, ? where not exists (select 1 from rk_config where config_key = ?)")) {
+                for (ConfigTtlEntry entry : CONFIG_TTL_ENTRIES) {
+                    ps.setString(1, entry.key());
+                    ps.setString(2, Long.toString(entry.defaultValue().toMinutes()));
+                    ps.setString(3, entry.key());
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to seed config defaults: " + e.getMessage());
+            }
+        }
+
+        /** All rk_config rows as key -> value (minutes, as stored). Missing keys are simply
+         *  absent from the map — callers fall back to the compiled-in default. */
+        synchronized Map<String, String> loadConfigValues() throws SQLException {
+            Map<String, String> values = new LinkedHashMap<>();
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement("select config_key, config_value from rk_config");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    values.put(rs.getString("config_key"), rs.getString("config_value"));
+                }
+            }
+            return values;
+        }
+
+        synchronized void updateConfigValue(String key, String value) throws SQLException {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "merge into rk_config (config_key, config_value, updated_at) key (config_key) values (?, ?, current_timestamp)")) {
+                ps.setString(1, key);
+                ps.setString(2, value);
+                ps.executeUpdate();
             }
         }
 

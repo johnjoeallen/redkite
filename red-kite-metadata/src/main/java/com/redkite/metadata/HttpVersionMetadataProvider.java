@@ -30,10 +30,15 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     private static final java.net.http.HttpClient CLIENT = java.net.http.HttpClient.newBuilder()
             .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
             .build();
-    private static final Duration FRESH_TTL = Duration.ofHours(24);
-    private static final Duration LOCAL_TTL = Duration.ofHours(1);
-    private static final Duration NEGATIVE_TTL = Duration.ofHours(6);
-    private static final Duration ERROR_TTL = Duration.ofMinutes(15);
+    /** Config keys + compiled-in defaults for {@link CacheTtlConfig}; overridable from the config page. */
+    public static final String CONFIG_KEY_FRESH_TTL = "cache.ttl.version.fresh";
+    public static final String CONFIG_KEY_LOCAL_TTL = "cache.ttl.version.local";
+    public static final String CONFIG_KEY_NEGATIVE_TTL = "cache.ttl.version.negative";
+    public static final String CONFIG_KEY_ERROR_TTL = "cache.ttl.version.error";
+    public static final Duration DEFAULT_FRESH_TTL = Duration.ofHours(24);
+    public static final Duration DEFAULT_LOCAL_TTL = Duration.ofHours(1);
+    public static final Duration DEFAULT_NEGATIVE_TTL = Duration.ofHours(6);
+    public static final Duration DEFAULT_ERROR_TTL = Duration.ofMinutes(15);
     private static final String MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
 
     private final List<String> repositoryBaseUrls;
@@ -285,7 +290,9 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                             CacheState.MISSING,
                             MetadataStatus.RATE_LIMITED,
                             List.of());
-                    putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl, now.plus(NEGATIVE_TTL), MetadataStatus.RATE_LIMITED, false));
+                    putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl,
+                            now.plus(CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_NEGATIVE_TTL, DEFAULT_NEGATIVE_TTL)),
+                            MetadataStatus.RATE_LIMITED, false));
                     return metadata;
                 }
                 LOGGER.warning(() -> "Unexpected HTTP " + status + " — URI: " + metadataUrl);
@@ -310,11 +317,13 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 lastStatus,
                 List.of());
         if (lastStatus == MetadataStatus.MISSING) {
-            putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", source, now.plus(NEGATIVE_TTL), lastStatus, false));
+            Duration negativeTtl = CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_NEGATIVE_TTL, DEFAULT_NEGATIVE_TTL);
+            putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", source, now.plus(negativeTtl), lastStatus, false));
             LOGGER.info(() -> "Stored negative Maven version cache entry for " + cacheKey + " from " + source);
         } else {
             MetadataStatus errorStatus = lastStatus;
-            putCache(cacheKey, CacheEntry.error(List.of(), "unknown", source, now.plus(ERROR_TTL), errorStatus, false));
+            Duration errorTtl = CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_ERROR_TTL, DEFAULT_ERROR_TTL);
+            putCache(cacheKey, CacheEntry.error(List.of(), "unknown", source, now.plus(errorTtl), errorStatus, false));
             LOGGER.info(() -> "Stored error Maven version cache entry for " + cacheKey + " from " + source + " status=" + errorStatus);
         }
         return metadata;
@@ -340,7 +349,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH,
                 sortedAscending(versionsForRec));
         // Use a short TTL for artifacts not on Maven Central (internal/local); they can change frequently.
-        Duration ttl = isCentralUrl(source) || existsOnCentral(coordinate) ? FRESH_TTL : LOCAL_TTL;
+        boolean central = isCentralUrl(source) || existsOnCentral(coordinate);
+        Duration ttl = central
+                ? CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_FRESH_TTL, DEFAULT_FRESH_TTL)
+                : CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_LOCAL_TTL, DEFAULT_LOCAL_TTL);
         boolean persisted = putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
         if (persisted) {
             LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
