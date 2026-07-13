@@ -73,7 +73,7 @@ In the analysis, adjust target versions in the dropdowns and click **Apply selec
 2. Writes all POM changes to disk
 3. Builds again to confirm the changes produce a working build
 
-A progress overlay shows the current phase. If post-apply validation fails, RedKite reverts all POM changes and reports the failure with the attributed dependency where possible. If the project was already failing before apply, that is noted and the revert logic still runs.
+A progress overlay shows the current phase. If post-apply validation fails, RedKite reverts all POM changes and reports the failure with the attributed dependency where possible. If the project was already failing before apply, that is noted and the revert logic still runs. Once apply succeeds, RedKite automatically triggers a fresh analysis of the project so you can see whether any further fixes are needed.
 
 Version upgrades normalise any literal `<version>` tag to a `${artifactId.version}` property reference and set the property value to the chosen version. Dep-management pins and exclusions are written directly into the appropriate POM — conflict pins always use an explicit, hardcoded version number, never a `${...}` property reference.
 

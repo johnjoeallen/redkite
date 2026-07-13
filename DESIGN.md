@@ -638,6 +638,8 @@ Enforcer is skipped because enforcer violations are what RedKite is fixing — r
 {"status":"error","message":"..."}
 ```
 
+On `{"status":"done",...}` the browser calls `triggerScan()` for the same project path, kicking off a fresh analysis so the user can see whether further remediation is needed on top of what was just applied.
+
 The job is removed from the in-memory map after DONE/FAILED/ERROR is delivered.
 
 ---
