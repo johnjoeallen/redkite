@@ -14,5 +14,9 @@ public record VersionMetadata(
         String source,
         boolean complete,
         CacheState cacheState,
-        MetadataStatus status) implements Serializable {
+        MetadataStatus status,
+        /** Every known stable version, ascending — including versions below the currently
+         *  scanned version, which {@link #upgradePathVersions} omits. Used to search for a
+         *  downgrade that resolves a CVE with no available upgrade fix. */
+        List<String> allStableVersions) implements Serializable {
 }

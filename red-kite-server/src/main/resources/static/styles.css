@@ -90,7 +90,12 @@ a { color:inherit; text-decoration:none; }
 .version-choice.current { opacity:.8; }
 .version-choice.active { border-color: rgba(125,211,252,.65); background: rgba(125,211,252,.15); color: #d9f5ff; }
 .version-choice.cve { border-color: rgba(248,113,113,.6); }
-.version-choice .pill { display:inline-flex; align-items:center; justify-content:center; padding:2px 7px; border-radius:999px; background: rgba(255,255,255,.12); font-size:.72rem; text-transform:uppercase; }
+.pill { display:inline-flex; align-items:center; justify-content:center; padding:2px 7px; border-radius:999px; background: rgba(255,255,255,.12); font-size:.72rem; text-transform:uppercase; }
+.pill.sev-critical { background:rgba(220,38,38,.3); color:#fca5a5; }
+.pill.sev-high { background:rgba(234,88,12,.3); color:#fdba74; }
+.pill.sev-medium { background:rgba(234,179,8,.28); color:#fde68a; }
+.pill.sev-low { background:rgba(59,130,246,.28); color:#93c5fd; }
+.pill.sev-unknown { background:rgba(107,114,128,.28); color:#d1d5db; }
 .footer { margin-top:24px; color:var(--muted); font-size:.9rem; }
 .inventory-group.is-hidden, .inventory-row.is-hidden { display:none; }
 .rem-banner { padding:14px 18px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.02); margin-bottom:16px; display:flex; flex-direction:column; gap:10px; }

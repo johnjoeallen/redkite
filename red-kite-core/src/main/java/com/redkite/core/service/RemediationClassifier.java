@@ -4,6 +4,7 @@ import com.redkite.core.domain.*;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -51,47 +52,62 @@ public final class RemediationClassifier {
     }
 
     public static ReportSummary summarize(ScanReport report) {
-        Set<String> seen = new LinkedHashSet<>();
+        // Group by distinct dependency (coordinate + version), not by per-module ScanComponent
+        // instance — the same dependency resolved into many modules is one real dependency, not
+        // one per module. This keeps every number in the banner (totals, severities, reasons) on
+        // the same unit so they reconcile with each other.
+        Map<String, List<ScanComponent>> byDependency = new LinkedHashMap<>();
+        for (ScanComponent component : report.components()) {
+            String dependency = component.coordinate().groupId() + ":" + component.coordinate().artifactId()
+                    + "@" + component.version();
+            byDependency.computeIfAbsent(dependency, k -> new ArrayList<>()).add(component);
+        }
+
         int total = 0;
         int needsRemediationCount = 0;
         int snapshotCount = 0;
         int declaredVersionCount = 0;
         int staleMetadataCount = 0;
         int recommendationCount = 0;
-        Set<String> seenRecommended = new LinkedHashSet<>();
         Map<RemediationReason, List<String>> depsByReason = new EnumMap<>(RemediationReason.class);
 
-        for (ScanComponent component : report.components()) {
-            String key = uniqueKey(component);
-            if (!seen.add(key)) continue;
+        for (Map.Entry<String, List<ScanComponent>> entry : byDependency.entrySet()) {
+            String dependency = entry.getKey();
             total++;
-            RemediationStatus status = classify(component,
-                    report.vulnerabilityFindings(),
-                    report.recommendations(),
-                    report.metadataResults());
-            if (status.needsRemediation()) needsRemediationCount++;
-            String dependency = component.coordinate().groupId() + ":" + component.coordinate().artifactId()
-                    + "@" + component.version();
-            if (status.isSnapshot()) {
+            // A dependency can appear direct in one module and transitive in another, or have its
+            // metadata lookup succeed in one module and fail in another — combine every module
+            // occurrence with OR, so the dependency is flagged if any occurrence needs attention.
+            boolean needsRemediation = false, isSnapshot = false, hasDeclaredVersion = false,
+                    hasVulnerability = false, hasRecommendation = false, hasStaleMetadata = false;
+            for (ScanComponent component : entry.getValue()) {
+                RemediationStatus status = classify(component,
+                        report.vulnerabilityFindings(),
+                        report.recommendations(),
+                        report.metadataResults());
+                needsRemediation |= status.needsRemediation();
+                isSnapshot |= status.isSnapshot();
+                hasDeclaredVersion |= status.hasDeclaredVersionDeclaration();
+                hasVulnerability |= status.hasVulnerability();
+                hasRecommendation |= status.hasUpgradeRecommendation();
+                hasStaleMetadata |= status.hasStaleMetadata();
+            }
+            if (needsRemediation) needsRemediationCount++;
+            if (isSnapshot) {
                 snapshotCount++;
                 depsByReason.computeIfAbsent(RemediationReason.SNAPSHOT, k -> new ArrayList<>()).add(dependency);
             }
-            if (status.hasDeclaredVersionDeclaration()) {
+            if (hasDeclaredVersion) {
                 declaredVersionCount++;
                 depsByReason.computeIfAbsent(RemediationReason.DECLARED_VERSION, k -> new ArrayList<>()).add(dependency);
             }
             // Matches the "Upgrade recommended" reason in classify(): only counted here when it's
-            // not already covered by the vulnerability or snapshot buckets, so a component isn't
-            // double-labeled across banners for essentially the same underlying issue. Deduped by
-            // dependency (like the CVE severity counts below) — the same transitive dependency
-            // recommended for upgrade in many modules is one real upgrade opportunity, not one
-            // per module, so it should only be counted once here.
-            if (status.hasUpgradeRecommendation() && !status.hasVulnerability() && !status.isSnapshot()
-                    && seenRecommended.add(dependency)) {
+            // not already covered by the vulnerability or snapshot buckets, so a dependency isn't
+            // double-labeled across banners for essentially the same underlying issue.
+            if (hasRecommendation && !hasVulnerability && !isSnapshot) {
                 recommendationCount++;
                 depsByReason.computeIfAbsent(RemediationReason.UPGRADE_RECOMMENDED, k -> new ArrayList<>()).add(dependency);
             }
-            if (status.hasStaleMetadata()) {
+            if (hasStaleMetadata) {
                 staleMetadataCount++;
                 depsByReason.computeIfAbsent(RemediationReason.STALE_METADATA, k -> new ArrayList<>()).add(dependency);
             }
@@ -184,11 +200,5 @@ public final class RemediationClassifier {
                     STALE_USED, MISSING -> true;
             default -> false;
         };
-    }
-
-    private static String uniqueKey(ScanComponent c) {
-        return c.sourceFilePath() + "|"
-                + c.coordinate().groupId() + ":" + c.coordinate().artifactId()
-                + "|" + c.version() + "|" + c.direct();
     }
 }

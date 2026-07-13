@@ -13,7 +13,7 @@ class AdvisoryClassifierTest {
 
     private static VulnerabilityFinding finding(String severity) {
         return new VulnerabilityFinding("TEST-001", severity,
-                new ComponentCoordinate("com.example", "lib"), "1.0.0", null,
+                new ComponentCoordinate("com.example", "lib"), "1.0.0", null, null,
                 true, null, List.of(), null);
     }
 

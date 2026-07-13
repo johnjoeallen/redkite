@@ -1456,12 +1456,17 @@ public class RedKiteServerMain {
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
         Element root = doc.getDocumentElement();
 
-        // Collect <parent>, <dependency>, and <plugin> elements to patch
+        // Collect <parent>, <dependency>, and <plugin> elements to patch — excluding RedKite's own
+        // dependencyManagement pins, which always keep a hardcoded <version> by design (a pin is
+        // meant to be a single, self-contained, independently removable override; normalising it
+        // to a ${...} property here would entangle it with the project's own versioning scheme
+        // and defeat "remove this comment to stop RedKite managing it").
         NodeList allElements = doc.getElementsByTagName("*");
         List<Element> patchTargets = new ArrayList<>();
         for (int i = 0; i < allElements.getLength(); i++) {
             Node n = allElements.item(i);
             if (n instanceof Element e && ("parent".equals(e.getNodeName()) || "dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
+                if (isRedkiteDepMgmtPin(e)) continue;
                 patchTargets.add(e);
             }
         }
@@ -1565,6 +1570,20 @@ public class RedKiteServerMain {
             if ("version".equals(child.getNodeName())) return child;
         }
         return null;
+    }
+
+    /** Whether this &lt;dependency&gt; element is immediately preceded (ignoring whitespace) by a
+     *  RedKite dependency-management-pin marker comment. Matched by substring rather than the
+     *  full current tag text, so it still recognizes pins written by older RedKite versions that
+     *  used the marker before it was renamed to include " pin". */
+    private static boolean isRedkiteDepMgmtPin(Element dep) {
+        Node sibling = dep.getPreviousSibling();
+        while (sibling != null && sibling.getNodeType() == Node.TEXT_NODE && sibling.getTextContent().isBlank()) {
+            sibling = sibling.getPreviousSibling();
+        }
+        return sibling != null && sibling.getNodeType() == Node.COMMENT_NODE
+                && sibling.getTextContent() != null
+                && sibling.getTextContent().contains("redkite:dependency-management");
     }
 
     private static String assignPropName(String a, String g, Map<String, String> propNameForCoord) {
@@ -1904,13 +1923,17 @@ public class RedKiteServerMain {
     }
 
     private static String applyOverlayHtml() {
+        // No "N / M" count is shown here: applying is a single atomic operation (validate, write
+        // all changes, validate again), not a per-item loop, so there's no real item count to
+        // track — a static "0 / 0" was previously shown here regardless of progress, which was
+        // just wrong rather than merely uninformative. The progress bar instead reflects the
+        // three real phases (pre-validate/applying/post-validate) reported by the apply job.
         return "<div id=\"apply-overlay\" class=\"scan-overlay\" style=\"display:none\">"
              + "<div class=\"scan-overlay-box\">"
              + "<div style=\"display:flex;align-items:center;gap:10px\">"
              + "<div class=\"scan-spinner\"></div>"
              + "<span>Applying fixes…</span>"
              + "</div>"
-             + "<div id=\"apply-progress-count\" style=\"font-size:.85rem;color:var(--muted);font-weight:400\">0 / 0</div>"
              + "<div class=\"scan-phase-track\" style=\"width:300px\">"
              + "<div id=\"apply-progress-bar\" class=\"scan-phase-fill active\" style=\"width:0%\"></div>"
              + "</div>"
@@ -2240,15 +2263,19 @@ public class RedKiteServerMain {
             html.append("</select>");
         }
 
-        // Filter toggle: CVE | Conflict | Snapshot | Upgrade | Transitive | Clean | All
-        long cveCount = views.stream().filter(RedKiteServerMain::hasFixableCve).count();
+        // Filter toggle: CVE Upgrade | CVE Downgrade | CVE Nofix | Conflict | Snapshot | Upgrade | Transitive | Clean | All
+        long cveUpgradeCount = views.stream().filter(this::isCveFixByUpgrade).count();
+        long cveDowngradeCount = views.stream().filter(this::isCveFixByDowngrade).count();
+        long cveNofixCount = views.stream().filter(this::isCveNofix).count();
         long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
         long transitiveCount = views.stream().filter(v -> !v.component().direct() && !v.component().snapshot()).count();
         long cleanCount = views.stream().filter(this::isCardClean).count();
         long upgradeCount = views.stream().filter(v -> isUpgradeRecommendedOnly(v.status())).count();
         html.append("<div class=\"rem-toggle\">");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cve\" onclick=\"setRemediationMode('cve')\">CVE <span class=\"tab-count\">").append(cveCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cveupgrade\" onclick=\"setRemediationMode('cveupgrade')\">CVE Upgrade <span class=\"tab-count\">").append(cveUpgradeCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cvedowngrade\" onclick=\"setRemediationMode('cvedowngrade')\">CVE Downgrade <span class=\"tab-count\">").append(cveDowngradeCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cvenofix\" onclick=\"setRemediationMode('cvenofix')\">CVE Nofix <span class=\"tab-count\">").append(cveNofixCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"conflict\" onclick=\"setRemediationMode('conflict')\">&#9651; Conflict <span class=\"tab-count\">").append(conflictCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
         html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable <span class=\"tab-count\" id=\"upg-all-count\">").append(upgradeCount).append("</span></button>");
@@ -2457,12 +2484,37 @@ public class RedKiteServerMain {
         return sb.toString();
     }
 
-    /** Whether a vulnerability on this component has a fix available via an upgrade — i.e. an
-     *  UpgradeRecommendation was resolved for it. Recommendations are only ever created with
-     *  reason CVE_FIX when the component has a vulnerability, so the presence of a recommendation
-     *  here is sufficient without checking the reason explicitly. */
-    private static boolean hasFixableCve(ComponentView view) {
-        return view.status().hasVulnerability() && view.recommendation() != null;
+    /** A CVE resolved by upgrading — tier 1 (RecommendationReason.CVE_FIX), or tier 3 best-effort
+     *  when its suggested target happens to be above the current version. */
+    private boolean isCveFixByUpgrade(ComponentView view) {
+        if (!view.status().hasVulnerability() || view.recommendation() == null) return false;
+        RecommendationReason reason = view.recommendation().reason();
+        if (reason == RecommendationReason.CVE_FIX) return true;
+        return reason == RecommendationReason.CVE_BEST_EFFORT
+                && compareVersionsSemantic(view.recommendation().targetVersion(), view.component().version()) > 0;
+    }
+
+    /** A CVE with no upgrade fix, resolved by downgrading — tier 2 (CVE_FIX_DOWNGRADE), or tier 3
+     *  best-effort when its suggested target happens to be below the current version. */
+    private boolean isCveFixByDowngrade(ComponentView view) {
+        if (!view.status().hasVulnerability() || view.recommendation() == null) return false;
+        RecommendationReason reason = view.recommendation().reason();
+        if (reason == RecommendationReason.CVE_FIX_DOWNGRADE) return true;
+        return reason == RecommendationReason.CVE_BEST_EFFORT
+                && compareVersionsSemantic(view.recommendation().targetVersion(), view.component().version()) < 0;
+    }
+
+    /** Whether a vulnerability on this component has any recommended target version — a full fix
+     *  (upgrade/downgrade) or a best-effort suggestion, which is folded into whichever of those
+     *  two directions its target version actually moves. */
+    private boolean hasFixableCve(ComponentView view) {
+        return isCveFixByUpgrade(view) || isCveFixByDowngrade(view);
+    }
+
+    /** A CVE with no recommendation at all — no upgrade, no downgrade, and no best-effort
+     *  candidate beat the current version's own severity. Genuinely nothing to suggest. */
+    private boolean isCveNofix(ComponentView view) {
+        return view.status().hasVulnerability() && view.recommendation() == null;
     }
 
     /** Matches the "Upgrade recommended" reason counted in RemediationClassifier.summarize() —
@@ -2501,14 +2553,17 @@ public class RedKiteServerMain {
         boolean actionableConvergence = view.convergenceFinding() != null;
         String conflictJson = actionableConvergence ? buildConflictJson(view.convergenceFinding()) : "";
         boolean dataClean = isCardClean(view);
-        // CVE tab membership = has a vulnerability AND a fix is available via upgrade. A
-        // component with an unfixable or not-yet-fixable CVE is excluded here (it still shows
-        // under "All"), and isCardClean() guarantees clean/hasvuln stay mutually exclusive.
-        boolean dataHasVuln = hasFixableCve;
+        // Three-way CVE fix status. isCardClean() guarantees clean and any of these three stay
+        // mutually exclusive, and every vulnerable component falls into exactly one of them.
+        boolean dataCveUpgrade = isCveFixByUpgrade(view);
+        boolean dataCveDowngrade = isCveFixByDowngrade(view);
+        boolean dataCveNofix = isCveNofix(view);
         html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
-                .append("\" data-hasvuln=\"").append(dataHasVuln)
+                .append("\" data-cveupgrade=\"").append(dataCveUpgrade)
+                .append("\" data-cvedowngrade=\"").append(dataCveDowngrade)
+                .append("\" data-cvenofix=\"").append(dataCveNofix)
                 .append("\" data-upgradeonly=\"").append(upgradeOnly)
                 .append("\" data-hasconflict=\"").append(actionableConvergence)
                 .append("\" data-coord=\"").append(escape(coordStr))
@@ -2538,7 +2593,12 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-meta\">");
         html.append("<span>Current: <strong>").append(escape(comp.version() != null ? comp.version() : "unknown")).append("</strong></span>");
         if (view.recommendation() != null && !status.isSnapshot()) {
-            html.append("<span>&rarr; Recommended: <strong>").append(escape(view.recommendation().targetVersion())).append("</strong></span>");
+            String recLabel = switch (view.recommendation().reason()) {
+                case CVE_FIX_DOWNGRADE -> "Downgrade to";
+                case CVE_BEST_EFFORT -> "Best available";
+                default -> "Recommended";
+            };
+            html.append("<span>&rarr; ").append(recLabel).append(": <strong>").append(escape(view.recommendation().targetVersion())).append("</strong></span>");
         }
         if (view.versionMetadata() != null && view.versionMetadata().latestVersion() != null
                 && !view.versionMetadata().latestVersion().isBlank()
@@ -2570,26 +2630,39 @@ public class RedKiteServerMain {
                 html.append("<span class=\"reason-chip\">").append(escape(reason)).append("</span>");
             }
             if (showUpgradeBtn) {
+                RecommendationReason recReason = view.recommendation().reason();
+                String verb = switch (recReason) {
+                    case CVE_FIX_DOWNGRADE -> "Downgrade to";
+                    case CVE_BEST_EFFORT -> "Best available:";
+                    default -> "Upgrade to";
+                };
                 if (comp.direct()) {
                     html.append("<button class=\"reason-chip reason-chip-btn\" type=\"button\" onclick=\"applyUpgrade(")
                         .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
-                        .append("Upgrade to ").append(escape(view.recommendation().targetVersion())).append("</button>");
+                        .append(verb).append(" ").append(escape(view.recommendation().targetVersion())).append("</button>");
                 } else {
-                    String transitiveChip = view.canUpgradeViaDirect() ? "Upgrade available" : "Major upgrade available";
+                    String transitiveChip = switch (recReason) {
+                        case CVE_FIX_DOWNGRADE -> "Downgrade available";
+                        case CVE_BEST_EFFORT -> "Lower-severity version available";
+                        default -> view.canUpgradeViaDirect() ? "Upgrade available" : "Major upgrade available";
+                    };
                     html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");
                 }
             } else if (showNoUpgradeChip) {
-                html.append("<span class=\"reason-chip\">No upgrade available</span>");
+                String noFixChip = status.hasVulnerability() ? "No fix available" : "No upgrade available";
+                html.append("<span class=\"reason-chip\">").append(noFixChip).append("</span>");
             }
             html.append("</div>");
         }
 
         // Show version selector for: direct deps with metadata or conflict, transitive conflict deps,
-        // and transitive deps with a fixable CVE or a plain upgrade recommendation (either way,
-        // there's a concrete target version to apply).
+        // and transitive deps with a fixable CVE (upgrade, downgrade, or best-effort — hasFixableCve
+        // covers all three) or a plain upgrade recommendation — in every case there's a concrete
+        // target version to apply.
         boolean showVersionSelector = view.convergenceFinding() != null
                 || (comp.direct() && view.versionMetadata() != null)
-                || (!comp.direct() && (hasFixableCve || isUpgradeRecommendedOnly(status)) && view.versionMetadata() != null);
+                || (!comp.direct() && (hasFixableCve || isUpgradeRecommendedOnly(status))
+                    && view.versionMetadata() != null);
         if (showVersionSelector) {
             html.append("<div class=\"rem-actions\">");
             if (comp.direct()) {
@@ -2605,7 +2678,7 @@ public class RedKiteServerMain {
                     selectedVersion = view.recommendation().targetVersion();
                 }
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), view.recommendation(), view.findings(), false, directConflictVersions,
+                        view.versionMetadata(), view.recommendation(), false, directConflictVersions,
                         view.convergenceFinding() != null));
             } else if (view.versionMetadata() != null || view.convergenceFinding() != null) {
                 String selectorId = "view_" + comp.id();
@@ -2621,7 +2694,7 @@ public class RedKiteServerMain {
                     selectedVersion = view.recommendation().targetVersion();
                 }
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), view.recommendation(), view.findings(), false,
+                        view.versionMetadata(), view.recommendation(), false,
                         conflictVersions, true));
             }
             html.append("</div>");
@@ -2679,7 +2752,7 @@ public class RedKiteServerMain {
 
     private String renderVersionSelect(String selectorId, ComponentCoordinate coordinate, String currentVersion,
             String selectedVersion, MetadataResult versionMetadata, UpgradeRecommendation recommendation,
-            List<VulnerabilityFinding> vulnFindings, boolean includeNameAttr, List<String> conflictVersions,
+            boolean includeNameAttr, List<String> conflictVersions,
             boolean includeCurrentOption) {
         List<String> choices = versionChoices(versionMetadata, recommendation);
         // Build deduplicated ordered set: recommended first, then choices, then latest
@@ -2718,10 +2791,14 @@ public class RedKiteServerMain {
 
         // Show current version chip
         if (currentVersion != null && !currentVersion.isBlank()) {
-            boolean currentHasCve = hasCveForVersion(coordinate, currentVersion, vulnFindings);
+            AdvisorySeverity currentSeverity = severityForVersion(coordinate, currentVersion);
+            boolean currentHasCve = currentSeverity != AdvisorySeverity.NONE;
             html.append("<span class=\"version-current").append(currentHasCve ? " cve" : "").append("\">");
             html.append(escape(currentVersion));
-            if (currentHasCve) html.append("<span class=\"pill\">CVE</span>");
+            if (currentHasCve) {
+                html.append("<span class=\"pill sev-").append(currentSeverity.name().toLowerCase())
+                        .append("\">").append(escape(currentSeverity.label())).append("</span>");
+            }
             html.append("</span>");
             html.append("<span style=\"color:var(--muted)\">&#8594;</span>");
         }
@@ -2751,9 +2828,9 @@ public class RedKiteServerMain {
         // Blank placeholder shown only when nothing is pre-selected
         html.append("<option value=\"\"").append(hasPreSelection ? "" : " selected").append(">No change</option>");
         for (String version : sortedVersions) {
-            boolean hasCve = hasCveForVersion(coordinate, version, vulnFindings);
+            AdvisorySeverity severity = severityForVersion(coordinate, version);
             String label = buildVersionOptionLabel(version, recommendedVersion, latestVersion, latestSameMajor,
-                    recommendation != null ? recommendation.reason() : null, hasCve, currentVersion,
+                    recommendation != null ? recommendation.reason() : null, severity, currentVersion,
                     conflictSet.contains(version), includeCurrentOption && version.equals(currentVersion));
             html.append("<option value=\"").append(escape(version)).append("\"")
                     .append(hasPreSelection && version.equals(preSelectedVersion) ? " selected" : "")
@@ -2765,19 +2842,27 @@ public class RedKiteServerMain {
     }
 
     private String buildVersionOptionLabel(String version, String recommendedVersion, String latestVersion,
-            String latestSameMajor, RecommendationReason reason, boolean hasCve, String currentVersion,
+            String latestSameMajor, RecommendationReason reason, AdvisorySeverity severity, String currentVersion,
             boolean isConflictVersion, boolean isCurrentVersion) {
         List<String> tags = new ArrayList<>();
         if (isCurrentVersion) tags.add("current");
         if (version.equals(recommendedVersion)) {
             tags.add("recommended");
-            if (reason == RecommendationReason.CVE_FIX) tags.add("fixes CVE");
+            if (reason == RecommendationReason.CVE_FIX || reason == RecommendationReason.CVE_FIX_DOWNGRADE) {
+                tags.add("fixes CVE");
+            } else if (reason == RecommendationReason.CVE_BEST_EFFORT) {
+                tags.add("lowest known severity");
+            }
         }
         if (version.equals(latestVersion)) tags.add("latest");
         if (version.equals(latestSameMajor) && !version.equals(latestVersion)) {
             tags.add(sameMajorMinor(version, currentVersion) ? "latest same minor" : "latest same major");
         }
-        if (hasCve) tags.add("vulnerable");
+        // Show the actual severity level rather than a generic "vulnerable" flag, so a Low CVE
+        // doesn't read the same as a Critical one when comparing candidates in the dropdown.
+        if (severity != null && severity != AdvisorySeverity.NONE) {
+            tags.add(severity.label().toLowerCase() + " severity");
+        }
         if (isConflictVersion) tags.add("conflict");
         if (version.contains("-SNAPSHOT") || version.contains("-alpha") || version.contains("-beta") || version.contains("-rc")) {
             tags.add("pre-release");
@@ -2974,7 +3059,6 @@ public class RedKiteServerMain {
         }
         Map<Long, UpgradeRecommendation> recommendationByComponent = new LinkedHashMap<>();
         Map<Long, MetadataResult> versionMetadataByComponent = new LinkedHashMap<>();
-        Map<String, List<VulnerabilityFinding>> vulnerabilitiesByComponent = new LinkedHashMap<>();
         for (UpgradeRecommendation recommendation : report.recommendations()) {
             if (!recommendation.affectedComponentIds().isEmpty()) {
                 recommendationByComponent.put(recommendation.affectedComponentIds().get(0), recommendation);
@@ -2986,10 +3070,6 @@ public class RedKiteServerMain {
             if (metadataResult.metadataType() == MetadataType.VERSION) {
                 versionMetadataByComponent.put(metadataResult.componentId(), metadataResult);
             }
-        }
-        for (VulnerabilityFinding finding : report.vulnerabilityFindings()) {
-            String key = finding.coordinate().groupId() + ":" + finding.coordinate().artifactId() + "@" + finding.affectedVersion();
-            vulnerabilitiesByComponent.computeIfAbsent(key, k -> new ArrayList<>()).add(finding);
         }
         Map<String, ScanComponent> unique = new LinkedHashMap<>();
         for (ScanComponent component : components) {
@@ -3038,7 +3118,7 @@ public class RedKiteServerMain {
                 html.append("<div class=\"inventory-main\">");
                 html.append("<div class=\"inventory-title\">").append(escape(component.coordinate().groupId() + ":" + component.coordinate().artifactId())).append("</div>");
                 html.append("<div class=\"inventory-subtitle\">current ").append(escape(component.version())).append("</div>");
-                html.append(renderVersionButtonGroup(component.coordinate(), component.version(), component.id(), versionMetadata, recommendation, versionChoices(versionMetadata, recommendation), recommendation == null ? component.version() : recommendation.targetVersion(), vulnerabilitiesByComponent.get(component.coordinate().groupId() + ":" + component.coordinate().artifactId() + "@" + component.version()), false));
+                html.append(renderVersionButtonGroup(component.coordinate(), component.version(), component.id(), versionMetadata, recommendation, versionChoices(versionMetadata, recommendation), recommendation == null ? component.version() : recommendation.targetVersion(), false));
                 html.append("</div>");
                 html.append("<div class=\"inventory-badges\">");
                 html.append("<span class=\"badge ").append(component.snapshot() ? "warn" : component.direct() ? "success" : "neutral").append("\">");
@@ -3427,7 +3507,7 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
-    private String renderVersionButtonGroup(ComponentCoordinate coordinate, String currentVersion, long selectorKey, MetadataResult versionMetadata, UpgradeRecommendation recommendation, List<String> choices, String selectedVersion, List<VulnerabilityFinding> vulnerabilityFindings, boolean includeHiddenInput) {
+    private String renderVersionButtonGroup(ComponentCoordinate coordinate, String currentVersion, long selectorKey, MetadataResult versionMetadata, UpgradeRecommendation recommendation, List<String> choices, String selectedVersion, boolean includeHiddenInput) {
         StringBuilder html = new StringBuilder();
         String selectorId = "targetVersion_" + selectorKey;
         boolean snapshot = (currentVersion != null && currentVersion.contains("SNAPSHOT")) || (recommendation != null && recommendation.reason() == RecommendationReason.SNAPSHOT_REPLACEMENT);
@@ -3442,8 +3522,8 @@ public class RedKiteServerMain {
             return html.toString();
         }
         if (currentVersion != null && !currentVersion.isBlank()) {
-            boolean currentCve = hasCveForVersion(coordinate, currentVersion, vulnerabilityFindings);
-            html.append(versionChoiceButton(selectorId, currentVersion, currentVersion, currentVersion.equals(selectedVersion), currentCve, true));
+            AdvisorySeverity currentSeverity = severityForVersion(coordinate, currentVersion);
+            html.append(versionChoiceButton(selectorId, currentVersion, currentVersion, currentVersion.equals(selectedVersion), currentSeverity, true));
         }
         java.util.LinkedHashSet<String> ordered = new java.util.LinkedHashSet<>();
         if (recommendation != null && recommendation.targetVersion() != null && !recommendation.targetVersion().isBlank()) {
@@ -3460,8 +3540,8 @@ public class RedKiteServerMain {
                 continue;
             }
             boolean active = selectedVersion != null && selectedVersion.equals(version);
-            boolean cve = hasCveForVersion(coordinate, version, vulnerabilityFindings);
-            html.append(versionChoiceButton(selectorId, version, version, active, cve, false));
+            AdvisorySeverity severity = severityForVersion(coordinate, version);
+            html.append(versionChoiceButton(selectorId, version, version, active, severity, false));
         }
         if (includeHiddenInput) {
             html.append("<input type=\"hidden\" id=\"").append(escape(selectorId)).append("\" name=\"").append(escape(selectorId)).append("\" value=\"").append(escape(selectedVersion == null ? "" : selectedVersion)).append("\"/>");
@@ -3470,7 +3550,8 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
-    private String versionChoiceButton(String selectorId, String version, String label, boolean active, boolean cve, boolean current) {
+    private String versionChoiceButton(String selectorId, String version, String label, boolean active, AdvisorySeverity severity, boolean current) {
+        boolean cve = severity != null && severity != AdvisorySeverity.NONE;
         StringBuilder html = new StringBuilder();
         html.append("<button type=\"button\" class=\"version-choice");
         if (current) {
@@ -3485,7 +3566,8 @@ public class RedKiteServerMain {
         html.append("\" data-version=\"").append(escape(version)).append("\" onclick=\"selectVersionChoice(this, '").append(escape(selectorId)).append("')\">");
         html.append(escape(label));
         if (cve) {
-            html.append("<span class=\"pill\">CVE</span>");
+            html.append("<span class=\"pill sev-").append(severity.name().toLowerCase())
+                    .append("\">").append(escape(severity.label())).append("</span>");
         }
         html.append("</button>");
         return html.toString();
@@ -3500,22 +3582,18 @@ public class RedKiteServerMain {
         return false;
     }
 
-    private boolean hasCveForVersion(ComponentCoordinate coordinate, String candidateVersion, List<VulnerabilityFinding> findings) {
-        if (coordinate == null || candidateVersion == null || candidateVersion.isBlank() || findings == null || findings.isEmpty()) {
-            return false;
+    /** Highest known severity for a specific candidate version (not just the currently-scanned
+     *  one) — a real per-version lookup (cached, so repeat renders and versions already checked
+     *  during the scan's CVE fix resolution are typically free) rather than string-matching
+     *  against the current version's own findings, which could never be true for any other
+     *  version in the dropdown and made every non-current choice look falsely clean. Returns
+     *  the actual severity level rather than a boolean so the dropdown can distinguish a Low
+     *  residual CVE from a Critical one instead of showing them identically. */
+    private AdvisorySeverity severityForVersion(ComponentCoordinate coordinate, String candidateVersion) {
+        if (coordinate == null || candidateVersion == null || candidateVersion.isBlank()) {
+            return AdvisorySeverity.NONE;
         }
-        for (VulnerabilityFinding finding : findings) {
-            if (finding == null || finding.coordinate() == null) {
-                continue;
-            }
-            if (!coordinate.groupId().equals(finding.coordinate().groupId()) || !coordinate.artifactId().equals(finding.coordinate().artifactId())) {
-                continue;
-            }
-            if (candidateVersion.equals(finding.affectedVersion())) {
-                return true;
-            }
-        }
-        return false;
+        return AdvisoryClassifier.highest(store.vulnerabilityProvider.vulnerabilities(coordinate, candidateVersion));
     }
 
     private List<String> versionChoices(MetadataResult versionMetadata, UpgradeRecommendation recommendation) {
@@ -3540,11 +3618,40 @@ public class RedKiteServerMain {
                     && !isPreRelease(versionMetadata.latestVersion())) {
                 choices.add(versionMetadata.latestVersion());
             }
+            // Also offer older releases, not just the automated upgrade/downgrade path, so the
+            // user can always manually pick something different — the algorithm's choice is a
+            // default, not the only option. Capped to the N closest below the current version
+            // (configurable, default 10) rather than the entire release history, which for a
+            // long-lived library can run to hundreds of entries and swamp the dropdown.
+            if (versionMetadata.allStableVersions() != null && versionMetadata.currentVersion() != null) {
+                List<String> olderVersions = new ArrayList<>();
+                for (String version : versionMetadata.allStableVersions()) {
+                    if (version == null || version.isBlank() || isPreRelease(version)) continue;
+                    if (compareVersionsSemantic(version, versionMetadata.currentVersion()) < 0) {
+                        olderVersions.add(version);
+                    }
+                }
+                olderVersions.sort((a, b) -> compareVersionsSemantic(b, a)); // descending — closest first
+                for (int i = 0; i < Math.min(versionLookbackLimit(), olderVersions.size()); i++) {
+                    choices.add(olderVersions.get(i));
+                }
+            }
         }
         if (recommendation != null && recommendation.currentVersion() != null) {
             choices.remove(recommendation.currentVersion());
         }
         return List.copyOf(choices);
+    }
+
+    /** How many older releases the version-selector dropdown offers below the current version.
+     *  Read fresh on each call (cheap) rather than cached, so it can be changed without a
+     *  restart. Defaults to 10; override with -Dredkite.version.lookback=N. */
+    private static int versionLookbackLimit() {
+        try {
+            return Integer.parseInt(System.getProperty("redkite.version.lookback", "10"));
+        } catch (NumberFormatException e) {
+            return 10;
+        }
     }
 
     private static boolean isPreRelease(String version) {
@@ -3560,6 +3667,8 @@ public class RedKiteServerMain {
     private String reasonLabel(RecommendationReason reason) {
         return switch (reason) {
             case CVE_FIX -> "CVE FIX";
+            case CVE_FIX_DOWNGRADE -> "CVE FIX (DOWNGRADE)";
+            case CVE_BEST_EFFORT -> "CVE BEST EFFORT";
             case PATCH_AVAILABLE -> "UPGRADE";
             case MINOR_AVAILABLE -> "MINOR";
             case MAJOR_AVAILABLE -> "MAJOR";
@@ -3824,7 +3933,7 @@ public class RedKiteServerMain {
         }
 
         private MetadataResult withScanId(MetadataResult result, String scanId) {
-            return new MetadataResult(scanId, result.componentId(), result.metadataType(), result.provider(), result.currentVersion(), result.latestVersion(), result.latestSameMajorVersion(), result.upgradePathVersions(), result.complete(), result.status(), result.cacheState(), result.lastSuccessfulCheckAt(), result.cacheExpiryAt(), result.attemptedRefreshAt(), result.suggestedRetryAt(), result.message());
+            return new MetadataResult(scanId, result.componentId(), result.metadataType(), result.provider(), result.currentVersion(), result.latestVersion(), result.latestSameMajorVersion(), result.upgradePathVersions(), result.allStableVersions(), result.complete(), result.status(), result.cacheState(), result.lastSuccessfulCheckAt(), result.cacheExpiryAt(), result.attemptedRefreshAt(), result.suggestedRetryAt(), result.message());
         }
 
         private void persistMetadataCache(Connection connection, ScanReport report) throws SQLException {
@@ -3913,15 +4022,15 @@ public class RedKiteServerMain {
                     String target = component.version() == null ? "1.0.0" : component.version().replace("-SNAPSHOT", "");
                     recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, RecommendationReason.SNAPSHOT_REPLACEMENT, RiskLevel.MAJOR, RecommendationConfidence.MEDIUM, List.of(), List.of(component.id())));
                     LOGGER.info(() -> "No Maven/CVE verification attempted for SNAPSHOT component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
-                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
-                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                 } else {
                     VersionMetadata versionMetadata = versionMap.get(component.id());
                     LOGGER.info(() -> "Maven version metadata for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => latest=" + versionMetadata.latestVersion() + ", sameMajor=" + versionMetadata.latestSameMajorVersion() + ", complete=" + versionMetadata.complete() + ", status=" + versionMetadata.status());
                     String versionMessage = versionMetadata.complete()
                             ? "Latest Maven release is " + versionMetadata.latestVersion() + "."
                             : "No cached Maven metadata was available; version is unknown.";
-                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, versionMetadata.source(), component.version(), versionMetadata.latestVersion(), versionMetadata.latestSameMajorVersion(), versionMetadata.upgradePathVersions(), versionMetadata.complete(), versionMetadata.status(), versionMetadata.cacheState(), versionMetadata.checkedAt(), null, Instant.now(), null, versionMessage));
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, versionMetadata.source(), component.version(), versionMetadata.latestVersion(), versionMetadata.latestSameMajorVersion(), versionMetadata.upgradePathVersions(), versionMetadata.allStableVersions(), versionMetadata.complete(), versionMetadata.status(), versionMetadata.cacheState(), versionMetadata.checkedAt(), null, Instant.now(), null, versionMessage));
                     if (!versionMetadata.complete()) {
                         complete = false;
                     }
@@ -3931,18 +4040,28 @@ public class RedKiteServerMain {
                     String vulnMessage = hasVulns
                             ? "Found " + compVulns.size() + " vulnerabilit" + (compVulns.size() == 1 ? "y" : "ies") + "."
                             : "No known vulnerabilities.";
-                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "osv.dev", component.version(), "unknown", "unknown", List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, vulnMessage));
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "osv.dev", component.version(), "unknown", "unknown", List.of(), List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, vulnMessage));
                     for (VulnerabilityFinding f : compVulns) {
-                        vulnerabilityFindings.add(new VulnerabilityFinding(f.advisoryId(), f.severity(), f.coordinate(), f.affectedVersion(), f.fixedVersion(), component.direct(), component.owningVersionControlPoint(), f.cves(), null));
+                        vulnerabilityFindings.add(new VulnerabilityFinding(f.advisoryId(), f.severity(), f.coordinate(), f.affectedVersion(), f.fixedVersion(), f.introducedVersion(), component.direct(), component.owningVersionControlPoint(), f.cves(), null));
                     }
 
-                    if (versionMetadata.complete() && canPlanUpgrade(component)) {
+                    if (versionMetadata.complete() && canPlanUpgrade(component) && hasVulns) {
+                        CveFixResult fix = resolveCveFix(component, compVulns, versionMetadata, input.allowMajorUpgrades());
+                        if (fix != null) {
+                            RiskLevel risk = component.direct() ? upgradeRisk(component.version(), fix.target()) : RiskLevel.ELEVATED;
+                            recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(),
+                                    fix.target(), fix.reason(), risk, RecommendationConfidence.HIGH, List.of(), List.of(component.id())));
+                            LOGGER.info(() -> "Resolved CVE fix (" + fix.reason() + ") for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => " + component.version() + " -> " + fix.target());
+                        } else {
+                            LOGGER.info(() -> "No CVE fix found (upgrade, downgrade, or best-effort) for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
+                        }
+                    } else if (versionMetadata.complete() && canPlanUpgrade(component)) {
                         String target = selectUpgradeTarget(component.version(), versionMetadata);
                         if (target != null && isUpgradeable(component.version(), target)) {
                             if (!input.allowMajorUpgrades() && isMajorUpgrade(component.version(), target)) {
                                 LOGGER.info(() -> "Skipping major upgrade recommendation for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " because the scan did not allow major upgrades");
                             } else {
-                                RecommendationReason reason = hasVulns ? RecommendationReason.CVE_FIX : upgradeReason(component.version(), target);
+                                RecommendationReason reason = upgradeReason(component.version(), target);
                                 RiskLevel risk = component.direct() ? upgradeRisk(component.version(), target) : RiskLevel.ELEVATED;
                                 RecommendationConfidence confidence = RecommendationConfidence.HIGH;
                                 recs.add(new UpgradeRecommendation(component.id(), component.coordinate(), component.version(), target, reason, risk, confidence, List.of(), List.of(component.id())));
@@ -3980,6 +4099,8 @@ public class RedKiteServerMain {
                 case MINOR_AVAILABLE -> "A newer minor release is available: " + target + ".";
                 case MAJOR_AVAILABLE -> "A newer major release is available: " + target + ".";
                 case CVE_FIX -> "A fixed release is available: " + target + ".";
+                case CVE_FIX_DOWNGRADE -> "No upgrade fixes this CVE; downgrading to " + target + " avoids it.";
+                case CVE_BEST_EFFORT -> "No version fully resolves this CVE; " + target + " has the lowest known severity.";
                 case SNAPSHOT_REPLACEMENT -> "Use release.";
             };
         }
@@ -4058,6 +4179,172 @@ public class RedKiteServerMain {
                 return RiskLevel.MINOR;
             }
             return RiskLevel.PATCH;
+        }
+
+        private record CveFixResult(String target, RecommendationReason reason) {}
+
+        /**
+         * Resolves a fix for a vulnerable component's CVE(s): tries an upgrade first (the smallest
+         * version at or above every finding's fixedVersion), then a downgrade (the largest version
+         * below every finding's introducedVersion) if no upgrade clears all findings, then a bounded
+         * best-effort search of nearby versions for the lowest residual severity. Returns null only
+         * when the current version is already the best available.
+         */
+        /** Bounds how many candidates each tier will verify with a live vulnerability query, so
+         *  a component with a genuinely unfixable CVE doesn't trigger unbounded OSV lookups. */
+        private static final int MAX_FIX_VERIFY_CANDIDATES = 6;
+
+        private CveFixResult resolveCveFix(ScanComponent component, List<VulnerabilityFinding> compVulns,
+                VersionMetadata versionMetadata, boolean allowMajorUpgrades) {
+            String current = component.version();
+            List<String> allVersions = versionMetadata.allStableVersions() == null
+                    ? List.of() : versionMetadata.allStableVersions();
+
+            String upgradeTarget = smallestCleanUpgrade(component, current, compVulns, allVersions, allowMajorUpgrades);
+            if (upgradeTarget != null) {
+                return new CveFixResult(upgradeTarget, RecommendationReason.CVE_FIX);
+            }
+
+            String downgradeTarget = largestCleanDowngrade(component, current, compVulns, allVersions);
+            if (downgradeTarget != null) {
+                return new CveFixResult(downgradeTarget, RecommendationReason.CVE_FIX_DOWNGRADE);
+            }
+
+            String bestEffort = bestEffortLowestSeverity(component, current, allVersions);
+            if (bestEffort != null) {
+                return new CveFixResult(bestEffort, RecommendationReason.CVE_BEST_EFFORT);
+            }
+            return null;
+        }
+
+        /** Smallest available version that clears every finding's fixedVersion AND is itself
+         *  verified free of any known vulnerability (a version can escape *this* CVE's range
+         *  while carrying an entirely unrelated one of its own, especially further from current).
+         *  Null if any finding has no known fixedVersion (open-ended — upgrading can never
+         *  resolve it), or no verified-clean candidate is found within the search bound. */
+        private String smallestCleanUpgrade(ScanComponent component, String current,
+                List<VulnerabilityFinding> compVulns, List<String> allVersions, boolean allowMajorUpgrades) {
+            String requiredFix = null;
+            for (VulnerabilityFinding f : compVulns) {
+                if (f.fixedVersion() == null || f.fixedVersion().isBlank()) return null;
+                if (requiredFix == null || compareVersions(f.fixedVersion(), requiredFix) > 0) {
+                    requiredFix = f.fixedVersion();
+                }
+            }
+            if (requiredFix == null) return null;
+            List<String> candidates = new ArrayList<>();
+            for (String v : allVersions) {
+                if (isPreRelease(v) || compareVersions(v, requiredFix) < 0) continue;
+                if (!allowMajorUpgrades && isMajorUpgrade(current, v)) continue;
+                candidates.add(v);
+            }
+            candidates.sort(this::compareVersions); // ascending — verify the smallest (closest) first
+            return firstVerifiedClean(component, candidates);
+        }
+
+        /** Largest available version strictly below every finding's introducedVersion — the
+         *  newest release that predates the CVE being introduced — AND itself verified free of
+         *  any known vulnerability (older releases are especially likely to carry their own,
+         *  unrelated CVEs, so escaping this advisory's range is not sufficient on its own). Null
+         *  if any finding has no known introducedVersion (affected since the dependency's first
+         *  release — no downgrade can help), or no verified-clean candidate is found.*/
+        private String largestCleanDowngrade(ScanComponent component, String current,
+                List<VulnerabilityFinding> compVulns, List<String> allVersions) {
+            String requiredBelow = null;
+            for (VulnerabilityFinding f : compVulns) {
+                if (f.introducedVersion() == null || f.introducedVersion().isBlank()) return null;
+                if (requiredBelow == null || compareVersions(f.introducedVersion(), requiredBelow) < 0) {
+                    requiredBelow = f.introducedVersion();
+                }
+            }
+            if (requiredBelow == null) return null;
+            List<String> candidates = new ArrayList<>();
+            for (String v : allVersions) {
+                if (isPreRelease(v) || compareVersions(v, current) >= 0) continue;
+                if (compareVersions(v, requiredBelow) >= 0) continue;
+                candidates.add(v);
+            }
+            candidates.sort((a, b) -> compareVersions(b, a)); // descending — verify the largest (closest) first
+            return firstVerifiedClean(component, candidates);
+        }
+
+        /** Walks candidates in the order given, querying live vulnerability data for each (cached
+         *  thereafter) until one comes back with zero findings, bounded to avoid unbounded lookups
+         *  against a component with no genuinely clean version nearby. */
+        private String firstVerifiedClean(ScanComponent component, List<String> candidates) {
+            int checked = 0;
+            for (String candidate : candidates) {
+                if (checked++ >= MAX_FIX_VERIFY_CANDIDATES) break;
+                if (vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate).isEmpty()) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        /** Neither direction fully clears the CVE(s). Checks a bounded window of nearby versions
+         *  on each side plus the true latest release (live OSV queries, cached thereafter).
+         *  Upgrade candidates that only *tie* the current severity are still eligible — a CVE
+         *  with no known fix at all (unbounded advisory range) affects every later release
+         *  identically, and moving to a newer release is still preferable to staying put even
+         *  without a severity win (it's likely to carry other, unrelated fixes). Downgrade
+         *  candidates are held to a stricter bar: a downgrade must *strictly* beat the current
+         *  severity to be worth suggesting — an older release with no CVE improvement is pure
+         *  downside (missing later fixes) and should never be offered just because it ties.
+         *  Within whichever direction wins, ties are broken toward the candidate closest to
+         *  current. Returns null if nothing at least as good as current is found. */
+        private String bestEffortLowestSeverity(ScanComponent component, String current, List<String> allVersions) {
+            // Located by value, not by exact string match against allVersions — the current
+            // version's string may not literally appear there (different qualifier formatting,
+            // filtered out by the stable-version regex, cache staleness, etc.), and indexOf
+            // silently aborting the whole search on a mismatch was the earlier bug: it looked
+            // like no fix existed even when a strictly better nearby version clearly did.
+            List<String> below = new ArrayList<>();
+            List<String> above = new ArrayList<>();
+            for (String v : allVersions) {
+                if (isPreRelease(v)) continue;
+                int cmp = compareVersions(v, current);
+                if (cmp < 0) below.add(v);
+                else if (cmp > 0) above.add(v);
+            }
+            below.sort((a, b) -> compareVersions(b, a)); // descending — closest below first
+            above.sort(this::compareVersions); // ascending — closest above first
+            List<String> aboveWindow = new ArrayList<>(above.subList(0, Math.min(MAX_FIX_VERIFY_CANDIDATES, above.size())));
+            // Always check the true latest release too, even if it fell outside the window above —
+            // it's the one version most likely to have picked up an eventual fix.
+            if (!above.isEmpty()) {
+                String latest = above.get(above.size() - 1);
+                if (!aboveWindow.contains(latest)) aboveWindow.add(latest);
+            }
+            List<String> belowWindow = below.subList(0, Math.min(3, below.size()));
+
+            AdvisorySeverity currentSeverity = AdvisoryClassifier.highest(
+                    vulnerabilityProvider.vulnerabilities(component.coordinate(), current));
+            String best = null;
+            AdvisorySeverity bestSeverity = null;
+
+            // Upgrades first (closest-first) — ties with current severity are acceptable.
+            for (String candidate : aboveWindow) {
+                AdvisorySeverity candidateSeverity = AdvisoryClassifier.highest(
+                        vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate));
+                if (candidateSeverity.ordinal() > currentSeverity.ordinal()) continue; // never regress
+                if (bestSeverity == null || candidateSeverity.ordinal() < bestSeverity.ordinal()) {
+                    best = candidate;
+                    bestSeverity = candidateSeverity;
+                }
+            }
+            // Downgrades only count if they strictly improve on both current and whatever
+            // upgrade was already found — no free pass for ties in this direction.
+            for (String candidate : belowWindow) {
+                AdvisorySeverity candidateSeverity = AdvisoryClassifier.highest(
+                        vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate));
+                if (candidateSeverity.ordinal() >= currentSeverity.ordinal()) continue;
+                if (bestSeverity == null || candidateSeverity.ordinal() < bestSeverity.ordinal()) {
+                    best = candidate;
+                    bestSeverity = candidateSeverity;
+                }
+            }
+            return best;
         }
 
         private int major(String version) {

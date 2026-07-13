@@ -81,6 +81,20 @@ class RemediationApplierTest {
     }
 
     @Test
+    void pinCommentUsesHardcodedVersionAndRemovalNote() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String result = applier.applyDependencyManagementPin(pom,
+                "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
+        assertTrue(result.contains("redkite:dependency-management pin"),
+                "Marker should be renamed to include 'pin'");
+        assertTrue(result.contains("remove this comment to prevent RedKite managing this dependency"),
+                "Comment should note how to opt a dependency out of RedKite management");
+        // The <version> must be the literal value, never a ${...} property reference.
+        assertTrue(result.contains("<version>32.1.2-jre</version>"));
+        assertFalse(result.contains("${"), "Dependency management pins must never use property references");
+    }
+
+    @Test
     void injectsIntExistingDependencyManagement() {
         String result = applier.applyDependencyManagementPin(POM_WITH_DEP_MGMT,
                 "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
@@ -98,6 +112,33 @@ class RemediationApplierTest {
                 "com.google.guava", "guava", "32.1.2-jre", "Updated fix");
         assertTrue(updated.contains("32.1.2-jre"), "Should update to new version");
         assertFalse(updated.contains("31.0-jre"), "Should not keep old version");
+    }
+
+    @Test
+    void updatesLegacyPreRenameCommentInPlaceInsteadOfDuplicating() {
+        // Simulates a pin written by an older RedKite version, before the marker was renamed
+        // from "redkite:dependency-management" to "redkite:dependency-management pin".
+        String pom = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <!-- redkite:dependency-management groupId="org.springframework.boot" artifactId="spring-boot-starter-amqp" version="3.5.15" reason="Convergence fix" -->
+                      <dependency>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-starter-amqp</artifactId>
+                        <version>3.5.15</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "org.springframework.boot", "spring-boot-starter-amqp", "3.5.16", "CVE fix");
+        int occurrences = countOccurrences(updated, "spring-boot-starter-amqp");
+        assertEquals(2, occurrences,
+                "Should update the legacy pin in place (once in the comment, once in <artifactId>), not duplicate it");
+        assertTrue(updated.contains("3.5.16"), "Should update to the new version");
+        assertFalse(updated.contains("3.5.15"), "Should not keep the old version behind as a duplicate entry");
     }
 
     @Test

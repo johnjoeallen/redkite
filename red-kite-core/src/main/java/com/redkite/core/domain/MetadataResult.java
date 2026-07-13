@@ -13,6 +13,10 @@ public record MetadataResult(
         String latestVersion,
         String latestSameMajorVersion,
         List<String> upgradePathVersions,
+        /** Every known stable version, ascending — including versions below currentVersion,
+         *  which upgradePathVersions omits. Lets the version-selector dropdown always offer a
+         *  manual downgrade choice, even when no automated recommendation suggests one. */
+        List<String> allStableVersions,
         boolean complete,
         MetadataStatus status,
         CacheState cacheState,

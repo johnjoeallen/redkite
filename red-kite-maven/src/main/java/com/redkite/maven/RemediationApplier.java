@@ -14,14 +14,24 @@ import java.util.List;
  * can be identified and reversed:
  * <ul>
  *   <li>Exclusions: {@code <!-- redkite:exclusion groupId="..." artifactId="..." reason="..." -->}
- *   <li>Dependency management pins: {@code <!-- redkite:dependency-management groupId="..." artifactId="..." version="..." reason="..." -->}
+ *   <li>Dependency management pins: {@code <!-- redkite:dependency-management pin groupId="..." artifactId="..." version="..." reason="..." — remove this comment to prevent RedKite managing this dependency -->}
  * </ul>
+ *
+ * <p>Dependency management pins always use a hardcoded {@code <version>} rather than a
+ * {@code ${...}} property reference — they're meant to be a single, self-contained,
+ * independently removable override, not entangled with a project's own property-based
+ * versioning scheme.
  */
 public class RemediationApplier {
 
-    private static final String RK_COMMENT_PREFIX = "<!-- redkite:";
     private static final String EXCLUSION_TAG = "redkite:exclusion";
-    private static final String DEP_MGMT_TAG = "redkite:dependency-management";
+    private static final String DEP_MGMT_TAG = "redkite:dependency-management pin";
+    // Matches both the current marker and the pre-rename one ("redkite:dependency-management",
+    // no " pin" suffix) so pins written by older RedKite versions are still recognized as
+    // existing pins to update in place, instead of being invisible to findRedkiteDepMgmtComment
+    // and duplicated by a fresh insert alongside the original on every subsequent apply.
+    private static final String DEP_MGMT_TAG_DETECT_PREFIX = "redkite:dependency-management";
+    private static final String DEP_MGMT_REMOVE_NOTE = "remove this comment to prevent RedKite managing this dependency";
 
     // ---- Public API ----
 
@@ -138,27 +148,26 @@ public class RemediationApplier {
             String line = lines.get(i);
             String stripped = line.strip();
 
-            // Skip redkite comment + following <exclusion> or <dependency> block
-            if (stripped.startsWith(RK_COMMENT_PREFIX)) {
-                String tag = extractRedkiteTag(stripped);
-                if (EXCLUSION_TAG.equals(tag)) {
-                    // Skip the comment; also skip the <exclusion>...</exclusion> block that follows
-                    i++;
-                    if (i < lines.size() && lines.get(i).strip().startsWith("<exclusion")) {
-                        int blockEnd = findBlockEnd(lines, i, "</exclusion>");
-                        i = blockEnd != -1 ? blockEnd + 1 : i + 1;
-                    }
-                    // If <exclusions> wrapper becomes empty, remove it too
-                    continue;
-                } else if (DEP_MGMT_TAG.equals(tag)) {
-                    // Skip the comment + the <dependency>...</dependency> block that follows
-                    i++;
-                    if (i < lines.size() && lines.get(i).strip().startsWith("<dependency")) {
-                        int blockEnd = findBlockEnd(lines, i, "</dependency>");
-                        i = blockEnd != -1 ? blockEnd + 1 : i + 1;
-                    }
-                    continue;
+            // Skip redkite comment + following <exclusion> or <dependency> block.
+            // Matched by prefix rather than a single-token tag extraction, since DEP_MGMT_TAG
+            // itself contains a space ("redkite:dependency-management pin").
+            if (stripped.startsWith("<!-- " + EXCLUSION_TAG)) {
+                // Skip the comment; also skip the <exclusion>...</exclusion> block that follows
+                i++;
+                if (i < lines.size() && lines.get(i).strip().startsWith("<exclusion")) {
+                    int blockEnd = findBlockEnd(lines, i, "</exclusion>");
+                    i = blockEnd != -1 ? blockEnd + 1 : i + 1;
                 }
+                // If <exclusions> wrapper becomes empty, remove it too
+                continue;
+            } else if (stripped.startsWith("<!-- " + DEP_MGMT_TAG_DETECT_PREFIX)) {
+                // Skip the comment + the <dependency>...</dependency> block that follows
+                i++;
+                if (i < lines.size() && lines.get(i).strip().startsWith("<dependency")) {
+                    int blockEnd = findBlockEnd(lines, i, "</dependency>");
+                    i = blockEnd != -1 ? blockEnd + 1 : i + 1;
+                }
+                continue;
             }
 
             result.add(line);
@@ -196,7 +205,8 @@ public class RemediationApplier {
                 + " groupId=\"" + groupId + "\""
                 + " artifactId=\"" + artifactId + "\""
                 + " version=\"" + version + "\""
-                + " reason=\"" + escapeAttr(reason) + "\" -->";
+                + " reason=\"" + escapeAttr(reason) + "\""
+                + " — " + DEP_MGMT_REMOVE_NOTE + " -->";
         out.add(rkComment);
         out.add(indent + "  <dependency>");
         out.add(indent + "    <groupId>" + groupId + "</groupId>");
@@ -365,7 +375,7 @@ public class RemediationApplier {
     private int findRedkiteDepMgmtComment(List<String> lines, String groupId, String artifactId) {
         for (int i = 0; i < lines.size(); i++) {
             String s = lines.get(i).strip();
-            if (s.startsWith("<!-- " + DEP_MGMT_TAG)
+            if (s.startsWith("<!-- " + DEP_MGMT_TAG_DETECT_PREFIX)
                     && s.contains("groupId=\"" + groupId + "\"")
                     && s.contains("artifactId=\"" + artifactId + "\"")) {
                 return i;
@@ -404,13 +414,6 @@ public class RemediationApplier {
 
     private String detectIndentForClose(List<String> lines, int closeIdx) {
         return detectIndent(lines.get(closeIdx));
-    }
-
-    private String extractRedkiteTag(String commentLine) {
-        int start = commentLine.indexOf("<!-- ") + 5;
-        int end = commentLine.indexOf(' ', start);
-        if (end == -1) end = commentLine.indexOf("-->");
-        return end > start ? commentLine.substring(start, end) : null;
     }
 
     private static List<String> toLines(String content) {

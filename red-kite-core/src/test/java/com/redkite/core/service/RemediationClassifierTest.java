@@ -23,7 +23,7 @@ class RemediationClassifierTest {
     }
 
     private static VulnerabilityFinding finding(String severity) {
-        return new VulnerabilityFinding("ADV-001", severity, COORD, "1.0.0", null,
+        return new VulnerabilityFinding("ADV-001", severity, COORD, "1.0.0", null, null,
                 true, null, List.of("CVE-2023-1234"), null);
     }
 
@@ -35,19 +35,19 @@ class RemediationClassifierTest {
 
     private static MetadataResult freshMetadata(long componentId) {
         return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
-                "1.0.0", "2.0.0", "1.9.9", List.of(), true,
+                "1.0.0", "2.0.0", "1.9.9", List.of(), List.of(), true,
                 MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, "ok");
     }
 
     private static MetadataResult staleMetadata(long componentId) {
         return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
-                "1.0.0", "unknown", "unknown", List.of(), false,
+                "1.0.0", "unknown", "unknown", List.of(), List.of(), false,
                 MetadataStatus.STALE_USED, CacheState.STALE, Instant.now(), null, Instant.now(), null, "stale");
     }
 
     private static MetadataResult rateLimitedMetadata(long componentId) {
         return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
-                "1.0.0", "unknown", "unknown", List.of(), false,
+                "1.0.0", "unknown", "unknown", List.of(), List.of(), false,
                 MetadataStatus.RATE_LIMITED, CacheState.MISSING, null, null, Instant.now(), null, "rate limited");
     }
 
@@ -160,7 +160,7 @@ class RemediationClassifierTest {
         ScanComponent vuln = componentAt(2L, "vuln-lib", false, true, VersionSource.PROPERTY);
         ScanComponent snap = componentAt(3L, "snap-lib", true, true, VersionSource.LITERAL);
         VulnerabilityFinding vulnFinding = new VulnerabilityFinding("ADV-001", "HIGH",
-                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null,
+                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null, null,
                 true, null, List.of("CVE-2023-1234"), null);
 
         ScanReport report = minimalReport(
@@ -203,7 +203,9 @@ class RemediationClassifierTest {
     @Test
     void sameCveAcrossModulesIsCountedOnceInSeverityTotals() {
         // Same vulnerable dependency resolved transitively into two different modules
-        // produces two ScanComponent/finding entries for the same advisory.
+        // produces two ScanComponent/finding entries for the same advisory. The whole summary
+        // (not just severity) is deduped by dependency (coordinate + version), so this counts
+        // as one dependency, one "need remediation", and one distinct Medium CVE.
         ScanComponent moduleA = new ScanComponent(1L, new ComponentCoordinate("com.example", "vuln-lib"),
                 "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-a/pom.xml", null,
                 Map.of(), false, null, null);
@@ -211,10 +213,10 @@ class RemediationClassifierTest {
                 "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-b/pom.xml", null,
                 Map.of(), false, null, null);
         VulnerabilityFinding findingInA = new VulnerabilityFinding("ADV-001", "MEDIUM",
-                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null,
+                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null, null,
                 false, null, List.of("CVE-2023-1234"), null);
         VulnerabilityFinding findingInB = new VulnerabilityFinding("ADV-001", "MEDIUM",
-                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null,
+                new ComponentCoordinate("com.example", "vuln-lib"), "1.0.0", null, null,
                 false, null, List.of("CVE-2023-1234"), null);
 
         ScanReport report = minimalReport(
@@ -225,9 +227,29 @@ class RemediationClassifierTest {
 
         ReportSummary summary = RemediationClassifier.summarize(report);
 
-        assertEquals(2, summary.totalComponents());
+        assertEquals(1, summary.totalComponents());
+        assertEquals(1, summary.needsRemediation());
         assertEquals(1, summary.mediumCount());
         assertEquals(List.of("com.example:vuln-lib@1.0.0"),
                 summary.dependenciesBySeverity().get(AdvisorySeverity.MEDIUM));
+    }
+
+    @Test
+    void sameDependencyAcrossModulesIsCountedOnceInTotals() {
+        // A clean (non-vulnerable, non-declared) dependency resolved into two modules is one
+        // real dependency, not two, once the summary is deduped by coordinate + version.
+        ScanComponent moduleA = new ScanComponent(1L, new ComponentCoordinate("com.example", "shared-lib"),
+                "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-a/pom.xml", null,
+                Map.of(), false, null, null);
+        ScanComponent moduleB = new ScanComponent(2L, new ComponentCoordinate("com.example", "shared-lib"),
+                "1.0.0", DependencyScope.COMPILE, false, VersionSource.PARENT_MANAGED, "module-b/pom.xml", null,
+                Map.of(), false, null, null);
+
+        ScanReport report = minimalReport(List.of(moduleA, moduleB), List.of(), List.of(), List.of());
+        ReportSummary summary = RemediationClassifier.summarize(report);
+
+        assertEquals(1, summary.totalComponents());
+        assertEquals(0, summary.needsRemediation());
+        assertEquals(1, summary.clean());
     }
 }

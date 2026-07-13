@@ -94,6 +94,7 @@ java -Dredkite.port=8080 -jar red-kite.jar
 | `redkite.db.password` | _(empty)_ |
 | `redkite.prefs.file` | `~/.redkite/preferences.properties` |
 | `redkite.osv.url` | `https://api.osv.dev` |
+| `redkite.version.lookback` | `10` — how many older releases the version-selector dropdown offers below the current version |
 
 ## Build From Source
 

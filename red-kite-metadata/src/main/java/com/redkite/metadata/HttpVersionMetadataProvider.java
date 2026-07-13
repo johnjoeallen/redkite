@@ -283,7 +283,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                             metadataUrl,
                             false,
                             CacheState.MISSING,
-                            MetadataStatus.RATE_LIMITED);
+                            MetadataStatus.RATE_LIMITED,
+                            List.of());
                     putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", metadataUrl, now.plus(NEGATIVE_TTL), MetadataStatus.RATE_LIMITED, false));
                     return metadata;
                 }
@@ -306,7 +307,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 source,
                 false,
                 CacheState.MISSING,
-                lastStatus);
+                lastStatus,
+                List.of());
         if (lastStatus == MetadataStatus.MISSING) {
             putCache(cacheKey, CacheEntry.negative(List.of(), "unknown", source, now.plus(NEGATIVE_TTL), lastStatus, false));
             LOGGER.info(() -> "Stored negative Maven version cache entry for " + cacheKey + " from " + source);
@@ -335,7 +337,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         List<String> upgradePathVersions = upgradePathVersions(allVersions, currentVersion);
         VersionMetadata metadata = new VersionMetadata(
                 coordinate, latest, latestSameMajor, upgradePathVersions,
-                !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH);
+                !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH,
+                sortedAscending(versionsForRec));
         // Use a short TTL for artifacts not on Maven Central (internal/local); they can change frequently.
         Duration ttl = isCentralUrl(source) || existsOnCentral(coordinate) ? FRESH_TTL : LOCAL_TTL;
         boolean persisted = putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
@@ -709,11 +712,18 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                     source,
                     complete,
                     isFresh(now) ? CacheState.FRESH : CacheState.STALE,
-                    status);
+                    status,
+                    sortedAscending(forRec));
         }
     }
 
-    private static int compareVersions(String left, String right) {
+    private static List<String> sortedAscending(List<String> versions) {
+        List<String> sorted = new ArrayList<>(new java.util.LinkedHashSet<>(versions));
+        sorted.sort(HttpVersionMetadataProvider::compareVersions);
+        return List.copyOf(sorted);
+    }
+
+    static int compareVersions(String left, String right) {
         if (Objects.equals(left, right)) {
             return 0;
         }
