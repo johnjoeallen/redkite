@@ -95,6 +95,17 @@ public class RedKiteServerMain {
             new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_ERROR_TTL,
                     "Version metadata cache (provider error)", HttpVersionMetadataProvider.DEFAULT_ERROR_TTL));
 
+    /** Preset choices offered by each TTL dropdown on the /config page, in minutes. */
+    private static final List<Map.Entry<Long, String>> CONFIG_TTL_OPTIONS = List.of(
+            Map.entry(15L, "15 minutes"),
+            Map.entry(30L, "30 minutes"),
+            Map.entry(60L, "1 hour"),
+            Map.entry(120L, "2 hours"),
+            Map.entry(240L, "4 hours"),
+            Map.entry(360L, "6 hours"),
+            Map.entry(720L, "12 hours"),
+            Map.entry(1440L, "1 day"));
+
     private final Store store;
     private final HttpServer server;
     private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
@@ -1231,7 +1242,7 @@ public class RedKiteServerMain {
         StringBuilder body = new StringBuilder();
         body.append("<section class=\"card\">");
         body.append("<h2>Cache TTLs</h2>");
-        body.append("<p class=\"muted\">How long metadata lookups are cached before being refreshed, in minutes. ")
+        body.append("<p class=\"muted\">How long metadata lookups are cached before being refreshed. ")
                 .append("Changes apply to the next lookup — no restart needed.</p>");
         body.append("<form method=\"POST\" action=\"/api/config\">");
         for (ConfigTtlEntry entry : CONFIG_TTL_ENTRIES) {
@@ -1239,9 +1250,22 @@ public class RedKiteServerMain {
             body.append("<div class=\"config-row\">");
             body.append("<label for=\"").append(escape(entry.key())).append("\">").append(escape(entry.label())).append("</label>");
             body.append("<div class=\"config-row-input\">");
-            body.append("<input type=\"number\" min=\"1\" step=\"1\" id=\"").append(escape(entry.key()))
-                    .append("\" name=\"").append(escape(entry.key())).append("\" value=\"").append(escape(current)).append("\"/>");
-            body.append("<span class=\"muted\">minutes</span>");
+            body.append("<select id=\"").append(escape(entry.key())).append("\" name=\"").append(escape(entry.key())).append("\">");
+            boolean matched = false;
+            for (Map.Entry<Long, String> option : CONFIG_TTL_OPTIONS) {
+                boolean selected = String.valueOf(option.getKey()).equals(current);
+                if (selected) matched = true;
+                body.append("<option value=\"").append(option.getKey()).append("\"").append(selected ? " selected" : "")
+                        .append(">").append(escape(option.getValue())).append("</option>");
+            }
+            if (!matched) {
+                // A previously-set value that isn't one of the presets (e.g. from before the
+                // dropdown existed) — keep it selectable rather than silently changing it to the
+                // nearest preset the moment this page loads.
+                body.append("<option value=\"").append(escape(current)).append("\" selected>")
+                        .append(escape(current)).append(" minutes (custom)</option>");
+            }
+            body.append("</select>");
             body.append("</div></div>");
         }
         body.append("<button class=\"button primary\" type=\"submit\">Save</button>");
