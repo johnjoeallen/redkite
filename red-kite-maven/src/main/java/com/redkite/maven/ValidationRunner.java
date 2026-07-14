@@ -133,7 +133,11 @@ public class ValidationRunner {
 
             String output = startupOutput.toString();
             boolean passed = started.get();
-            LOGGER.info(() -> "Startup validation " + (passed ? "passed" : "failed/timed-out") + " for " + pomPath);
+            if (passed) {
+                LOGGER.info(() -> "Startup validation passed for " + pomPath);
+            } else {
+                LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
+            }
             return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output));
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
