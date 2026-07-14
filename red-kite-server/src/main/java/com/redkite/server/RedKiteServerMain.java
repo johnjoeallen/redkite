@@ -393,6 +393,22 @@ public class RedKiteServerMain {
             body.append("</div>");
             body.append("</section>");
 
+            body.append("<section class=\"card span-2\"><h2>Build validation</h2>");
+            body.append("<p class=\"muted\">Extra options used when validating this project's build before/after applying fixes ")
+                    .append("(e.g. a Spring profile a spring-boot:run startup check needs). Applies to the next apply.</p>");
+            body.append("<form method=\"POST\" action=\"/api/projects/").append(escape(project.id())).append("/validation\">");
+            body.append("<div class=\"config-row\"><label for=\"mavenArgs\">Extra mvn arguments</label>");
+            body.append("<div class=\"config-row-input\"><input type=\"text\" id=\"mavenArgs\" name=\"mavenArgs\" ")
+                    .append("placeholder=\"-Pdev -Dspring.profiles.active=dev\" value=\"")
+                    .append(escape(project.validationMavenArgs())).append("\"></div></div>");
+            body.append("<div class=\"config-row\"><label for=\"env\">Extra environment variables</label>");
+            body.append("<div class=\"config-row-input\"><input type=\"text\" id=\"env\" name=\"env\" ")
+                    .append("placeholder=\"SPRING_PROFILES_ACTIVE=dev,DB_HOST=localhost\" value=\"")
+                    .append(escape(project.validationEnv())).append("\"></div></div>");
+            body.append("<button class=\"button primary\" type=\"submit\">Save</button>");
+            body.append("</form>");
+            body.append("</section>");
+
             if (latestScan != null) {
                 ScanReport report = latestScan.report();
                 body.append("<section class=\"card\"><h2>Latest analysis</h2>");
@@ -860,6 +876,9 @@ public class RedKiteServerMain {
             ScanEntry scanEntry = store.getScan(scanId);
             Path projectRoot = Path.of(scanEntry.input().workingTreePath()).toAbsolutePath().normalize();
             Path rootPom = projectRoot.resolve("pom.xml");
+            ProjectEntry project = store.getProject(scanEntry.projectId());
+            List<String> validationMavenArgs = parseMavenArgs(project.validationMavenArgs());
+            Map<String, String> validationEnv = parseEnvVars(project.validationEnv());
 
             new Thread(() -> {
                 try {
@@ -871,7 +890,8 @@ public class RedKiteServerMain {
                     // which is a valid use case. We record the result and continue; post-validate is the
                     // authoritative gate.
                     job.phase = ApplyJob.Phase.PRE_VALIDATE;
-                    com.redkite.maven.ValidationRunner.ValidationResult pre = runner.validateWithStartup(projectRoot, rootPom, 90);
+                    com.redkite.maven.ValidationRunner.ValidationResult pre =
+                            runner.validateWithStartup(projectRoot, rootPom, 90, validationMavenArgs, validationEnv);
                     job.baselinePassed = pre.passed();
                     if (!pre.passed()) {
                         LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
@@ -941,7 +961,8 @@ public class RedKiteServerMain {
 
                     // --- POST-VALIDATE ---
                     job.phase = ApplyJob.Phase.POST_VALIDATE;
-                    com.redkite.maven.ValidationRunner.ValidationResult post = runner.validateWithStartup(projectRoot, rootPom, 90);
+                    com.redkite.maven.ValidationRunner.ValidationResult post =
+                            runner.validateWithStartup(projectRoot, rootPom, 90, validationMavenArgs, validationEnv);
                     if (!post.passed()) {
                         // Restore originals.
                         for (Map.Entry<Path, String> entry : originals.entrySet()) {
@@ -1324,6 +1345,15 @@ public class RedKiteServerMain {
             String projectId = parts[3];
             store.deleteProject(projectId);
             sendJson(exchange, 200, "{\"deleted\":true}");
+            return;
+        }
+        if (parts.length == 5 && "validation".equals(parts[4]) && "POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            String projectId = parts[3];
+            Map<String, String> form = parseForm(readBody(exchange));
+            store.updateValidationSettings(projectId,
+                    form.getOrDefault("mavenArgs", "").trim(),
+                    form.getOrDefault("env", "").trim());
+            sendRedirect(exchange, "/projects/" + projectId);
             return;
         }
         sendText(exchange, 405, "Method not allowed");
@@ -2829,6 +2859,28 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
+    /** Whitespace-separated extra {@code mvn} arguments, e.g. {@code -Pdev -Dspring.profiles.active=dev}. */
+    private static List<String> parseMavenArgs(String raw) {
+        if (raw == null || raw.isBlank()) return List.of();
+        List<String> args = new ArrayList<>();
+        for (String part : raw.trim().split("\\s+")) {
+            if (!part.isEmpty()) args.add(part);
+        }
+        return args;
+    }
+
+    /** Comma-separated {@code KEY=VALUE} pairs set as environment variables on the validation processes. */
+    private static Map<String, String> parseEnvVars(String raw) {
+        if (raw == null || raw.isBlank()) return Map.of();
+        Map<String, String> env = new LinkedHashMap<>();
+        for (String pair : raw.split(",")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) continue;
+            env.put(pair.substring(0, eq).trim(), pair.substring(eq + 1).trim());
+        }
+        return env;
+    }
+
     private static String jsonStr(String value) {
         if (value == null) return "null";
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
@@ -3884,7 +3936,7 @@ public class RedKiteServerMain {
         synchronized List<ProjectEntry> listProjects() {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
-                         select id, name, root_path, created_at, updated_at
+                         select id, name, root_path, created_at, updated_at, validation_maven_args, validation_env
                          from projects
                          order by updated_at desc
                          """);
@@ -3896,7 +3948,9 @@ public class RedKiteServerMain {
                             rs.getString("name"),
                             rs.getString("root_path"),
                             rs.getTimestamp("created_at").toInstant(),
-                            rs.getTimestamp("updated_at").toInstant()));
+                            rs.getTimestamp("updated_at").toInstant(),
+                            rs.getString("validation_maven_args"),
+                            rs.getString("validation_env")));
                 }
                 return projects;
             } catch (SQLException e) {
@@ -3907,7 +3961,7 @@ public class RedKiteServerMain {
         synchronized ProjectEntry getProject(String id) {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
-                         select id, name, root_path, created_at, updated_at
+                         select id, name, root_path, created_at, updated_at, validation_maven_args, validation_env
                          from projects
                          where id = ?
                          """)) {
@@ -3921,10 +3975,25 @@ public class RedKiteServerMain {
                             rs.getString("name"),
                             rs.getString("root_path"),
                             rs.getTimestamp("created_at").toInstant(),
-                            rs.getTimestamp("updated_at").toInstant());
+                            rs.getTimestamp("updated_at").toInstant(),
+                            rs.getString("validation_maven_args"),
+                            rs.getString("validation_env"));
                 }
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to fetch project", e);
+            }
+        }
+
+        synchronized void updateValidationSettings(String projectId, String mavenArgs, String env) {
+            try (Connection connection = connection();
+                 PreparedStatement statement = connection.prepareStatement(
+                         "update projects set validation_maven_args = ?, validation_env = ? where id = ?")) {
+                statement.setString(1, mavenArgs);
+                statement.setString(2, env);
+                statement.setString(3, projectId);
+                statement.executeUpdate();
+            } catch (SQLException e) {
+                throw new IllegalStateException("Failed to update validation settings", e);
             }
         }
 
@@ -4565,7 +4634,9 @@ public class RedKiteServerMain {
                           root_path varchar(1024) not null unique,
                           created_at timestamp not null default current_timestamp,
                           updated_at timestamp not null default current_timestamp,
-                          enforcer_use_verify boolean not null default false
+                          enforcer_use_verify boolean not null default false,
+                          validation_maven_args varchar(1024) not null default '',
+                          validation_env varchar(2048) not null default ''
                         )
                         """);
 
@@ -4705,6 +4776,8 @@ public class RedKiteServerMain {
                 st.executeUpdate("alter table enforcer_results add column if not exists dep_mgmt_removed_json text not null default '[]'");
                 st.executeUpdate("alter table enforcer_results add column if not exists phase2_pins_json text not null default '[]'");
                 st.executeUpdate("alter table projects add column if not exists enforcer_use_verify boolean not null default false");
+                st.executeUpdate("alter table projects add column if not exists validation_maven_args varchar(1024) not null default ''");
+                st.executeUpdate("alter table projects add column if not exists validation_env varchar(2048) not null default ''");
 
             } catch (SQLException e) {
                 throw new IllegalStateException("Failed to initialize schema", e);
@@ -5036,7 +5109,8 @@ public class RedKiteServerMain {
 
     }
 
-    record ProjectEntry(String id, String name, String rootPath, Instant createdAt, Instant updatedAt) implements java.io.Serializable {
+    record ProjectEntry(String id, String name, String rootPath, Instant createdAt, Instant updatedAt,
+                        String validationMavenArgs, String validationEnv) implements java.io.Serializable {
     }
 
     record ScanEntry(String id, String projectId, ScanInput input, ScanReport report, Instant createdAt) implements java.io.Serializable {

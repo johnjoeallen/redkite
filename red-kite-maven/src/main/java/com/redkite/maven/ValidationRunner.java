@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
@@ -27,14 +28,26 @@ public class ValidationRunner {
 
     /** Runs {@code mvn clean install} and returns the result. */
     public ValidationResult validate(Path projectRoot, Path pomPath) {
+        return validate(projectRoot, pomPath, List.of(), Map.of());
+    }
+
+    /**
+     * Runs {@code mvn clean install} and returns the result.
+     *
+     * @param extraMavenArgs extra arguments appended to the {@code mvn} command (e.g. {@code -Pdev},
+     *                       {@code -Dspring.profiles.active=dev})
+     * @param extraEnv       extra environment variables set on the spawned process
+     */
+    public ValidationResult validate(Path projectRoot, Path pomPath, List<String> extraMavenArgs, Map<String, String> extraEnv) {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs,
+                "clean", "install", "-DskipTests", "-Denforcer.skip=true");
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
         try {
-            Process process = new ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start();
+            ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+            builder.environment().putAll(extraEnv);
+            Process process = builder.start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exit = process.waitFor();
             boolean passed = exit == 0;
@@ -56,7 +69,21 @@ public class ValidationRunner {
      * The spawned process is always killed before returning.
      */
     public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds) {
-        ValidationResult buildResult = validate(projectRoot, pomPath);
+        return validateWithStartup(projectRoot, pomPath, timeoutSeconds, List.of(), Map.of());
+    }
+
+    /**
+     * Runs {@code mvn clean install} then, if {@code spring-boot-maven-plugin} is detected in the
+     * root POM, also runs {@code mvn spring-boot:run} and waits for the startup signal or timeout.
+     * The spawned process is always killed before returning.
+     *
+     * @param extraMavenArgs extra arguments appended to every {@code mvn} invocation (build and
+     *                       startup) — e.g. Maven profiles via {@code -P} or {@code -D} properties
+     * @param extraEnv       extra environment variables set on the spawned processes
+     */
+    public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds,
+                                                 List<String> extraMavenArgs, Map<String, String> extraEnv) {
+        ValidationResult buildResult = validate(projectRoot, pomPath, extraMavenArgs, extraEnv);
         if (!buildResult.passed()) return buildResult;
 
         String pomContent;
@@ -74,12 +101,12 @@ public class ValidationRunner {
                 + " with timeout " + timeoutSeconds + "s");
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, "spring-boot:run");
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs, "spring-boot:run");
 
         try {
-            Process process = new ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start();
+            ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
+            builder.environment().putAll(extraEnv);
+            Process process = builder.start();
 
             StringBuffer startupOutput = new StringBuffer();
             AtomicBoolean started = new AtomicBoolean(false);
@@ -165,7 +192,7 @@ public class ValidationRunner {
     }
 
     private static List<String> buildCommand(String mvn, Path settings, Path projectRoot, Path pomPath,
-                                             String... goals) {
+                                              List<String> extraMavenArgs, String... goals) {
         List<String> command = new ArrayList<>();
         command.add(mvn);
         if (settings != null && MavenSettingsReader.isProjectLocalSettings(settings, projectRoot)) {
@@ -176,6 +203,7 @@ public class ValidationRunner {
         command.add(pomPath.toString());
         command.add("--no-transfer-progress");
         for (String goal : goals) command.add(goal);
+        command.addAll(extraMavenArgs);
         return command;
     }
 }

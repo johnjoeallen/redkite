@@ -99,6 +99,15 @@ java -Dredkite.port=8080 -jar red-kite.jar
 | `redkite.osv.url` | `https://api.osv.dev` |
 | `redkite.version.lookback` | `10` — how many older releases the version-selector dropdown offers below the current version |
 
+### Build Validation Settings
+
+Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different checked-out projects can need different values — set them on the **Build validation** panel on each project's page (`/projects/{id}`):
+
+- **Extra mvn arguments** — whitespace-separated arguments appended to every validation `mvn` call (build and `spring-boot:run`), e.g. `-Pdev -Dspring.profiles.active=dev`
+- **Extra environment variables** — comma-separated `KEY=VALUE` pairs set on the spawned validation processes, e.g. `SPRING_PROFILES_ACTIVE=dev,DB_HOST=localhost`
+
+Stored in the database (`projects.validation_maven_args` / `projects.validation_env`) and applied to the next apply — no restart needed.
+
 ### Config Page
 
 The gear icon in the top nav opens `/config`, where the vulnerability and version metadata cache TTLs can be changed at runtime (stored in the database, seeded from the compiled-in defaults on first run) — presets from 15 minutes to 1 day. Changes apply to the next lookup; no restart needed.
