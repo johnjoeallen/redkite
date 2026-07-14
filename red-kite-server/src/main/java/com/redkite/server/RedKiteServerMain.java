@@ -778,6 +778,23 @@ public class RedKiteServerMain {
      * (which never shows up as a "winner" candidate for a DIFFERENT artifact's conflict finding).
      * Never lowers a pin; a higher independently-computed winner for one member still wins.
      */
+    /**
+     * Computes planned dep-management pins for a set of findings, family-aligned. Used both by
+     * {@link #runPhase2Validation} and by display-only fallback paths that recompute pins live
+     * when a scan's stored {@code phase2Pins} is empty (e.g. cached data from before Phase 2 ran).
+     */
+    private List<String> computePlannedPins(List<TransitiveConflictFinding> findings, List<ScanComponent> components) {
+        Map<String, String> pins = new LinkedHashMap<>();
+        for (TransitiveConflictFinding f : findings) {
+            String winner = computeWinnerVersion(f, "");
+            if (winner != null && !winner.isBlank()) {
+                pins.put(f.groupId() + ":" + f.artifactId(), winner);
+            }
+        }
+        alignFamilyVersions(pins, components);
+        return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
+    }
+
     private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components) {
         for (FamilyGroup family : COORDINATED_FAMILIES) {
             String floor = null;
@@ -2236,13 +2253,7 @@ public class RedKiteServerMain {
         List<String> phase2Pins = entry.phase2Pins();
         if (phase2Pins.isEmpty() && !findings.isEmpty()) {
             // Phase 2 hasn't run or data predates this feature — compute planned pins for display
-            phase2Pins = findings.stream()
-                    .map(f -> {
-                        String w = computeWinnerVersion(f, "");
-                        return w != null ? f.groupId() + ":" + f.artifactId() + ":" + w : null;
-                    })
-                    .filter(s -> s != null)
-                    .toList();
+            phase2Pins = computePlannedPins(findings, store.getScan(scanId).report().components());
         }
         if (!phase2Pins.isEmpty()) {
             Set<String> stillFailing = new java.util.HashSet<>();
@@ -3600,13 +3611,7 @@ public class RedKiteServerMain {
             List<TransitiveConflictFinding> phase2 = enforcerResult.phase2Findings();
             List<String> phase2Pins = enforcerResult.phase2Pins();
             if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
-                phase2Pins = enforcerResult.findings().stream()
-                        .map(f -> {
-                            String w = computeWinnerVersion(f, "");
-                            return w != null ? f.groupId() + ":" + f.artifactId() + ":" + w : null;
-                        })
-                        .filter(s -> s != null)
-                        .toList();
+                phase2Pins = computePlannedPins(enforcerResult.findings(), report.components());
             }
             if (!phase2Pins.isEmpty()) {
                 java.util.Set<String> stillFailing = new java.util.HashSet<>();
