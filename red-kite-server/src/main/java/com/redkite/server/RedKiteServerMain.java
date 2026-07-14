@@ -795,6 +795,23 @@ public class RedKiteServerMain {
         return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
     }
 
+    /**
+     * Re-runs family alignment over a stored "G:A:V" pin list. Stored {@code phase2Pins} may
+     * predate the family-alignment fix (or this scan of the DB), so the display/Apply paths must
+     * not trust them verbatim — realignment only ever raises versions, so applying it to
+     * already-aligned pins is a no-op.
+     */
+    private List<String> realignStoredPins(List<String> storedPins, List<ScanComponent> components) {
+        Map<String, String> pins = new LinkedHashMap<>();
+        for (String gav : storedPins) {
+            int last = gav.lastIndexOf(':');
+            if (last <= 0) continue;
+            pins.put(gav.substring(0, last), gav.substring(last + 1));
+        }
+        alignFamilyVersions(pins, components);
+        return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
+    }
+
     private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components) {
         for (FamilyGroup family : COORDINATED_FAMILIES) {
             String floor = null;
@@ -2254,6 +2271,9 @@ public class RedKiteServerMain {
         if (phase2Pins.isEmpty() && !findings.isEmpty()) {
             // Phase 2 hasn't run or data predates this feature — compute planned pins for display
             phase2Pins = computePlannedPins(findings, store.getScan(scanId).report().components());
+        } else if (!phase2Pins.isEmpty()) {
+            // Stored pins may predate family alignment — never trust them verbatim
+            phase2Pins = realignStoredPins(phase2Pins, store.getScan(scanId).report().components());
         }
         if (!phase2Pins.isEmpty()) {
             Set<String> stillFailing = new java.util.HashSet<>();
@@ -3612,6 +3632,9 @@ public class RedKiteServerMain {
             List<String> phase2Pins = enforcerResult.phase2Pins();
             if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
                 phase2Pins = computePlannedPins(enforcerResult.findings(), report.components());
+            } else if (!phase2Pins.isEmpty()) {
+                // Stored pins may predate family alignment — never trust them verbatim
+                phase2Pins = realignStoredPins(phase2Pins, report.components());
             }
             if (!phase2Pins.isEmpty()) {
                 java.util.Set<String> stillFailing = new java.util.HashSet<>();
