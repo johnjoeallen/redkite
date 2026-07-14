@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,6 +72,8 @@ import org.xml.sax.InputSource;
 public class RedKiteServerMain {
     private static final Logger LOGGER = Logger.getLogger(RedKiteServerMain.class.getName());
     private static final String BRAND = "RedKite";
+    private static final String VERSION = Optional.ofNullable(RedKiteServerMain.class.getPackage().getImplementationVersion())
+            .orElse("dev");
 
     @FunctionalInterface
     private interface ExchangeHandler {
@@ -1240,6 +1243,10 @@ public class RedKiteServerMain {
             return;
         }
         StringBuilder body = new StringBuilder();
+        body.append("<section class=\"card\">");
+        body.append("<h2>About</h2>");
+        body.append("<p class=\"muted\">").append(escape(BRAND)).append(" version ").append(escape(VERSION)).append("</p>");
+        body.append("</section>");
         body.append("<section class=\"card\">");
         body.append("<h2>Cache TTLs</h2>");
         body.append("<p class=\"muted\">How long metadata lookups are cached before being refreshed. ")
