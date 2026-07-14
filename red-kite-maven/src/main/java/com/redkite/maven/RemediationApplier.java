@@ -110,6 +110,17 @@ public class RemediationApplier {
             return updateDepMgmtVersion(lines, existingComment, version, reason);
         }
 
+        // Check if the project already has its OWN (non-RedKite) dependencyManagement entry
+        // for this artifact — e.g. a manual CVE pin or BOM override using a ${...} property.
+        // Take it over (mark it and hardcode the version) rather than inserting a second
+        // <dependency> block for the same groupId:artifactId, which Maven rejects with
+        // "must be unique" and which silently leaves the pre-existing entry still in effect
+        // (first-declared-wins), making the new RedKite pin dead weight at best.
+        int plainEntry = findPlainDepMgmtEntry(lines, groupId, artifactId);
+        if (plainEntry != -1) {
+            return takeOverDepMgmtEntry(lines, plainEntry, groupId, artifactId, version, reason);
+        }
+
         // If <dependencyManagement><dependencies> exists, insert before </dependencies>
         int depMgmtDepsClose = findDepMgmtDepsClose(lines);
         if (depMgmtDepsClose != -1) {
@@ -382,6 +393,56 @@ public class RemediationApplier {
             }
         }
         return -1;
+    }
+
+    /**
+     * Finds an existing, plain (non-RedKite-tagged) {@code <dependency>} entry for
+     * {@code groupId:artifactId} inside any {@code <dependencyManagement>} block. Returns the
+     * line index of the {@code <dependency>} tag, or -1 if none exists.
+     */
+    private int findPlainDepMgmtEntry(List<String> lines, String groupId, String artifactId) {
+        boolean inDepMgmt = false;
+        for (int i = 0; i < lines.size(); i++) {
+            String s = lines.get(i).strip();
+            if (s.startsWith("<dependencyManagement")) {
+                inDepMgmt = true;
+            } else if (s.equals("</dependencyManagement>")) {
+                inDepMgmt = false;
+            } else if (inDepMgmt && isDependencyBlockStart(lines.get(i))) {
+                int blockEnd = findBlockEnd(lines, i, "</dependency>");
+                if (blockEnd != -1 && blockMatchesCoord(lines.subList(i + 1, blockEnd), groupId, artifactId)) {
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Takes over an existing plain dependencyManagement entry: marks it with the RedKite
+     * comment and hardcodes its {@code <version>}, replacing any {@code ${...}} property
+     * reference it may have had.
+     */
+    private String takeOverDepMgmtEntry(List<String> lines, int depStart,
+                                        String groupId, String artifactId, String version, String reason) {
+        int blockEnd = findBlockEnd(lines, depStart, "</dependency>");
+        List<String> result = new ArrayList<>(lines);
+        for (int i = depStart + 1; i < blockEnd; i++) {
+            String s = result.get(i).strip();
+            if (s.startsWith("<version>") && s.endsWith("</version>")) {
+                result.set(i, result.get(i).replaceAll("<version>[^<]*</version>", "<version>" + version + "</version>"));
+                break;
+            }
+        }
+        String indent = detectIndent(lines.get(depStart));
+        String rkComment = indent + "<!-- " + DEP_MGMT_TAG
+                + " groupId=\"" + groupId + "\""
+                + " artifactId=\"" + artifactId + "\""
+                + " version=\"" + version + "\""
+                + " reason=\"" + escapeAttr(reason) + "\""
+                + " — " + DEP_MGMT_REMOVE_NOTE + " -->";
+        result.add(depStart, rkComment);
+        return String.join(System.lineSeparator(), result);
     }
 
     private String updateDepMgmtVersion(List<String> lines, int commentIdx, String version, String reason) {

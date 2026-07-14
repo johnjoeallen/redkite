@@ -142,6 +142,39 @@ class RemediationApplierTest {
     }
 
     @Test
+    void takesOverExistingPlainDepMgmtEntryInsteadOfDuplicating() {
+        // A project may already manage an artifact itself (e.g. a manual CVE pin using a
+        // ${...} property) with no RedKite marker comment at all. RedKite must take that
+        // entry over rather than inserting a second <dependency> block for the same
+        // groupId:artifactId, which Maven rejects with "must be unique".
+        String pom = """
+                <project>
+                  <properties>
+                    <logback.version>1.5.25</logback.version>
+                  </properties>
+                  <dependencyManagement>
+                    <dependencies>
+                      <!-- CVE-2026-1225: force logback-core to patched version -->
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>${logback.version}</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.35", "Enforcer dependency convergence fix by RedKite");
+
+        int entryCount = countOccurrences(updated, "<artifactId>logback-core</artifactId>");
+        assertEquals(1, entryCount, "Should take over the existing entry, not add a duplicate");
+        assertTrue(updated.contains("<version>1.5.35</version>"), "Should hardcode the winner version");
+        assertFalse(updated.contains("${logback.version}"), "Should replace the property reference, not keep it alongside a new literal entry");
+        assertTrue(updated.contains("redkite:dependency-management pin"), "Should mark the taken-over entry as RedKite-managed");
+    }
+
+    @Test
     void stripsRedkiteExclusionsFromPom() {
         String withExclusion = applier.applyExclusion(POM_WITH_DEPENDENCIES,
                 "com.example", "service-b",
