@@ -1676,13 +1676,16 @@ public class RedKiteServerMain {
                         propUpgradeTo.put(propName, upgrade);
                     }
                 }
+            } else if ("parent".equals(dep.getNodeName())) {
+                // <parent> versions always stay literal, upgrade or not. Maven resolves the
+                // parent's coordinates before it processes <properties> (properties can
+                // themselves be inherited from that same parent), so a ${...} reference here
+                // is never interpolated — Maven fails trying to fetch the literal string
+                // "${propName}" as a version.
+                if (upgrade != null) versionNode.setTextContent(upgrade);
             } else {
                 // Literal version: normalise to a property reference.
                 // Use the upgrade version if selected, otherwise keep the current version.
-                // Exception: <parent> versions are left as literals when not being upgraded —
-                // it's unusual and disruptive to normalise a parent version to a property
-                // just because other deps in the same POM are being upgraded.
-                if (upgrade == null && "parent".equals(dep.getNodeName())) continue;
                 String effectiveVersion = upgrade != null ? upgrade : versionText;
                 String propName = propNameForCoord.get(coord);
                 if (propName == null) {
