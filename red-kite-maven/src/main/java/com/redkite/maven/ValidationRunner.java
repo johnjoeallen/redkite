@@ -6,6 +6,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -55,10 +56,12 @@ public class ValidationRunner {
                 LOGGER.info(() -> "Validation build passed for " + pomPath);
             } else {
                 LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
+                saveFailedPom(pomPath);
             }
             return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output));
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
+            saveFailedPom(pomPath);
             return new ValidationResult(false, "build", "", e.getMessage());
         }
     }
@@ -102,6 +105,7 @@ public class ValidationRunner {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs, "spring-boot:run");
+        LOGGER.info(() -> "Startup validation build: " + String.join(" ", command));
 
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
@@ -137,11 +141,27 @@ public class ValidationRunner {
                 LOGGER.info(() -> "Startup validation passed for " + pomPath);
             } else {
                 LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
+                saveFailedPom(pomPath);
             }
             return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output));
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
+            saveFailedPom(pomPath);
             return new ValidationResult(false, "startup", "", e.getMessage());
+        }
+    }
+
+    /**
+     * Copies the given POM to a sibling {@code pom.failed} file for later analysis, overwriting any
+     * previous one. Best-effort: failures to save are logged but never thrown.
+     */
+    private static void saveFailedPom(Path pomPath) {
+        Path failedPath = pomPath.resolveSibling("pom.failed");
+        try {
+            Files.copy(pomPath, failedPath, StandardCopyOption.REPLACE_EXISTING);
+            LOGGER.info(() -> "Saved failing POM to " + failedPath);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not save failing POM to " + failedPath + ": " + e.getMessage());
         }
     }
 
