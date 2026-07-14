@@ -425,6 +425,12 @@ Else:
     Phase 2 result = remaining findings (unresolvable without exclusions)
 ```
 
+**Family alignment (`alignFamilyVersions`):** `computeWinnerVersion` is strictly per-artifact — it only sees the resolved/conflicting versions observed for that one groupId:artifactId's own conflict finding. For a coordinated release train (all modules of a library published and versioned together), this can pick a version for one member that's incompatible with a sibling member found elsewhere in the tree — e.g. pinning `io.cucumber:cucumber-core` to a version lower than the `cucumber.version` the project's own `cucumber-java`/`cucumber-spring`/`cucumber-junit-platform-engine` dependencies are declared at, since `cucumber-java`'s version never appears as a candidate in `cucumber-core`'s own finding. `cucumber-junit-platform-engine` then fails to discover tests because the Cucumber JVM classpath is split across two incompatible releases.
+
+After all per-finding winners are computed, `alignFamilyVersions` raises every pin belonging to a known `FamilyGroup` (Cucumber's core module set, `io.netty`, `software.amazon.awssdk`, `io.zipkin.brave`, `org.eclipse.jetty*`, `net.bytebuddy`, `io.opentelemetry`) up to the highest version required anywhere for that family — either another family member's computed pin, or a family member's version as declared/resolved elsewhere in the project (`ScanReport.components()`, unavailable to a single finding). Pins are only ever raised, never lowered. Cucumber's family membership is an explicit artifact allowlist rather than "all of `io.cucumber`", since Cucumber also publishes independently-versioned siblings under the same groupId (formatter/reporting plugins, the standalone `io.cucumber:gherkin` parser) that must NOT be forced to the core version.
+
+This does not reduce the number of pins generated — Phase 2 still pins one entry per conflicting artifact; it only ensures family members agree on a compatible version. A project with a very large, sprawling dependency graph can still legitimately produce a long pin list; that reflects the number of real convergence violations Maven found, not an inefficiency in the pin format itself.
+
 The pins are displayed in the UI under "Auto-fix — computed dep-management pins" with an Apply button. Clicking Apply writes all pins via `POST /api/scans/remediation/apply` and triggers a re-scan.
 
 ### Stale Exclusion Detection

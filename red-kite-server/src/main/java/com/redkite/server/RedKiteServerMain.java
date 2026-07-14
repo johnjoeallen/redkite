@@ -634,7 +634,9 @@ public class RedKiteServerMain {
             // parent-POM resolution and source-file lookup always work correctly.
             // If a previous run established that rules are lifecycle-bound (enforcer:enforce
             // reports no rules), the project flag is set and we skip straight to verify.
-            String projectId = store.getScan(scanId).projectId();
+            ScanEntry scanEntry = store.getScan(scanId);
+            String projectId = scanEntry.projectId();
+            List<ScanComponent> components = scanEntry.report().components();
             boolean skipDirectEnforce = store.getProjectEnforcerUseVerify(projectId);
             EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath, skipDirectEnforce);
             if (enfResult.usedVerifyFallback() && !skipDirectEnforce) {
@@ -667,7 +669,7 @@ public class RedKiteServerMain {
             List<TransitiveConflictFinding> phase2Findings = null;
             List<String> phase2Pins = List.of();
             if (status == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
-                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings, skipDirectEnforce);
+                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings, skipDirectEnforce, components);
                 if (p2 != null) {
                     phase2Findings = p2.remainingFindings();
                     phase2Pins = p2.appliedPins();
@@ -705,7 +707,7 @@ public class RedKiteServerMain {
 
     private Phase2Result runPhase2Validation(
             Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings,
-            boolean skipDirectEnforce) {
+            boolean skipDirectEnforce, List<ScanComponent> components) {
         try {
             // Compute winner as max version — consistent with pristine analysis (all dep mgmt stripped)
             Map<String, String> pins = new LinkedHashMap<>();
@@ -715,6 +717,7 @@ public class RedKiteServerMain {
                     pins.put(f.groupId() + ":" + f.artifactId(), winner);
                 }
             }
+            alignFamilyVersions(pins, components);
             List<String> pinsList = pins.entrySet().stream()
                     .map(e -> e.getKey() + ":" + e.getValue())
                     .toList();
@@ -732,6 +735,73 @@ public class RedKiteServerMain {
         } catch (Exception e) {
             LOGGER.warning(() -> "Phase 2 validation failed: " + e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * A group of artifacts released together on one version (a "release train"), where pinning
+     * members independently — as {@link #computeWinnerVersion} does per groupId:artifactId — can
+     * split the family across incompatible versions (e.g. forcing {@code cucumber-core} lower than
+     * the {@code cucumber.version} the rest of the Cucumber stack is declared at, which breaks
+     * {@code cucumber-junit-platform-engine}'s test discovery).
+     *
+     * @param artifactAllowlist restricts matching to these artifactIds within the group, for
+     *                          families that publish independently-versioned siblings under the
+     *                          same groupId (e.g. Cucumber's formatter/reporting plugins and the
+     *                          standalone {@code io.cucumber:gherkin} parser, which do NOT share
+     *                          {@code cucumber.version}). {@code null} matches every artifact under
+     *                          {@code groupIdPrefix}.
+     */
+    private record FamilyGroup(String id, String groupIdPrefix, Set<String> artifactAllowlist) {
+        boolean matches(String groupId, String artifactId) {
+            boolean groupMatches = groupId.equals(groupIdPrefix) || groupId.startsWith(groupIdPrefix + ".");
+            if (!groupMatches) return false;
+            return artifactAllowlist == null || artifactAllowlist.contains(artifactId);
+        }
+    }
+
+    private static final List<FamilyGroup> COORDINATED_FAMILIES = List.of(
+            new FamilyGroup("cucumber", "io.cucumber", Set.of(
+                    "cucumber-core", "cucumber-gherkin", "cucumber-gherkin-messages", "cucumber-plugin",
+                    "datatable", "docstring", "cucumber-java", "cucumber-spring", "cucumber-junit-platform-engine")),
+            new FamilyGroup("netty", "io.netty", null),
+            new FamilyGroup("aws-sdk", "software.amazon.awssdk", null),
+            new FamilyGroup("brave", "io.zipkin.brave", null),
+            new FamilyGroup("jetty", "org.eclipse.jetty", null),
+            new FamilyGroup("bytebuddy", "net.bytebuddy", null),
+            new FamilyGroup("opentelemetry", "io.opentelemetry", null));
+
+    /**
+     * Raises every computed pin belonging to a {@link #COORDINATED_FAMILIES} entry up to the
+     * highest version required anywhere for that family — either another family member's computed
+     * pin, or a family member's version as actually declared/resolved elsewhere in the project
+     * (which never shows up as a "winner" candidate for a DIFFERENT artifact's conflict finding).
+     * Never lowers a pin; a higher independently-computed winner for one member still wins.
+     */
+    private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components) {
+        for (FamilyGroup family : COORDINATED_FAMILIES) {
+            String floor = null;
+            for (Map.Entry<String, String> e : pins.entrySet()) {
+                String[] ga = e.getKey().split(":", 2);
+                if (ga.length == 2 && family.matches(ga[0], ga[1])
+                        && (floor == null || compareVersionsSemantic(e.getValue(), floor) > 0)) {
+                    floor = e.getValue();
+                }
+            }
+            for (ScanComponent c : components) {
+                String g = c.coordinate().groupId(), a = c.coordinate().artifactId();
+                if (family.matches(g, a) && c.version() != null && !c.snapshot()
+                        && (floor == null || compareVersionsSemantic(c.version(), floor) > 0)) {
+                    floor = c.version();
+                }
+            }
+            if (floor == null) continue;
+            for (Map.Entry<String, String> e : pins.entrySet()) {
+                String[] ga = e.getKey().split(":", 2);
+                if (ga.length == 2 && family.matches(ga[0], ga[1]) && compareVersionsSemantic(floor, e.getValue()) > 0) {
+                    e.setValue(floor);
+                }
+            }
         }
     }
 
