@@ -100,11 +100,22 @@ public class ValidationRunner {
             return buildResult;
         }
 
-        LOGGER.info(() -> "Running startup validation (spring-boot:run) for " + pomPath
+        // Run the app on a random verified-free port so the check never collides with another
+        // instance — the app's default port may be held by the developer's own running copy, or
+        // by an orphan from a previous validation.
+        int port;
+        try {
+            port = findFreePort();
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not allocate a free port for startup validation: " + e.getMessage());
+            return new ValidationResult(false, "startup", "", "Could not allocate a free port: " + e.getMessage());
+        }
+        LOGGER.info(() -> "Running startup validation (spring-boot:run, port " + port + ") for " + pomPath
                 + " with timeout " + timeoutSeconds + "s");
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs, "spring-boot:run");
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs,
+                "spring-boot:run", "-Dspring-boot.run.arguments=--server.port=" + port);
         LOGGER.info(() -> "Startup validation build: " + String.join(" ", command));
 
         try {
@@ -131,8 +142,7 @@ public class ValidationRunner {
             readerThread.setDaemon(true);
             readerThread.start();
             readerThread.join((long) timeoutSeconds * 1000);
-            process.destroyForcibly();
-            process.waitFor();
+            killProcessTree(process);
             readerThread.join(5000L);
 
             String output = startupOutput.toString();
@@ -148,6 +158,46 @@ public class ValidationRunner {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
             saveFailedPom(pomPath);
             return new ValidationResult(false, "startup", "", e.getMessage());
+        }
+    }
+
+    /**
+     * Allocates a random free port. Binding to port 0 makes the OS hand out an unused ephemeral
+     * port — the successful bind IS the verification that nothing is listening on it; the socket
+     * is closed immediately so the app under validation can claim it.
+     */
+    private static int findFreePort() throws IOException {
+        try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+            socket.setReuseAddress(true);
+            return socket.getLocalPort();
+        }
+    }
+
+    /**
+     * Forcibly terminates the process AND all of its descendants, then waits for them to die.
+     * Destroying only the top-level process is not enough: on Windows, killing the {@code mvn.cmd}
+     * wrapper leaves the forked Java process (the Spring Boot app under {@code spring-boot:run})
+     * running — it keeps its web server port bound, and the NEXT validation's startup check then
+     * fails with "Port already in use".
+     */
+    private static void killProcessTree(Process process) throws InterruptedException {
+        // Capture descendants BEFORE killing the parent — once the parent is gone the tree
+        // relationship is broken and descendants() returns nothing.
+        List<ProcessHandle> descendants = process.descendants().toList();
+        descendants.forEach(ProcessHandle::destroyForcibly);
+        process.destroyForcibly();
+        process.waitFor();
+        long deadline = System.currentTimeMillis() + 10_000;
+        for (ProcessHandle descendant : descendants) {
+            while (descendant.isAlive() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(100);
+            }
+        }
+        List<ProcessHandle> survivors = descendants.stream().filter(ProcessHandle::isAlive).toList();
+        if (!survivors.isEmpty()) {
+            LOGGER.warning(() -> "Startup validation: " + survivors.size()
+                    + " child process(es) did not terminate within 10s of being killed"
+                    + " — the app may still be holding its port");
         }
     }
 

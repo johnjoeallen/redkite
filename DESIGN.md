@@ -613,7 +613,11 @@ PRE_VALIDATE
   ValidationRunner.validateWithStartup(projectRoot, rootPom, 90s)
     → mvn clean install -DskipTests -Denforcer.skip=true
     → if spring-boot-maven-plugin present in root POM:
-        mvn spring-boot:run (kill after startup signal or 90 s timeout)
+        mvn spring-boot:run --server.port=<random verified-free port>
+        (so the check never collides with a developer-run or orphaned instance;
+         killed — including all descendant processes, since destroying only the
+         mvn wrapper leaves the forked JVM holding its port — after the startup
+         signal or 90 s timeout)
   Records baselinePassed=true/false.
   Non-blocking: a failing baseline means the project was already broken.
   Apply continues regardless.
