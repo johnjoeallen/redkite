@@ -183,11 +183,11 @@ class RemediationApplierTest {
     }
 
     @Test
-    void takesOverExistingPlainDepMgmtEntryInsteadOfDuplicating() {
-        // A project may already manage an artifact itself (e.g. a manual CVE pin using a
-        // ${...} property) with no RedKite marker comment at all. RedKite must take that
-        // entry over rather than inserting a second <dependency> block for the same
-        // groupId:artifactId, which Maven rejects with "must be unique".
+    void updatesVersionPropertyWhenProjectEntryUsesOne() {
+        // A project entry managed through a version property (typically shared by sibling
+        // modules, e.g. ${logback.version} driving logback-core AND logback-classic) must have
+        // the PROPERTY updated — hardcoding the single entry would silently detach it from its
+        // family and allow the family to split across versions.
         String pom = """
                 <project>
                   <properties>
@@ -206,13 +206,65 @@ class RemediationApplierTest {
                 </project>
                 """;
         String updated = applier.applyDependencyManagementPin(pom,
-                "ch.qos.logback", "logback-core", "1.5.35", "Enforcer dependency convergence fix by RedKite");
+                "ch.qos.logback", "logback-core", "1.5.38", "Enforcer dependency convergence fix by RedKite");
 
-        int entryCount = countOccurrences(updated, "<artifactId>logback-core</artifactId>");
-        assertEquals(1, entryCount, "Should take over the existing entry, not add a duplicate");
-        assertTrue(updated.contains("<version>1.5.35</version>"), "Should hardcode the winner version");
-        assertFalse(updated.contains("${logback.version}"), "Should replace the property reference, not keep it alongside a new literal entry");
-        assertTrue(updated.contains("redkite:dependency-management pin"), "Should mark the taken-over entry as RedKite-managed");
+        assertEquals(1, countOccurrences(updated, "<artifactId>logback-core</artifactId>"),
+                "Should not add a duplicate entry");
+        assertTrue(updated.contains("<logback.version>1.5.38</logback.version>"),
+                "Should update the property value");
+        assertTrue(updated.contains("<version>${logback.version}</version>"),
+                "The entry must keep its property reference");
+        assertFalse(updated.contains("redkite:dependency-management"),
+                "Property updates must not convert the entry into a RedKite-managed pin");
+    }
+
+    @Test
+    void leavesEntryUntouchedWhenItsPropertyIsNotDefinedInThisPom() {
+        // If the property comes from somewhere this POM can't see (e.g. an external parent),
+        // converting the entry into a standalone hardcoded pin is worse than not applying.
+        String pom = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>${logback.version}</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.38", "Fix");
+        assertEquals(pom, updated, "Must not modify the POM when the property can't be located");
+    }
+
+    @Test
+    void takesOverExistingLiteralDepMgmtEntryInsteadOfDuplicating() {
+        // A project entry with a literal version (no property) is taken over in place rather
+        // than duplicated, which Maven rejects with "must be unique".
+        String pom = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.25</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.38", "Fix");
+        assertEquals(1, countOccurrences(updated, "<artifactId>logback-core</artifactId>"),
+                "Should take over the existing entry, not add a duplicate");
+        assertTrue(updated.contains("<version>1.5.38</version>"), "Should update the version in place");
+        assertFalse(updated.contains("1.5.25"), "Old version should be gone");
+        assertTrue(updated.contains("redkite:dependency-management pin"),
+                "Should mark the taken-over entry as RedKite-managed");
     }
 
     @Test

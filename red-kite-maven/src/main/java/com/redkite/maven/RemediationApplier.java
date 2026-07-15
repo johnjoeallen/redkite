@@ -35,10 +35,11 @@ import java.util.List;
  *   <li>Dependency management pins: {@code <!-- redkite:dependency-management pin groupId="..." artifactId="..." version="..." reason="..." — remove this comment to prevent RedKite managing this dependency -->}
  * </ul>
  *
- * <p>Dependency management pins always use a hardcoded {@code <version>} rather than a
- * {@code ${...}} property reference — they're meant to be a single, self-contained,
- * independently removable override, not entangled with a project's own property-based
- * versioning scheme.
+ * <p>Dependency management pins RedKite inserts itself always use a hardcoded {@code <version>}
+ * rather than a {@code ${...}} property reference — they're meant to be a single, self-contained,
+ * independently removable override. The reverse also holds: when the PROJECT already manages an
+ * artifact through a version property, RedKite updates the property's value rather than
+ * hardcoding the entry, preserving the family semantics the property encodes.
  */
 public class RemediationApplier {
 
@@ -129,11 +130,33 @@ public class RemediationApplier {
         }
 
         // 2) The project already has its OWN (non-RedKite) dependencyManagement entry for this
-        // artifact — e.g. a manual CVE pin using a ${...} property. Take it over (mark it and
-        // hardcode the version) rather than inserting a second <dependency> block for the same
-        // groupId:artifactId, which Maven rejects with "must be unique".
+        // artifact. Never insert a second <dependency> block for the same groupId:artifactId
+        // (Maven rejects it with "must be unique") — and never destroy the entry's semantics:
         Element plain = findPlainDepMgmtEntry(doc, groupId, artifactId);
         if (plain != null) {
+            Element versionEl = directChild(plain, "version");
+            String versionText = versionEl != null ? versionEl.getTextContent().trim() : null;
+            if (versionText != null && versionText.startsWith("${") && versionText.endsWith("}")) {
+                // The entry manages this artifact through a version property — typically a
+                // family property shared by sibling modules (e.g. ${logback.version} driving
+                // both logback-core and logback-classic). Hardcoding this one entry would
+                // silently detach it from its family, so update the property's VALUE instead,
+                // moving every dependency that shares it together.
+                String propertyName = versionText.substring(2, versionText.length() - 1);
+                Element property = findProjectProperty(doc, propertyName);
+                if (property == null) {
+                    // Property not defined in this POM (e.g. inherited from a parent) — leave
+                    // the project's management untouched; converting the entry into a
+                    // standalone hardcoded pin is worse than not applying the fix.
+                    return content;
+                }
+                if (version.equals(property.getTextContent().trim())) {
+                    return content;
+                }
+                property.setTextContent(version);
+                return serialize(doc);
+            }
+            // Literal version: take the entry over — mark it and update the version in place.
             setChildText(doc, plain, "version", version);
             plain.getParentNode().insertBefore(
                     buildPinComment(doc, groupId, artifactId, version, reason), plain);
@@ -314,6 +337,12 @@ public class RemediationApplier {
             }
         }
         return null;
+    }
+
+    /** Finds a property element by name in the project root's {@code <properties>} block. */
+    private static Element findProjectProperty(Document doc, String propertyName) {
+        Element properties = directChild(doc.getDocumentElement(), "properties");
+        return properties != null ? directChild(properties, propertyName) : null;
     }
 
     /**

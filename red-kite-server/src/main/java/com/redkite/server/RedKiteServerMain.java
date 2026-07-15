@@ -718,8 +718,7 @@ public class RedKiteServerMain {
             Map<String, String> pins = new LinkedHashMap<>();
             for (TransitiveConflictFinding f : findings) {
                 String key = f.groupId() + ":" + f.artifactId();
-                String winner = declared.get(key);
-                if (winner == null) winner = computeWinnerVersion(f, "");
+                String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), declared.get(key));
                 if (winner != null && !winner.isBlank()) {
                     pins.put(key, winner);
                 }
@@ -776,7 +775,20 @@ public class RedKiteServerMain {
             new FamilyGroup("brave", "io.zipkin.brave", null),
             new FamilyGroup("jetty", "org.eclipse.jetty", null),
             new FamilyGroup("bytebuddy", "net.bytebuddy", null),
-            new FamilyGroup("opentelemetry", "io.opentelemetry", null));
+            new FamilyGroup("opentelemetry", "io.opentelemetry", null),
+            new FamilyGroup("logback", "ch.qos.logback", null),
+            // JUnit Jupiter (5.x) and Platform (1.x) are released together but on different
+            // version schemes — they must be aligned within themselves, never with each other.
+            new FamilyGroup("junit-jupiter", "org.junit.jupiter", null),
+            new FamilyGroup("junit-platform", "org.junit.platform", null),
+            // Micrometer core (1.1x.y) and tracing (1.x.y) version independently despite the
+            // shared groupId, and context-propagation is independent of both.
+            new FamilyGroup("micrometer-core", "io.micrometer", Set.of(
+                    "micrometer-commons", "micrometer-core", "micrometer-jakarta9", "micrometer-observation",
+                    "micrometer-registry-prometheus")),
+            new FamilyGroup("micrometer-tracing", "io.micrometer", Set.of(
+                    "micrometer-tracing", "micrometer-tracing-bridge-brave", "micrometer-tracing-bridge-otel")),
+            new FamilyGroup("jackson", "com.fasterxml.jackson", null));
 
     /**
      * Computes planned dep-management pins for a set of findings, family-aligned. Used both by
@@ -788,8 +800,7 @@ public class RedKiteServerMain {
         Map<String, String> pins = new LinkedHashMap<>();
         for (TransitiveConflictFinding f : findings) {
             String key = f.groupId() + ":" + f.artifactId();
-            String winner = projectDeclared.get(key);
-            if (winner == null) winner = computeWinnerVersion(f, "");
+            String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), projectDeclared.get(key));
             if (winner != null && !winner.isBlank()) {
                 pins.put(key, winner);
             }
@@ -812,11 +823,10 @@ public class RedKiteServerMain {
             if (last <= 0) continue;
             pins.put(gav.substring(0, last), gav.substring(last + 1));
         }
-        // A stored pin for an artifact the project itself manages must yield to the project's
-        // declared version, same as a fresh computation would.
+        // A stored pin for an artifact the project itself manages must be reconciled with the
+        // project's declared version, same as a fresh computation would be.
         for (Map.Entry<String, String> e : pins.entrySet()) {
-            String declaredVersion = projectDeclared.get(e.getKey());
-            if (declaredVersion != null) e.setValue(declaredVersion);
+            e.setValue(reconcileWithDeclared(e.getValue(), projectDeclared.get(e.getKey())));
         }
         alignFamilyVersions(pins, components, projectDeclared);
         return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
@@ -855,10 +865,23 @@ public class RedKiteServerMain {
                 }
             }
             if (declaredTarget != null) {
+                // Computed winners may raise the family WITHIN the declared release line (e.g.
+                // logback declared 1.5.25, findings require 1.5.38 → whole family to 1.5.38).
+                // Winners on a different line never drag the family across it (Netty declared
+                // 4.1.135 stays 4.1.135 even when 4.2.x is observed transitively).
+                String target = declaredTarget;
+                for (Map.Entry<String, String> e : pins.entrySet()) {
+                    String[] ga = e.getKey().split(":", 2);
+                    if (ga.length == 2 && family.matches(ga[0], ga[1])
+                            && sameReleaseLine(e.getValue(), declaredTarget)
+                            && compareVersionsSemantic(e.getValue(), target) > 0) {
+                        target = e.getValue();
+                    }
+                }
                 for (Map.Entry<String, String> e : pins.entrySet()) {
                     String[] ga = e.getKey().split(":", 2);
                     if (ga.length == 2 && family.matches(ga[0], ga[1])) {
-                        e.setValue(declaredTarget);
+                        e.setValue(target);
                     }
                 }
                 continue;
@@ -930,6 +953,35 @@ public class RedKiteServerMain {
             LOGGER.warning(() -> "Could not parse root POM for declared dep-management: " + e.getMessage());
         }
         return declared;
+    }
+
+    /**
+     * Reconciles a computed winner with the version the project itself declares for the same
+     * artifact. The declared version is the project's deliberate choice and wins by default; the
+     * computed winner overrides it only when it is a raise WITHIN the declared release line
+     * (same major.minor — e.g. logback 1.5.25 declared, 1.5.38 required → 1.5.38). A computed
+     * winner on a different line (Netty 4.1.135 declared, 4.2.16 observed transitively) must not
+     * displace the declared version.
+     */
+    private String reconcileWithDeclared(String computed, String declaredVersion) {
+        if (declaredVersion == null || declaredVersion.isBlank()) return computed;
+        if (computed == null || computed.isBlank()) return declaredVersion;
+        if (sameReleaseLine(computed, declaredVersion) && compareVersionsSemantic(computed, declaredVersion) > 0) {
+            return computed;
+        }
+        return declaredVersion;
+    }
+
+    /** Whether two versions share a release line (equal first two version tokens, e.g. "1.5"). */
+    private static boolean sameReleaseLine(String a, String b) {
+        return releaseLineOf(a).equals(releaseLineOf(b));
+    }
+
+    private static String releaseLineOf(String version) {
+        String[] tokens = version.split("[.\\-]");
+        String major = tokens.length > 0 ? tokens[0] : "0";
+        String minor = tokens.length > 1 ? tokens[1] : "0";
+        return major + "." + minor;
     }
 
     private static String readFileQuietly(Path path) {
