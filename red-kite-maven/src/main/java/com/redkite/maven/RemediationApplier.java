@@ -1,6 +1,21 @@
 package com.redkite.maven;
 
+import org.w3c.dom.Comment;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import org.xml.sax.InputSource;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
 import java.io.IOException;
+import java.io.StringReader;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -9,6 +24,9 @@ import java.util.List;
 
 /**
  * Applies enforcer-suggested remediations to POM files.
+ *
+ * <p>All mutations go through DOM parse + serialise (never string splicing), so output is
+ * always well-formed XML with consistent two-space indentation.
  *
  * <p>RedKite-managed insertions are marked with structured XML comments so they
  * can be identified and reversed:
@@ -28,8 +46,7 @@ public class RemediationApplier {
     private static final String DEP_MGMT_TAG = "redkite:dependency-management pin";
     // Matches both the current marker and the pre-rename one ("redkite:dependency-management",
     // no " pin" suffix) so pins written by older RedKite versions are still recognized as
-    // existing pins to update in place, instead of being invisible to findRedkiteDepMgmtComment
-    // and duplicated by a fresh insert alongside the original on every subsequent apply.
+    // existing pins to update in place instead of being duplicated by a fresh insert.
     private static final String DEP_MGMT_TAG_DETECT_PREFIX = "redkite:dependency-management";
     private static final String DEP_MGMT_REMOVE_NOTE = "remove this comment to prevent RedKite managing this dependency";
 
@@ -53,37 +70,30 @@ public class RemediationApplier {
                                  String parentGroupId, String parentArtifactId,
                                  String excludeGroupId, String excludeArtifactId,
                                  String reason) {
-        List<String> lines = toLines(content);
-        List<String> result = new ArrayList<>();
-        int i = 0;
-        while (i < lines.size()) {
-            String line = lines.get(i);
-            result.add(line);
-            // Look for a <dependency> block that matches our parent
-            if (isDependencyBlockStart(line)) {
-                int blockEnd = findBlockEnd(lines, i, "</dependency>");
-                if (blockEnd != -1) {
-                    List<String> block = lines.subList(i + 1, blockEnd);
-                    if (blockMatchesCoord(block, parentGroupId, parentArtifactId)) {
-                        // Is an existing redkite exclusion already present for this artifact?
-                        if (!hasRedkiteExclusion(block, excludeGroupId, excludeArtifactId)) {
-                            String indent = detectIndent(line);
-                            // Add block content through to end, inserting exclusion before </dependency>
-                            for (int j = i + 1; j < blockEnd; j++) {
-                                result.add(lines.get(j));
-                            }
-                            result.addAll(buildExclusionBlock(
-                                    indent + "  ", excludeGroupId, excludeArtifactId, reason));
-                            result.add(lines.get(blockEnd)); // closing </dependency>
-                            i = blockEnd + 1;
-                            continue;
-                        }
-                    }
-                }
+        Document doc = parse(content);
+        boolean changed = false;
+        for (Element dep : elementsByTag(doc, "dependency")) {
+            if (!coordMatches(dep, parentGroupId, parentArtifactId)) continue;
+            if (hasRedkiteExclusion(dep, excludeGroupId, excludeArtifactId)) continue;
+
+            // Maven allows at most one <exclusions> element per dependency — reuse it if present
+            Element exclusions = directChild(dep, "exclusions");
+            if (exclusions == null) {
+                exclusions = doc.createElement("exclusions");
+                dep.appendChild(exclusions);
             }
-            i++;
+            Comment marker = doc.createComment(" " + EXCLUSION_TAG
+                    + " groupId=\"" + excludeGroupId + "\""
+                    + " artifactId=\"" + excludeArtifactId + "\""
+                    + " reason=\"" + escapeAttr(reason) + "\" ");
+            Element exclusion = doc.createElement("exclusion");
+            appendTextChild(doc, exclusion, "groupId", excludeGroupId);
+            appendTextChild(doc, exclusion, "artifactId", excludeArtifactId);
+            exclusions.appendChild(marker);
+            exclusions.appendChild(exclusion);
+            changed = true;
         }
-        return String.join(System.lineSeparator(), result);
+        return changed ? serialize(doc) : content;
     }
 
     /**
@@ -102,49 +112,53 @@ public class RemediationApplier {
                                                String groupId, String artifactId, String version,
                                                String reason) {
         version = sanitizeVersion(version);
-        List<String> lines = toLines(content);
+        Document doc = parse(content);
 
-        // Check if a redkite-managed entry already exists; update it in-place
-        int existingComment = findRedkiteDepMgmtComment(lines, groupId, artifactId);
-        if (existingComment != -1) {
-            return updateDepMgmtVersion(lines, existingComment, version, reason);
+        // 1) A redkite-managed entry already exists — update it in place.
+        Comment existing = findRedkiteDepMgmtComment(doc, groupId, artifactId);
+        if (existing != null) {
+            String data = existing.getData()
+                    .replaceAll("version=\"[^\"]*\"", "version=\"" + version + "\"")
+                    .replaceAll("reason=\"[^\"]*\"", "reason=\"" + escapeAttr(reason) + "\"");
+            existing.setData(data);
+            Element dep = nextElementSibling(existing);
+            if (dep != null && "dependency".equals(dep.getNodeName())) {
+                setChildText(doc, dep, "version", version);
+            }
+            return serialize(doc);
         }
 
-        // Check if the project already has its OWN (non-RedKite) dependencyManagement entry
-        // for this artifact — e.g. a manual CVE pin or BOM override using a ${...} property.
-        // Take it over (mark it and hardcode the version) rather than inserting a second
-        // <dependency> block for the same groupId:artifactId, which Maven rejects with
-        // "must be unique" and which silently leaves the pre-existing entry still in effect
-        // (first-declared-wins), making the new RedKite pin dead weight at best.
-        int plainEntry = findPlainDepMgmtEntry(lines, groupId, artifactId);
-        if (plainEntry != -1) {
-            return takeOverDepMgmtEntry(lines, plainEntry, groupId, artifactId, version, reason);
+        // 2) The project already has its OWN (non-RedKite) dependencyManagement entry for this
+        // artifact — e.g. a manual CVE pin using a ${...} property. Take it over (mark it and
+        // hardcode the version) rather than inserting a second <dependency> block for the same
+        // groupId:artifactId, which Maven rejects with "must be unique".
+        Element plain = findPlainDepMgmtEntry(doc, groupId, artifactId);
+        if (plain != null) {
+            setChildText(doc, plain, "version", version);
+            plain.getParentNode().insertBefore(
+                    buildPinComment(doc, groupId, artifactId, version, reason), plain);
+            return serialize(doc);
         }
 
-        // If <dependencyManagement><dependencies> exists, insert before </dependencies>
-        int depMgmtDepsClose = findDepMgmtDepsClose(lines);
-        if (depMgmtDepsClose != -1) {
-            String indent = detectIndentForClose(lines, depMgmtDepsClose);
-            List<String> insertion = buildDepMgmtEntry(indent, groupId, artifactId, version, reason);
-            List<String> result = new ArrayList<>(lines.subList(0, depMgmtDepsClose));
-            result.addAll(insertion);
-            result.addAll(lines.subList(depMgmtDepsClose, lines.size()));
-            return String.join(System.lineSeparator(), result);
+        // 3) Append to an existing <dependencyManagement><dependencies> block.
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            Element dependencies = directChild(depMgmt, "dependencies");
+            if (dependencies != null) {
+                dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason));
+                dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
+                return serialize(doc);
+            }
         }
 
-        // Otherwise insert a full <dependencyManagement> block before </project>
-        int projectClose = findLastTag(lines, "</project>");
-        if (projectClose == -1) {
-            // Fallback: append
-            List<String> result = new ArrayList<>(lines);
-            result.addAll(buildFullDepMgmtBlock("  ", groupId, artifactId, version, reason));
-            return String.join(System.lineSeparator(), result);
-        }
-        String indent = "  ";
-        List<String> result = new ArrayList<>(lines.subList(0, projectClose));
-        result.addAll(buildFullDepMgmtBlock(indent, groupId, artifactId, version, reason));
-        result.addAll(lines.subList(projectClose, lines.size()));
-        return String.join(System.lineSeparator(), result);
+        // 4) No <dependencyManagement> at all — create one under the project root.
+        Element root = doc.getDocumentElement();
+        Element depMgmt = doc.createElement("dependencyManagement");
+        Element dependencies = doc.createElement("dependencies");
+        dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason));
+        dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
+        depMgmt.appendChild(dependencies);
+        root.appendChild(depMgmt);
+        return serialize(doc);
     }
 
     /**
@@ -152,91 +166,41 @@ public class RemediationApplier {
      * Used to create a "clean" temp POM for re-analysis (Stage 4).
      */
     public String stripRedkiteRemediations(String content) {
-        List<String> lines = toLines(content);
-        List<String> result = new ArrayList<>();
-        int i = 0;
-        while (i < lines.size()) {
-            String line = lines.get(i);
-            String stripped = line.strip();
-
-            // Skip redkite comment + following <exclusion> or <dependency> block.
-            // Matched by prefix rather than a single-token tag extraction, since DEP_MGMT_TAG
-            // itself contains a space ("redkite:dependency-management pin").
-            if (stripped.startsWith("<!-- " + EXCLUSION_TAG)) {
-                // Skip the comment; also skip the <exclusion>...</exclusion> block that follows
-                i++;
-                if (i < lines.size() && lines.get(i).strip().startsWith("<exclusion")) {
-                    int blockEnd = findBlockEnd(lines, i, "</exclusion>");
-                    i = blockEnd != -1 ? blockEnd + 1 : i + 1;
+        Document doc = parse(content);
+        for (Comment comment : allComments(doc)) {
+            String data = comment.getData().strip();
+            if (data.startsWith(EXCLUSION_TAG)) {
+                Element next = nextElementSibling(comment);
+                if (next != null && "exclusion".equals(next.getNodeName())) {
+                    Node exclusions = next.getParentNode();
+                    exclusions.removeChild(next);
+                    comment.getParentNode().removeChild(comment);
+                    // If the <exclusions> wrapper is now empty, remove it too
+                    if (exclusions instanceof Element e && "exclusions".equals(e.getNodeName())
+                            && directChildren(e).isEmpty()) {
+                        e.getParentNode().removeChild(e);
+                    }
+                } else {
+                    comment.getParentNode().removeChild(comment);
                 }
-                // If <exclusions> wrapper becomes empty, remove it too
-                continue;
-            } else if (stripped.startsWith("<!-- " + DEP_MGMT_TAG_DETECT_PREFIX)) {
-                // Skip the comment + the <dependency>...</dependency> block that follows
-                i++;
-                if (i < lines.size() && lines.get(i).strip().startsWith("<dependency")) {
-                    int blockEnd = findBlockEnd(lines, i, "</dependency>");
-                    i = blockEnd != -1 ? blockEnd + 1 : i + 1;
+            } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
+                Element next = nextElementSibling(comment);
+                if (next != null && "dependency".equals(next.getNodeName())) {
+                    next.getParentNode().removeChild(next);
                 }
-                continue;
+                comment.getParentNode().removeChild(comment);
             }
-
-            result.add(line);
-            i++;
         }
-        // Clean up empty <exclusions/> or <exclusions></exclusions> left behind
-        return collapseEmptyExclusions(String.join(System.lineSeparator(), result));
+        return serialize(doc);
     }
 
-    // ---- Builders ----
-
-    private List<String> buildExclusionBlock(String indent,
-                                             String groupId, String artifactId, String reason) {
-        List<String> out = new ArrayList<>();
-        // Ensure <exclusions> wrapper exists — we look for it above; this just adds the entry
-        String rkComment = indent + "<!-- " + EXCLUSION_TAG
-                + " groupId=\"" + groupId + "\""
-                + " artifactId=\"" + artifactId + "\""
-                + " reason=\"" + escapeAttr(reason) + "\" -->";
-        out.add(indent + "<exclusions>");
-        out.add(rkComment);
-        out.add(indent + "  <exclusion>");
-        out.add(indent + "    <groupId>" + groupId + "</groupId>");
-        out.add(indent + "    <artifactId>" + artifactId + "</artifactId>");
-        out.add(indent + "  </exclusion>");
-        out.add(indent + "</exclusions>");
-        return out;
-    }
-
-    private List<String> buildDepMgmtEntry(String indent,
-                                           String groupId, String artifactId, String version,
-                                           String reason) {
-        List<String> out = new ArrayList<>();
-        String rkComment = indent + "  <!-- " + DEP_MGMT_TAG
-                + " groupId=\"" + groupId + "\""
-                + " artifactId=\"" + artifactId + "\""
-                + " version=\"" + version + "\""
-                + " reason=\"" + escapeAttr(reason) + "\""
-                + " — " + DEP_MGMT_REMOVE_NOTE + " -->";
-        out.add(rkComment);
-        out.add(indent + "  <dependency>");
-        out.add(indent + "    <groupId>" + groupId + "</groupId>");
-        out.add(indent + "    <artifactId>" + artifactId + "</artifactId>");
-        out.add(indent + "    <version>" + version + "</version>");
-        out.add(indent + "  </dependency>");
-        return out;
-    }
-
-    private List<String> buildFullDepMgmtBlock(String indent,
-                                               String groupId, String artifactId, String version,
-                                               String reason) {
-        List<String> out = new ArrayList<>();
-        out.add(indent + "<dependencyManagement>");
-        out.add(indent + "  <dependencies>");
-        out.addAll(buildDepMgmtEntry(indent + "  ", groupId, artifactId, version, reason));
-        out.add(indent + "  </dependencies>");
-        out.add(indent + "</dependencyManagement>");
-        return out;
+    /** Removes all {@code <dependencyManagement>} blocks from content. */
+    public String stripAllDepManagement(String content) {
+        Document doc = parse(content);
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            depMgmt.getParentNode().removeChild(depMgmt);
+        }
+        return serialize(doc);
     }
 
     /**
@@ -244,29 +208,16 @@ public class RemediationApplier {
      */
     public List<String> extractDepMgmtEntries(String content) {
         List<String> entries = new ArrayList<>();
-        int pos = 0;
-        while (true) {
-            int s = content.indexOf("<dependencyManagement>", pos);
-            if (s < 0) break;
-            int e = content.indexOf("</dependencyManagement>", s);
-            if (e < 0) break;
-            String block = content.substring(s, e);
-            int dpos = 0;
-            while (true) {
-                int ds = block.indexOf("<dependency>", dpos);
-                if (ds < 0) break;
-                int de = block.indexOf("</dependency>", ds);
-                if (de < 0) break;
-                String dep = block.substring(ds, de);
-                String g = extractSimpleTag(dep, "groupId");
-                String a = extractSimpleTag(dep, "artifactId");
-                String v = extractSimpleTag(dep, "version");
+        Document doc = parse(content);
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            for (Element dep : elementsByTag(depMgmt, "dependency")) {
+                String g = childText(dep, "groupId");
+                String a = childText(dep, "artifactId");
+                String v = childText(dep, "version");
                 if (g != null && a != null && v != null) {
                     entries.add(g + ":" + a + ":" + v);
                 }
-                dpos = de + 1;
             }
-            pos = e + 1;
         }
         return entries;
     }
@@ -281,36 +232,6 @@ public class RemediationApplier {
             idx += marker.length();
         }
         return count;
-    }
-
-    /** Removes all {@code <dependencyManagement>} blocks from content. */
-    public String stripAllDepManagement(String content) {
-        List<String> lines = toLines(content);
-        List<String> result = new ArrayList<>();
-        boolean inDepMgmt = false;
-        for (String line : lines) {
-            String s = line.strip();
-            if (!inDepMgmt && s.equals("<dependencyManagement>")) {
-                inDepMgmt = true;
-                continue;
-            }
-            if (inDepMgmt) {
-                if (s.equals("</dependencyManagement>")) inDepMgmt = false;
-                continue;
-            }
-            result.add(line);
-        }
-        return String.join(System.lineSeparator(), result);
-    }
-
-    private static String extractSimpleTag(String content, String tag) {
-        String open = "<" + tag + ">";
-        String close = "</" + tag + ">";
-        int s = content.indexOf(open);
-        if (s < 0) return null;
-        int e = content.indexOf(close, s);
-        if (e < 0) return null;
-        return content.substring(s + open.length(), e).trim();
     }
 
     /**
@@ -329,157 +250,187 @@ public class RemediationApplier {
         return result;
     }
 
-    // ---- Scanning helpers ----
+    // ---- DOM builders ----
 
-    private boolean isDependencyBlockStart(String line) {
-        String s = line.strip();
-        return s.equals("<dependency>") || s.startsWith("<dependency>");
+    private Comment buildPinComment(Document doc, String groupId, String artifactId,
+                                    String version, String reason) {
+        return doc.createComment(" " + DEP_MGMT_TAG
+                + " groupId=\"" + groupId + "\""
+                + " artifactId=\"" + artifactId + "\""
+                + " version=\"" + version + "\""
+                + " reason=\"" + escapeAttr(reason) + "\""
+                + " — " + DEP_MGMT_REMOVE_NOTE + " ");
     }
 
-    private int findBlockEnd(List<String> lines, int start, String closeTag) {
-        for (int i = start + 1; i < lines.size(); i++) {
-            if (lines.get(i).strip().contains(closeTag)) return i;
+    private Element buildPinDependency(Document doc, String groupId, String artifactId, String version) {
+        Element dep = doc.createElement("dependency");
+        appendTextChild(doc, dep, "groupId", groupId);
+        appendTextChild(doc, dep, "artifactId", artifactId);
+        appendTextChild(doc, dep, "version", version);
+        return dep;
+    }
+
+    // ---- DOM scanning helpers ----
+
+    /** All elements with the given tag name, in document order, materialised so removal is safe. */
+    private static List<Element> elementsByTag(Document doc, String tag) {
+        return materialise(doc.getElementsByTagName(tag));
+    }
+
+    private static List<Element> elementsByTag(Element scope, String tag) {
+        return materialise(scope.getElementsByTagName(tag));
+    }
+
+    private static List<Element> materialise(NodeList nl) {
+        List<Element> out = new ArrayList<>();
+        for (int i = 0; i < nl.getLength(); i++) {
+            if (nl.item(i) instanceof Element e) out.add(e);
         }
-        return -1;
+        return out;
     }
 
-    private boolean blockMatchesCoord(List<String> block, String groupId, String artifactId) {
-        boolean gMatch = false, aMatch = false;
-        for (String line : block) {
-            String s = line.strip();
-            if (s.equals("<groupId>" + groupId + "</groupId>")) gMatch = true;
-            if (s.equals("<artifactId>" + artifactId + "</artifactId>")) aMatch = true;
+    private static List<Comment> allComments(Document doc) {
+        List<Comment> out = new ArrayList<>();
+        collectComments(doc.getDocumentElement(), out);
+        return out;
+    }
+
+    private static void collectComments(Node node, List<Comment> out) {
+        NodeList children = node.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child instanceof Comment c) out.add(c);
+            else if (child.getNodeType() == Node.ELEMENT_NODE) collectComments(child, out);
         }
-        return gMatch && aMatch;
     }
 
-    private boolean hasRedkiteExclusion(List<String> block, String groupId, String artifactId) {
-        for (String line : block) {
-            String s = line.strip();
-            if (s.startsWith("<!-- " + EXCLUSION_TAG)
-                    && s.contains("groupId=\"" + groupId + "\"")
-                    && s.contains("artifactId=\"" + artifactId + "\"")) {
+    private Comment findRedkiteDepMgmtComment(Document doc, String groupId, String artifactId) {
+        for (Comment comment : allComments(doc)) {
+            String data = comment.getData().strip();
+            if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
+                    && data.contains("groupId=\"" + groupId + "\"")
+                    && data.contains("artifactId=\"" + artifactId + "\"")) {
+                return comment;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Finds an existing, plain (non-RedKite-tagged) {@code <dependency>} entry for
+     * {@code groupId:artifactId} inside any {@code <dependencyManagement>} block.
+     */
+    private Element findPlainDepMgmtEntry(Document doc, String groupId, String artifactId) {
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            for (Element dep : elementsByTag(depMgmt, "dependency")) {
+                if (coordMatches(dep, groupId, artifactId)) return dep;
+            }
+        }
+        return null;
+    }
+
+    private boolean hasRedkiteExclusion(Element dep, String groupId, String artifactId) {
+        List<Comment> comments = new ArrayList<>();
+        collectComments(dep, comments);
+        for (Comment comment : comments) {
+            String data = comment.getData().strip();
+            if (data.startsWith(EXCLUSION_TAG)
+                    && data.contains("groupId=\"" + groupId + "\"")
+                    && data.contains("artifactId=\"" + artifactId + "\"")) {
                 return true;
             }
         }
         return false;
     }
 
-    private int findDepMgmtDepsClose(List<String> lines) {
-        boolean inDepMgmt = false;
-        for (int i = 0; i < lines.size(); i++) {
-            String s = lines.get(i).strip();
-            if (s.startsWith("<dependencyManagement")) inDepMgmt = true;
-            if (inDepMgmt && s.equals("</dependencies>")) return i;
-            if (s.equals("</dependencyManagement>")) inDepMgmt = false;
-        }
-        return -1;
+    private static boolean coordMatches(Element dep, String groupId, String artifactId) {
+        return groupId.equals(childText(dep, "groupId")) && artifactId.equals(childText(dep, "artifactId"));
     }
 
-    private int findLastTag(List<String> lines, String tag) {
-        for (int i = lines.size() - 1; i >= 0; i--) {
-            if (lines.get(i).strip().equals(tag)) return i;
+    private static Element directChild(Element parent, String tag) {
+        for (Element child : directChildren(parent)) {
+            if (tag.equals(child.getNodeName())) return child;
         }
-        return -1;
+        return null;
     }
 
-    private int findRedkiteDepMgmtComment(List<String> lines, String groupId, String artifactId) {
-        for (int i = 0; i < lines.size(); i++) {
-            String s = lines.get(i).strip();
-            if (s.startsWith("<!-- " + DEP_MGMT_TAG_DETECT_PREFIX)
-                    && s.contains("groupId=\"" + groupId + "\"")
-                    && s.contains("artifactId=\"" + artifactId + "\"")) {
-                return i;
+    private static List<Element> directChildren(Element parent) {
+        List<Element> out = new ArrayList<>();
+        NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            if (children.item(i) instanceof Element e) out.add(e);
+        }
+        return out;
+    }
+
+    private static String childText(Element parent, String tag) {
+        Element child = directChild(parent, tag);
+        return child != null ? child.getTextContent().trim() : null;
+    }
+
+    private static void setChildText(Document doc, Element parent, String tag, String value) {
+        Element child = directChild(parent, tag);
+        if (child != null) {
+            child.setTextContent(value);
+        } else {
+            appendTextChild(doc, parent, tag, value);
+        }
+    }
+
+    private static void appendTextChild(Document doc, Element parent, String tag, String value) {
+        Element child = doc.createElement(tag);
+        child.setTextContent(value);
+        parent.appendChild(child);
+    }
+
+    private static Element nextElementSibling(Node node) {
+        Node sibling = node.getNextSibling();
+        while (sibling != null && sibling.getNodeType() != Node.ELEMENT_NODE) {
+            sibling = sibling.getNextSibling();
+        }
+        return (Element) sibling;
+    }
+
+    // ---- Parse / serialise ----
+
+    private static Document parse(String content) {
+        try {
+            return DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                    .parse(new InputSource(new StringReader(content)));
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to parse POM XML: " + e.getMessage(), e);
+        }
+    }
+
+    private static String serialize(Document doc) {
+        try {
+            stripWhitespaceNodes(doc.getDocumentElement());
+            Transformer transformer = TransformerFactory.newInstance().newTransformer();
+            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+            transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+            transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+            StringWriter sw = new StringWriter();
+            transformer.transform(new DOMSource(doc), new StreamResult(sw));
+            return sw.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to serialise POM XML: " + e.getMessage(), e);
+        }
+    }
+
+    /** Removes whitespace-only text nodes so the indenting serialiser re-indents cleanly. */
+    private static void stripWhitespaceNodes(Node node) {
+        NodeList children = node.getChildNodes();
+        for (int i = children.getLength() - 1; i >= 0; i--) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.TEXT_NODE && child.getTextContent().isBlank()) {
+                node.removeChild(child);
+            } else if (child.getNodeType() == Node.ELEMENT_NODE) {
+                stripWhitespaceNodes(child);
             }
         }
-        return -1;
     }
 
-    /**
-     * Finds an existing, plain (non-RedKite-tagged) {@code <dependency>} entry for
-     * {@code groupId:artifactId} inside any {@code <dependencyManagement>} block. Returns the
-     * line index of the {@code <dependency>} tag, or -1 if none exists.
-     */
-    private int findPlainDepMgmtEntry(List<String> lines, String groupId, String artifactId) {
-        boolean inDepMgmt = false;
-        for (int i = 0; i < lines.size(); i++) {
-            String s = lines.get(i).strip();
-            if (s.startsWith("<dependencyManagement")) {
-                inDepMgmt = true;
-            } else if (s.equals("</dependencyManagement>")) {
-                inDepMgmt = false;
-            } else if (inDepMgmt && isDependencyBlockStart(lines.get(i))) {
-                int blockEnd = findBlockEnd(lines, i, "</dependency>");
-                if (blockEnd != -1 && blockMatchesCoord(lines.subList(i + 1, blockEnd), groupId, artifactId)) {
-                    return i;
-                }
-            }
-        }
-        return -1;
-    }
-
-    /**
-     * Takes over an existing plain dependencyManagement entry: marks it with the RedKite
-     * comment and hardcodes its {@code <version>}, replacing any {@code ${...}} property
-     * reference it may have had.
-     */
-    private String takeOverDepMgmtEntry(List<String> lines, int depStart,
-                                        String groupId, String artifactId, String version, String reason) {
-        int blockEnd = findBlockEnd(lines, depStart, "</dependency>");
-        List<String> result = new ArrayList<>(lines);
-        for (int i = depStart + 1; i < blockEnd; i++) {
-            String s = result.get(i).strip();
-            if (s.startsWith("<version>") && s.endsWith("</version>")) {
-                result.set(i, result.get(i).replaceAll("<version>[^<]*</version>", "<version>" + version + "</version>"));
-                break;
-            }
-        }
-        String indent = detectIndent(lines.get(depStart));
-        String rkComment = indent + "<!-- " + DEP_MGMT_TAG
-                + " groupId=\"" + groupId + "\""
-                + " artifactId=\"" + artifactId + "\""
-                + " version=\"" + version + "\""
-                + " reason=\"" + escapeAttr(reason) + "\""
-                + " — " + DEP_MGMT_REMOVE_NOTE + " -->";
-        result.add(depStart, rkComment);
-        return String.join(System.lineSeparator(), result);
-    }
-
-    private String updateDepMgmtVersion(List<String> lines, int commentIdx, String version, String reason) {
-        List<String> result = new ArrayList<>(lines);
-        String old = result.get(commentIdx);
-        // Replace version="..." in the comment
-        String updated = old.replaceAll("version=\"[^\"]*\"", "version=\"" + version + "\"")
-                            .replaceAll("reason=\"[^\"]*\"", "reason=\"" + escapeAttr(reason) + "\"");
-        result.set(commentIdx, updated);
-        // Also update the <version> tag in the following dependency block
-        for (int i = commentIdx + 1; i < result.size() && i < commentIdx + 10; i++) {
-            String s = result.get(i);
-            if (s.strip().startsWith("<version>") && s.strip().endsWith("</version>")) {
-                result.set(i, s.replaceAll("<version>[^<]*</version>", "<version>" + version + "</version>"));
-                break;
-            }
-        }
-        return String.join(System.lineSeparator(), result);
-    }
-
-    private String collapseEmptyExclusions(String content) {
-        return content.replaceAll("\\s*<exclusions>\\s*</exclusions>", "");
-    }
-
-    private String detectIndent(String line) {
-        int i = 0;
-        while (i < line.length() && (line.charAt(i) == ' ' || line.charAt(i) == '\t')) i++;
-        return line.substring(0, i);
-    }
-
-    private String detectIndentForClose(List<String> lines, int closeIdx) {
-        return detectIndent(lines.get(closeIdx));
-    }
-
-    private static List<String> toLines(String content) {
-        return new ArrayList<>(List.of(content.split("\n", -1)));
-    }
+    // ---- Misc ----
 
     private String extractAttrValue(String comment, String attr) {
         String key = attr + "=\"";

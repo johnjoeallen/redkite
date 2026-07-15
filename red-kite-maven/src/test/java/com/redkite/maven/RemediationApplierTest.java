@@ -142,6 +142,47 @@ class RemediationApplierTest {
     }
 
     @Test
+    void reusesExistingExclusionsBlockInsteadOfAddingASecondOne() {
+        // Maven's schema allows at most one <exclusions> element per dependency. A dependency
+        // that already has its own exclusions must get the RedKite exclusion appended into the
+        // existing block, not a second <exclusions> sibling (which is invalid).
+        String pom = """
+                <project>
+                  <dependencies>
+                    <dependency>
+                      <groupId>com.example</groupId>
+                      <artifactId>service-b</artifactId>
+                      <version>2.0.0</version>
+                      <exclusions>
+                        <exclusion>
+                          <groupId>commons-io</groupId>
+                          <artifactId>commons-io</artifactId>
+                        </exclusion>
+                      </exclusions>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+        String result = applier.applyExclusion(pom,
+                "com.example", "service-b",
+                "com.google.guava", "guava",
+                "Convergence fix");
+        assertEquals(1, countOccurrences(result, "<exclusions>"),
+                "Must reuse the existing <exclusions> block, not add a second one");
+        assertTrue(result.contains("<artifactId>guava</artifactId>"), "New exclusion added");
+        assertTrue(result.contains("<artifactId>commons-io</artifactId>"), "Existing exclusion preserved");
+    }
+
+    @Test
+    void producesWellFormedXmlOutput() throws Exception {
+        String result = applier.applyDependencyManagementPin(POM_WITH_DEP_MGMT,
+                "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
+        // Must re-parse cleanly
+        javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                .parse(new java.io.ByteArrayInputStream(result.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    @Test
     void takesOverExistingPlainDepMgmtEntryInsteadOfDuplicating() {
         // A project may already manage an artifact itself (e.g. a manual CVE pin using a
         // ${...} property) with no RedKite marker comment at all. RedKite must take that
