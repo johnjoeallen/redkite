@@ -287,6 +287,69 @@ class RemediationApplierTest {
         assertFalse(stripped.contains("guava"), "Should remove the dependency entry");
     }
 
+    @Test
+    void userPinUsesDistinctTagFromComputedPin() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String result = applier.applyDependencyManagementPin(pom,
+                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", true);
+        assertTrue(result.contains("redkite:user-pin"), "Should use the user-pin marker");
+        assertFalse(result.contains("redkite:dependency-management"),
+                "Should not also carry the computed-pin marker");
+        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUserPinnedCoordinates(result));
+    }
+
+    @Test
+    void removeUserPinStripsMarkerButKeepsHardcodedVersion() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String pinned = applier.applyDependencyManagementPin(pom,
+                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", true);
+        String unpinned = applier.removeUserPin(pinned, "com.google.guava", "guava");
+        assertFalse(unpinned.contains("redkite:user-pin"), "Marker should be gone");
+        assertTrue(unpinned.contains("<version>32.1.2-jre</version>"), "Version entry should remain");
+        assertTrue(applier.findUserPinnedCoordinates(unpinned).isEmpty());
+    }
+
+    @Test
+    void userPinOnPropertyManagedFamilyProtectsEverySharingDependency() {
+        // Two dependencies sharing a version property (a "family") get pinned together, since
+        // they can't have independent versions.
+        String pom = """
+                <project>
+                  <properties>
+                    <logback.version>1.5.25</logback.version>
+                  </properties>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>${logback.version}</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                  <dependencies>
+                    <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-classic</artifactId>
+                      <version>${logback.version}</version>
+                    </dependency>
+                  </dependencies>
+                </project>
+                """;
+        String pinned = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.25", "User pinned via RedKite", true);
+        assertTrue(pinned.contains("redkite:user-pin"));
+        assertEquals(java.util.Set.of("ch.qos.logback:logback-core", "ch.qos.logback:logback-classic"),
+                applier.findUserPinnedCoordinates(pinned),
+                "Both family members sharing the property should be reported as pinned");
+
+        String unpinned = applier.removeUserPin(pinned, "ch.qos.logback", "logback-core");
+        assertFalse(unpinned.contains("redkite:user-pin"));
+        assertTrue(unpinned.contains("<logback.version>1.5.25</logback.version>"),
+                "Property value should be preserved after un-pinning");
+        assertTrue(applier.findUserPinnedCoordinates(unpinned).isEmpty());
+    }
+
     private static int countOccurrences(String text, String pattern) {
         int count = 0;
         int idx = 0;

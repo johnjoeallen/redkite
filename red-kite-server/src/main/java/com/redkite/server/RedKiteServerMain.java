@@ -63,6 +63,7 @@ import org.thymeleaf.TemplateEngine;
 import org.thymeleaf.context.Context;
 import org.thymeleaf.templatemode.TemplateMode;
 import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver;
+import org.w3c.dom.Comment;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -1636,7 +1637,12 @@ public class RedKiteServerMain {
 
         if ("POST".equals(exchange.getRequestMethod())) {
             Map<String, String> updates = parseForm(readBody(exchange));
-            if (updates.isEmpty()) { sendText(exchange, 400, "No updates"); return; }
+            // "pinned"/"unpinned" are pseudo-fields carrying comma-separated component IDs whose
+            // Pin checkbox state changed this apply — pulled out before the rest is treated as
+            // plain compId=version pairs.
+            Set<Long> pinnedIds = parseIdList(updates.remove("pinned"));
+            Set<Long> unpinnedIds = parseIdList(updates.remove("unpinned"));
+            if (updates.isEmpty() && pinnedIds.isEmpty() && unpinnedIds.isEmpty()) { sendText(exchange, 400, "No updates"); return; }
             try {
                 ScanEntry scan = store.getScan(scanId);
                 Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
@@ -1648,7 +1654,7 @@ public class RedKiteServerMain {
                     }
                 }
                 Map<String, String> patchedFiles = generatePomPatches(
-                        scan.report(), sourcePoms, scan.input().workingTreePath(), updates, conflictsByKey);
+                        scan.report(), sourcePoms, scan.input().workingTreePath(), updates, conflictsByKey, pinnedIds, unpinnedIds);
                 if (patchedFiles.isEmpty()) { sendJson(exchange, 200, "{}"); return; }
                 StringBuilder json = new StringBuilder("{");
                 boolean first = true;
@@ -1734,6 +1740,10 @@ public class RedKiteServerMain {
     }
 
     private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey) throws Exception {
+        return generatePomPatches(report, sourcePoms, workingTreePath, rawUpdates, conflictsByKey, Set.of(), Set.of());
+    }
+
+    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey, Set<Long> pinnedIds, Set<Long> unpinnedIds) throws Exception {
         // rawUpdates keys are component IDs (from the client) — resolve each to its exact component
         Map<Long, String> updateById = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : rawUpdates.entrySet()) {
@@ -1745,15 +1755,32 @@ public class RedKiteServerMain {
             componentsById.put(c.id(), c);
         }
 
-        // Direct dependency upgrades use the existing version patch flow.
+        Set<String> pinnedCoords = new LinkedHashSet<>();
+        for (Long id : pinnedIds) {
+            ScanComponent c = componentsById.get(id);
+            if (c != null) pinnedCoords.add(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
+        }
+        Set<String> unpinnedCoords = new LinkedHashSet<>();
+        for (Long id : unpinnedIds) {
+            ScanComponent c = componentsById.get(id);
+            if (c != null) unpinnedCoords.add(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
+        }
+
+        // Direct dependency upgrades stay property-backed through the normal version patch flow.
+        // Only transitive convergence fixes should introduce dependencyManagement pins.
         Map<String, List<ScanComponent>> directByFile = new LinkedHashMap<>();
         Map<String, String> allDirectUpdates = new LinkedHashMap<>();
         for (ScanComponent c : report.components()) {
             if (!c.direct() || c.snapshot() || c.sourceFilePath() == null) continue;
-            if (!updateById.containsKey(c.id())) continue;
+            if (!updateById.containsKey(c.id()) && !pinnedIds.contains(c.id()) && !unpinnedIds.contains(c.id())) continue;
             directByFile.computeIfAbsent(c.sourceFilePath(), k -> new ArrayList<>()).add(c);
             String coord = c.coordinate().groupId() + ":" + c.coordinate().artifactId();
-            allDirectUpdates.put(coord, updateById.get(c.id()));
+            // A newly-pinned component with no explicit version change still needs a concrete
+            // version carried through to patchPomXml — if it's currently BOM-managed (no
+            // <version> element anywhere), the pin marker can't attach to anything without one
+            // being written first, and this is the value it should be written as.
+            if (updateById.containsKey(c.id())) allDirectUpdates.put(coord, updateById.get(c.id()));
+            else if (pinnedIds.contains(c.id()) && c.version() != null) allDirectUpdates.put(coord, c.version());
         }
         for (Map.Entry<String, List<ScanComponent>> entry : directByFile.entrySet()) {
             String content = sourcePoms.get(entry.getKey());
@@ -1761,19 +1788,20 @@ public class RedKiteServerMain {
             Map<String, String> fileUpdates = new LinkedHashMap<>();
             for (ScanComponent c : entry.getValue()) {
                 String coord = c.coordinate().groupId() + ":" + c.coordinate().artifactId();
-                fileUpdates.put(coord, updateById.get(c.id()));
+                if (updateById.containsKey(c.id())) fileUpdates.put(coord, updateById.get(c.id()));
+                else if (pinnedIds.contains(c.id()) && c.version() != null) fileUpdates.put(coord, c.version());
             }
-            result.put(entry.getKey(), patchPomXml(content, fileUpdates));
+            result.put(entry.getKey(), patchPomXml(content, fileUpdates, pinnedCoords, unpinnedCoords));
         }
 
-        // Sync dep-management pins in the root POM to match any direct dep upgrades,
-        // so the root POM never overrides a version that was just upgraded in a child module.
+        // Sync the root POM's declared version properties to match any direct dep upgrades so
+        // project-owned version declarations stay aligned across modules.
         RemediationApplier applier = new RemediationApplier();
         String rootPomKey = selectRootPomKey(sourcePoms, workingTreePath);
-        if (rootPomKey != null && !allDirectUpdates.isEmpty()) {
+        if (rootPomKey != null && (!allDirectUpdates.isEmpty() || !pinnedCoords.isEmpty() || !unpinnedCoords.isEmpty())) {
             String rootContent = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
             if (rootContent != null) {
-                String updated = patchPomXml(rootContent, allDirectUpdates);
+                String updated = patchPomXml(rootContent, allDirectUpdates, pinnedCoords, unpinnedCoords);
                 if (!updated.equals(rootContent)) {
                     result.put(rootPomKey, updated);
                 }
@@ -1781,30 +1809,49 @@ public class RedKiteServerMain {
         }
 
         // Transitive convergence selections are translated into dependencyManagement pins
-        // plus exclusions on the parents introducing the non-selected versions.
-        for (Map.Entry<Long, String> entry : updateById.entrySet()) {
-            ScanComponent component = componentsById.get(entry.getKey());
-            if (component == null || component.direct() || component.snapshot()) {
+        // plus exclusions on the parents introducing the non-selected versions. Pin toggles with
+        // no version change are handled here too, so a user can pin/unpin a transitive component
+        // without altering its resolved version.
+        for (ScanComponent component : report.components()) {
+            if (component.direct() || component.snapshot()) continue;
+            long id = component.id();
+            boolean isPinned = pinnedIds.contains(id);
+            boolean isUnpinned = unpinnedIds.contains(id);
+            String requestedVersion = updateById.get(id);
+            boolean versionChanged = requestedVersion != null && !requestedVersion.isBlank()
+                    && !requestedVersion.equals(component.version());
+            if (!versionChanged && !isPinned && !isUnpinned) {
                 continue;
             }
-            String selectedVersion = entry.getValue();
-            if (selectedVersion == null || selectedVersion.isBlank() || selectedVersion.equals(component.version())) {
-                continue;
-            }
+            String selectedVersion = versionChanged ? requestedVersion : component.version();
             boolean changed = false;
             TransitiveConflictFinding finding = findMatchingConflict(conflictsByKey, component);
 
             if (rootPomKey != null) {
                 String content = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
                 if (content != null) {
-                    String updated = applier.applyDependencyManagementPin(
-                            content, component.coordinate().groupId(), component.coordinate().artifactId(), selectedVersion,
-                            "Enforcer dependency convergence fix by RedKite");
+                    String updated;
+                    if (isUnpinned) {
+                        updated = applier.removeUserPin(content, component.coordinate().groupId(), component.coordinate().artifactId());
+                        if (versionChanged) {
+                            updated = applier.applyDependencyManagementPin(
+                                    updated, component.coordinate().groupId(), component.coordinate().artifactId(), selectedVersion,
+                                    "Enforcer dependency convergence fix by RedKite");
+                        }
+                    } else {
+                        updated = applier.applyDependencyManagementPin(
+                                content, component.coordinate().groupId(), component.coordinate().artifactId(), selectedVersion,
+                                isPinned ? "User pinned via RedKite" : "Enforcer dependency convergence fix by RedKite",
+                                isPinned);
+                    }
                     if (!updated.equals(content)) {
                         result.put(rootPomKey, updated);
                         changed = true;
                     }
                 }
+            }
+            if (!versionChanged) {
+                continue;
             }
 
             if (finding != null) {
@@ -1861,7 +1908,17 @@ public class RedKiteServerMain {
         return sourcePoms.isEmpty() ? null : sourcePoms.keySet().iterator().next();
     }
 
+    /** Comment tag marking a Maven property (or dependencyManagement entry) as user-pinned —
+     *  shared convention with {@link com.redkite.maven.RemediationApplier}'s {@code redkite:user-pin}. */
+    private static final String USER_PIN_TAG = "redkite:user-pin";
+    private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
+
     private static String patchPomXml(String content, Map<String, String> versionUpdates) throws Exception {
+        return patchPomXml(content, versionUpdates, Set.of(), Set.of());
+    }
+
+    private static String patchPomXml(String content, Map<String, String> versionUpdates,
+                                      Set<String> pinnedCoords, Set<String> unpinnedCoords) throws Exception {
         var dbf = DocumentBuilderFactory.newInstance();
         dbf.setNamespaceAware(false);
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
@@ -1914,10 +1971,22 @@ public class RedKiteServerMain {
             Node versionNode = directChildVersion(dep);
 
             if (versionNode == null) {
-                // BOM-managed: add explicit <version> only when upgrading
+                // BOM-managed: add explicit <version> only when upgrading (or when pinning, since
+                // a pin needs a concrete version to attach its marker to).
                 if (upgrade != null) {
                     Element versionEl = doc.createElement("version");
-                    versionEl.setTextContent(upgrade);
+                    if (pinnedCoords.contains(coord) || unpinnedCoords.contains(coord)) {
+                        // Route through the same property-backed convention as every other pin,
+                        // rather than leaving a bare literal <version> with nothing to mark.
+                        String propName = assignPropName(a, g, propNameForCoord);
+                        propNameForCoord.put(coord, propName);
+                        Element propertiesEl = findOrCreateProperties(doc, root);
+                        setProperty(doc, propertiesEl, propName, upgrade);
+                        versionEl.setTextContent("${" + propName + "}");
+                        markPropertyPin(doc, propertiesEl, propName, upgrade, pinnedCoords.contains(coord));
+                    } else {
+                        versionEl.setTextContent(upgrade);
+                    }
                     dep.appendChild(versionEl);
                 }
                 continue;
@@ -1931,8 +2000,9 @@ public class RedKiteServerMain {
                 // If two deps share the same property ref but target different versions,
                 // give the second dep its own independent property rather than silently
                 // overwriting the shared one.
+                String propName = versionText.substring(2, versionText.length() - 1);
+                String effectivePropName = propName;
                 if (upgrade != null) {
-                    String propName = versionText.substring(2, versionText.length() - 1);
                     String alreadySetTo = propUpgradeTo.get(propName);
                     if (alreadySetTo != null && !alreadySetTo.equals(upgrade)) {
                         // Conflict: create an independent property for this dep
@@ -1941,10 +2011,18 @@ public class RedKiteServerMain {
                         setProperty(doc, findOrCreateProperties(doc, root), newPropName, upgrade);
                         versionNode.setTextContent("${" + newPropName + "}");
                         propUpgradeTo.put(newPropName, upgrade);
+                        effectivePropName = newPropName;
                     } else {
                         setProperty(doc, findOrCreateProperties(doc, root), propName, upgrade);
                         propUpgradeTo.put(propName, upgrade);
                     }
+                }
+                if (pinnedCoords.contains(coord) || unpinnedCoords.contains(coord)) {
+                    Element propertiesEl = findOrCreateProperties(doc, root);
+                    NodeList existingProp = propertiesEl.getElementsByTagName(effectivePropName);
+                    String effectiveVersion = upgrade != null ? upgrade
+                            : existingProp.getLength() > 0 ? existingProp.item(0).getTextContent().trim() : versionText;
+                    markPropertyPin(doc, propertiesEl, effectivePropName, effectiveVersion, pinnedCoords.contains(coord));
                 }
             } else if ("parent".equals(dep.getNodeName())) {
                 // <parent> versions always stay literal, upgrade or not. Maven resolves the
@@ -1962,8 +2040,12 @@ public class RedKiteServerMain {
                     propName = assignPropName(a, g, propNameForCoord);
                     propNameForCoord.put(coord, propName);
                 }
-                setProperty(doc, findOrCreateProperties(doc, root), propName, effectiveVersion);
+                Element propertiesEl = findOrCreateProperties(doc, root);
+                setProperty(doc, propertiesEl, propName, effectiveVersion);
                 versionNode.setTextContent("${" + propName + "}");
+                if (pinnedCoords.contains(coord) || unpinnedCoords.contains(coord)) {
+                    markPropertyPin(doc, propertiesEl, propName, effectiveVersion, pinnedCoords.contains(coord));
+                }
             }
         }
 
@@ -1997,7 +2079,33 @@ public class RedKiteServerMain {
         }
         return sibling != null && sibling.getNodeType() == Node.COMMENT_NODE
                 && sibling.getTextContent() != null
-                && sibling.getTextContent().contains("redkite:dependency-management");
+                && (sibling.getTextContent().contains("redkite:dependency-management")
+                    || sibling.getTextContent().contains(USER_PIN_TAG));
+    }
+
+    /** Adds, updates, or removes the {@code redkite:user-pin} marker comment immediately
+     *  preceding a {@code <properties>} entry, mirroring RemediationApplier's convention. */
+    private static void markPropertyPin(Document doc, Element propertiesEl, String propName, String version, boolean pinned) {
+        NodeList existingProp = propertiesEl.getElementsByTagName(propName);
+        if (existingProp.getLength() == 0) return;
+        Element property = (Element) existingProp.item(0);
+        Node prev = property.getPreviousSibling();
+        while (prev != null && prev.getNodeType() == Node.TEXT_NODE && prev.getTextContent().isBlank()) {
+            prev = prev.getPreviousSibling();
+        }
+        Comment existing = (prev != null && prev.getNodeType() == Node.COMMENT_NODE
+                && prev.getTextContent() != null && prev.getTextContent().strip().startsWith(USER_PIN_TAG))
+                ? (Comment) prev : null;
+        if (!pinned) {
+            if (existing != null) existing.getParentNode().removeChild(existing);
+            return;
+        }
+        String data = " " + USER_PIN_TAG + " version=\"" + version + "\" — " + USER_PIN_NOTE + " ";
+        if (existing != null) {
+            existing.setData(data);
+        } else {
+            propertiesEl.insertBefore(doc.createComment(data), property);
+        }
     }
 
     private static String assignPropName(String a, String g, Map<String, String> propNameForCoord) {
@@ -2263,6 +2371,15 @@ public class RedKiteServerMain {
 
     private static String urlDecode(String value) {
         return URLDecoder.decode(value, StandardCharsets.UTF_8);
+    }
+
+    private static Set<Long> parseIdList(String csv) {
+        if (csv == null || csv.isBlank()) return Set.of();
+        Set<Long> ids = new LinkedHashSet<>();
+        for (String part : csv.split(",")) {
+            try { ids.add(Long.parseLong(part.trim())); } catch (NumberFormatException ignored) {}
+        }
+        return ids;
     }
 
     private String renderDependencyTree(ScanReport report) {
@@ -2578,6 +2695,14 @@ public class RedKiteServerMain {
             } catch (NumberFormatException ignored) {}
         }
 
+        Set<String> pinnedCoords = new LinkedHashSet<>();
+        RemediationApplier pinScanApplier = new RemediationApplier();
+        for (String pomContent : sourcePoms.values()) {
+            try {
+                pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
+            } catch (Exception ignored) {}
+        }
+
         List<ComponentView> views = new ArrayList<>();
         for (ScanComponent c : unique.values()) {
             RemediationStatus status = RemediationClassifier.classify(
@@ -2733,6 +2858,7 @@ public class RedKiteServerMain {
                 .append("\"sev\":").append(jsonStr(s.highestSeverity().name().toLowerCase())).append(",")
                 .append("\"kind\":").append(jsonStr(c.snapshot() ? "snapshot" : c.direct() ? "declared" : "transitive")).append(",")
                 .append("\"clean\":").append(!s.needsRemediation()).append(",")
+                .append("\"pin\":").append(pinnedCoords.contains(c.coordinate().groupId() + ":" + c.coordinate().artifactId())).append(",")
                 .append("\"hasvuln\":").append(s.hasVulnerability());
             if (v.recommendation() != null && v.recommendation().targetVersion() != null) {
                 html.append(",\"rec\":").append(jsonStr(v.recommendation().targetVersion()));
@@ -2856,7 +2982,7 @@ public class RedKiteServerMain {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
             boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
-            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey));
+            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords));
         }
         html.append("</div>");
 
@@ -2962,11 +3088,12 @@ public class RedKiteServerMain {
         return clean && view.convergenceFinding() == null;
     }
 
-    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey) {
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean hasFixableCve = hasFixableCve(view);
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
+        boolean pinned = pinnedCoords.contains(coordStr);
 
         StringBuilder html = new StringBuilder();
         String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
@@ -2988,6 +3115,8 @@ public class RedKiteServerMain {
                 .append("\" data-upgradeonly=\"").append(upgradeOnly)
                 .append("\" data-hasconflict=\"").append(actionableConvergence)
                 .append("\" data-coord=\"").append(escape(coordStr))
+                .append("\" data-pinned=\"").append(pinned)
+                .append("\" data-pinned-initial=\"").append(pinned)
                 .append("\" data-comp-id=\"").append(comp.id());
         if (actionableConvergence) {
             html.append("\" data-conflict='").append(conflictJson).append("'>");
@@ -3084,9 +3213,13 @@ public class RedKiteServerMain {
                 || (comp.direct() && view.versionMetadata() != null)
                 || (!comp.direct() && (hasFixableCve || isUpgradeRecommendedOnly(status))
                     && view.versionMetadata() != null);
-        if (showVersionSelector) {
+        // A pinned component that's since become fully clean (e.g. already at the version it was
+        // pinned to, with nothing left to recommend) would otherwise lose its version selector —
+        // and with it, the only way to reach the Pin checkbox and un-pin it. Keep the actions row
+        // (checkbox only, no dropdown) for that case.
+        if (showVersionSelector || (pinned && !actionableConvergence)) {
             html.append("<div class=\"rem-actions\">");
-            if (comp.direct()) {
+            if (showVersionSelector && comp.direct()) {
                 String selectorId = "view_" + comp.id();
                 List<String> directConflictVersions = view.convergenceFinding() != null
                         ? view.convergenceFinding().conflictingVersions() : List.of();
@@ -3101,7 +3234,7 @@ public class RedKiteServerMain {
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
                         view.versionMetadata(), view.recommendation(), false, directConflictVersions,
                         view.convergenceFinding() != null));
-            } else if (view.versionMetadata() != null || view.convergenceFinding() != null) {
+            } else if (showVersionSelector && (view.versionMetadata() != null || view.convergenceFinding() != null)) {
                 String selectorId = "view_" + comp.id();
                 List<String> conflictVersions = view.convergenceFinding() != null
                         ? view.convergenceFinding().conflictingVersions()
@@ -3117,6 +3250,12 @@ public class RedKiteServerMain {
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
                         view.versionMetadata(), view.recommendation(), false,
                         conflictVersions, true));
+            }
+            if (!actionableConvergence) {
+                html.append("<label class=\"pin-toggle\" title=\"Keep this dependency at its current/selected version through bulk upgrades\">")
+                        .append("<input type=\"checkbox\" class=\"pin-chk\" data-comp-id=\"").append(comp.id())
+                        .append("\"").append(pinned ? " checked" : "")
+                        .append(" onchange=\"onPinToggle(this)\"> Pin</label>");
             }
             html.append("</div>");
         }

@@ -36,10 +36,11 @@ import java.util.List;
  * </ul>
  *
  * <p>Dependency management pins RedKite inserts itself always use a hardcoded {@code <version>}
- * rather than a {@code ${...}} property reference — they're meant to be a single, self-contained,
- * independently removable override. The reverse also holds: when the PROJECT already manages an
- * artifact through a version property, RedKite updates the property's value rather than
- * hardcoding the entry, preserving the family semantics the property encodes.
+ * rather than a {@code ${...}} property reference — they're reserved for conflict fixes and
+ * transitive overrides, where RedKite needs to force a specific resolved version. The reverse
+ * also holds: when the PROJECT already manages an artifact through a version property, RedKite
+ * updates the property's value rather than hardcoding the entry, preserving the family semantics
+ * the property encodes.
  */
 public class RemediationApplier {
 
@@ -50,6 +51,13 @@ public class RemediationApplier {
     // existing pins to update in place instead of being duplicated by a fresh insert.
     private static final String DEP_MGMT_TAG_DETECT_PREFIX = "redkite:dependency-management";
     private static final String DEP_MGMT_REMOVE_NOTE = "remove this comment to prevent RedKite managing this dependency";
+
+    // A user pin is a dependency-management entry the USER explicitly locked to a version via
+    // the UI's Pin checkbox, as opposed to one RedKite computed itself to fix a conflict. It's a
+    // distinct tag so scans can tell the two apart (and so bulk "upgrade all" can skip it) while
+    // reusing the same dependencyManagement-entry mechanics.
+    private static final String USER_PIN_TAG = "redkite:user-pin";
+    private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
     // ---- Public API ----
 
@@ -112,16 +120,25 @@ public class RemediationApplier {
     public String applyDependencyManagementPin(String content,
                                                String groupId, String artifactId, String version,
                                                String reason) {
+        return applyDependencyManagementPin(content, groupId, artifactId, version, reason, false);
+    }
+
+    /**
+     * Same as {@link #applyDependencyManagementPin(String, String, String, String, String)}, but
+     * when {@code userPin} is true the entry (or the property it delegates to) is marked with the
+     * {@code redkite:user-pin} tag instead of the normal RedKite pin tag, so bulk "upgrade all"
+     * operations and future scans know to leave it alone until the user un-pins it.
+     */
+    public String applyDependencyManagementPin(String content,
+                                               String groupId, String artifactId, String version,
+                                               String reason, boolean userPin) {
         version = sanitizeVersion(version);
         Document doc = parse(content);
 
         // 1) A redkite-managed entry already exists — update it in place.
         Comment existing = findRedkiteDepMgmtComment(doc, groupId, artifactId);
         if (existing != null) {
-            String data = existing.getData()
-                    .replaceAll("version=\"[^\"]*\"", "version=\"" + version + "\"")
-                    .replaceAll("reason=\"[^\"]*\"", "reason=\"" + escapeAttr(reason) + "\"");
-            existing.setData(data);
+            existing.setData(buildPinCommentData(groupId, artifactId, version, reason, userPin));
             Element dep = nextElementSibling(existing);
             if (dep != null && "dependency".equals(dep.getNodeName())) {
                 setChildText(doc, dep, "version", version);
@@ -150,8 +167,9 @@ public class RemediationApplier {
                     // standalone hardcoded pin is worse than not applying the fix.
                     return content;
                 }
+                if (userPin) markPropertyPin(doc, property, version, true);
                 if (version.equals(property.getTextContent().trim())) {
-                    return content;
+                    return serialize(doc);
                 }
                 property.setTextContent(version);
                 return serialize(doc);
@@ -159,7 +177,7 @@ public class RemediationApplier {
             // Literal version: take the entry over — mark it and update the version in place.
             setChildText(doc, plain, "version", version);
             plain.getParentNode().insertBefore(
-                    buildPinComment(doc, groupId, artifactId, version, reason), plain);
+                    buildPinComment(doc, groupId, artifactId, version, reason, userPin), plain);
             return serialize(doc);
         }
 
@@ -167,7 +185,7 @@ public class RemediationApplier {
         for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
             Element dependencies = directChild(depMgmt, "dependencies");
             if (dependencies != null) {
-                dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason));
+                dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, userPin));
                 dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
                 return serialize(doc);
             }
@@ -177,11 +195,107 @@ public class RemediationApplier {
         Element root = doc.getDocumentElement();
         Element depMgmt = doc.createElement("dependencyManagement");
         Element dependencies = doc.createElement("dependencies");
-        dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason));
+        dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, userPin));
         dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
         depMgmt.appendChild(dependencies);
         root.appendChild(depMgmt);
         return serialize(doc);
+    }
+
+    /**
+     * Removes the {@code redkite:user-pin} marker (if any) for {@code groupId:artifactId} —
+     * whether it sits on a dependencyManagement entry or on the {@code <properties>} entry the
+     * artifact's version delegates to — without touching the version value itself. Used when the
+     * user unchecks the Pin checkbox: the version stays as-is, but it's no longer protected from
+     * the next bulk upgrade.
+     */
+    public String removeUserPin(String content, String groupId, String artifactId) {
+        Document doc = parse(content);
+        boolean changed = false;
+
+        Comment existingDep = findRedkiteDepMgmtComment(doc, groupId, artifactId);
+        if (existingDep != null && existingDep.getData().strip().startsWith(USER_PIN_TAG)) {
+            existingDep.getParentNode().removeChild(existingDep);
+            changed = true;
+        }
+
+        for (Element dep : elementsByTag(doc, "dependency")) {
+            if (!coordMatches(dep, groupId, artifactId)) continue;
+            Element versionEl = directChild(dep, "version");
+            String versionText = versionEl != null ? versionEl.getTextContent().trim() : null;
+            if (versionText == null || !versionText.startsWith("${") || !versionText.endsWith("}")) continue;
+            Element property = findProjectProperty(doc, versionText.substring(2, versionText.length() - 1));
+            if (property == null) continue;
+            if (markPropertyPin(doc, property, null, false)) changed = true;
+        }
+
+        return changed ? serialize(doc) : content;
+    }
+
+    /**
+     * Returns {@code "groupId:artifactId"} for every dependency currently protected by a
+     * {@code redkite:user-pin} marker in {@code content} — whether pinned directly on a
+     * dependencyManagement entry, or indirectly via a pinned {@code <properties>} entry (in which
+     * case every dependency/plugin sharing that property is considered pinned, since they can't
+     * have independent versions).
+     */
+    public java.util.Set<String> findUserPinnedCoordinates(String content) {
+        java.util.Set<String> result = new java.util.LinkedHashSet<>();
+        Document doc = parse(content);
+        for (Comment comment : allComments(doc)) {
+            String data = comment.getData().strip();
+            if (!data.startsWith(USER_PIN_TAG)) continue;
+
+            String g = extractAttrValue(data, "groupId");
+            String a = extractAttrValue(data, "artifactId");
+            if (g != null && a != null) {
+                result.add(g + ":" + a);
+                continue;
+            }
+
+            // Property-level pin: the comment sits directly above the <properties> entry.
+            Element property = nextElementSibling(comment);
+            if (property == null) continue;
+            String propRef = "${" + property.getNodeName() + "}";
+            for (Element dep : elementsByTag(doc, "dependency")) {
+                Element versionEl = directChild(dep, "version");
+                if (versionEl == null || !propRef.equals(versionEl.getTextContent().trim())) continue;
+                String depG = childText(dep, "groupId"), depA = childText(dep, "artifactId");
+                if (depG != null && depA != null) result.add(depG + ":" + depA);
+            }
+            for (Element plugin : elementsByTag(doc, "plugin")) {
+                Element versionEl = directChild(plugin, "version");
+                if (versionEl == null || !propRef.equals(versionEl.getTextContent().trim())) continue;
+                String depG = childText(plugin, "groupId"), depA = childText(plugin, "artifactId");
+                if (depA != null) result.add((depG != null && !depG.isBlank() ? depG : "org.apache.maven.plugins") + ":" + depA);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Adds, updates, or removes (when {@code version} is {@code null} and {@code pinned} is
+     * false) the {@code redkite:user-pin} comment immediately preceding a {@code <properties>}
+     * entry. Returns whether the document was changed.
+     */
+    private boolean markPropertyPin(Document doc, Element property, String version, boolean pinned) {
+        Node prev = property.getPreviousSibling();
+        while (prev != null && prev.getNodeType() == Node.TEXT_NODE && prev.getTextContent().isBlank()) {
+            prev = prev.getPreviousSibling();
+        }
+        Comment existing = (prev instanceof Comment c && c.getData().strip().startsWith(USER_PIN_TAG)) ? c : null;
+        if (!pinned) {
+            if (existing == null) return false;
+            existing.getParentNode().removeChild(existing);
+            return true;
+        }
+        String data = " " + USER_PIN_TAG + " version=\"" + version + "\" — " + USER_PIN_NOTE + " ";
+        if (existing != null) {
+            existing.setData(data);
+        } else {
+            property.getParentNode().insertBefore(doc.createComment(data), property);
+        }
+        return true;
     }
 
     /**
@@ -206,11 +320,16 @@ public class RemediationApplier {
                 } else {
                     comment.getParentNode().removeChild(comment);
                 }
-            } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
+            } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
+                    || (data.startsWith(USER_PIN_TAG) && data.contains("groupId="))) {
                 Element next = nextElementSibling(comment);
                 if (next != null && "dependency".equals(next.getNodeName())) {
                     next.getParentNode().removeChild(next);
                 }
+                comment.getParentNode().removeChild(comment);
+            } else if (data.startsWith(USER_PIN_TAG)) {
+                // A property-level user-pin marker (sits above a <properties> entry, not a
+                // <dependency>) — strip only the marker, keep the property and its value.
                 comment.getParentNode().removeChild(comment);
             }
         }
@@ -276,13 +395,17 @@ public class RemediationApplier {
     // ---- DOM builders ----
 
     private Comment buildPinComment(Document doc, String groupId, String artifactId,
-                                    String version, String reason) {
-        return doc.createComment(" " + DEP_MGMT_TAG
+                                    String version, String reason, boolean userPin) {
+        return doc.createComment(buildPinCommentData(groupId, artifactId, version, reason, userPin));
+    }
+
+    private String buildPinCommentData(String groupId, String artifactId, String version, String reason, boolean userPin) {
+        return " " + (userPin ? USER_PIN_TAG : DEP_MGMT_TAG)
                 + " groupId=\"" + groupId + "\""
                 + " artifactId=\"" + artifactId + "\""
                 + " version=\"" + version + "\""
                 + " reason=\"" + escapeAttr(reason) + "\""
-                + " — " + DEP_MGMT_REMOVE_NOTE + " ");
+                + " — " + (userPin ? USER_PIN_NOTE : DEP_MGMT_REMOVE_NOTE) + " ";
     }
 
     private Element buildPinDependency(Document doc, String groupId, String artifactId, String version) {
@@ -330,7 +453,7 @@ public class RemediationApplier {
     private Comment findRedkiteDepMgmtComment(Document doc, String groupId, String artifactId) {
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
+            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG))
                     && data.contains("groupId=\"" + groupId + "\"")
                     && data.contains("artifactId=\"" + artifactId + "\"")) {
                 return comment;
