@@ -43,7 +43,7 @@ All Maven subprocess invocation and POM file manipulation.
 | `EnforcerRunner` | Runs `mvn enforcer:enforce` or falls back to `mvn verify -DskipTests` |
 | `EnforcerDetector` | Detects whether `maven-enforcer-plugin` is configured in the project |
 | `TempPomAnalyzer` | Creates stripped temp POM trees for pristine / phase-2 enforcer runs |
-| `RemediationApplier` | Inserts dep-management pins and exclusions into POM XML with marker comments; pins always use a hardcoded `<version>`, never a `${...}` property |
+| `RemediationApplier` | Inserts dep-management pins and exclusions into POM XML with marker comments, via DOM parse + serialise (well-formed output, two-space indent); pins always use a hardcoded `<version>`, never a `${...}` property |
 | `ValidationRunner` | Runs `mvn clean install -DskipTests -Denforcer.skip=true` (and optionally `spring-boot:run`) to validate a project build |
 | `PomModel` | In-memory representation of a parsed POM |
 | `MavenSettingsReader` | Reads `~/.m2/settings.xml` for repository URLs and credentials |
@@ -413,11 +413,14 @@ For each TransitiveConflictFinding:
     pin: groupId:artifactId → winner
 
 TempPomAnalyzer.runWithPins(pins):
-    1. Strip all existing dep-management from all module POMs
-    2. Strip all RedKite-managed exclusions from all module POMs
-    3. Write pins into root POM's <dependencyManagement>
-    4. Symlink non-POM project content into a temp directory tree
-    5. Re-run enforcer on the temp tree
+    1. Strip all RedKite-managed pins and exclusions from all module POMs
+       (the project's OWN dep-management entries stay — they are deliberate
+        choices that must keep participating in resolution)
+    2. Write pins into root POM's <dependencyManagement>
+    3. Symlink non-POM project content into a temp directory tree
+    4. Re-run enforcer on the temp tree
+       (this verifies exactly the state Apply would produce: project as-is,
+        minus previous RedKite pins, plus the newly computed ones)
 
 If enforcer passes:
     Phase 2 result = [] (all conflicts resolved)
@@ -427,7 +430,9 @@ Else:
 
 **Family alignment (`alignFamilyVersions`):** `computeWinnerVersion` is strictly per-artifact — it only sees the resolved/conflicting versions observed for that one groupId:artifactId's own conflict finding. For a coordinated release train (all modules of a library published and versioned together), this can pick a version for one member that's incompatible with a sibling member found elsewhere in the tree — e.g. pinning `io.cucumber:cucumber-core` to a version lower than the `cucumber.version` the project's own `cucumber-java`/`cucumber-spring`/`cucumber-junit-platform-engine` dependencies are declared at, since `cucumber-java`'s version never appears as a candidate in `cucumber-core`'s own finding. `cucumber-junit-platform-engine` then fails to discover tests because the Cucumber JVM classpath is split across two incompatible releases.
 
-After all per-finding winners are computed, `alignFamilyVersions` raises every pin belonging to a known `FamilyGroup` (Cucumber's core module set, `io.netty`, `software.amazon.awssdk`, `io.zipkin.brave`, `org.eclipse.jetty*`, `net.bytebuddy`, `io.opentelemetry`) up to the highest version required anywhere for that family — either another family member's computed pin, or a family member's version as declared/resolved elsewhere in the project (`ScanReport.components()`, unavailable to a single finding). Pins are only ever raised, never lowered. Cucumber's family membership is an explicit artifact allowlist rather than "all of `io.cucumber`", since Cucumber also publishes independently-versioned siblings under the same groupId (formatter/reporting plugins, the standalone `io.cucumber:gherkin` parser) that must NOT be forced to the core version.
+Winner selection also respects the project's own choices: if the root POM already has a (non-RedKite) `dependencyManagement` entry for the conflicting artifact, that declared version IS the winner (`projectDeclaredDepMgmt`, with `${property}` resolution) — pristine analysis strips the project's pins, which artificially resurfaces conflicts the project has already resolved, and re-deriving a max-winner there can cross a release line the project deliberately avoided (e.g. a project pinning Netty `4.1.135.Final` must not get its Netty modules force-pinned to a `4.2.x` observed on some unrelated transitive path).
+
+After all per-finding winners are computed, `alignFamilyVersions` aligns every pin belonging to a known `FamilyGroup` (Cucumber's core module set, `io.netty`, `software.amazon.awssdk`, `io.zipkin.brave`, `org.eclipse.jetty*`, `net.bytebuddy`, `io.opentelemetry`) onto one version per family. The target is the version the project itself declares for the family — its own dep-management entries plus its direct dependencies — and that target wins outright, raising or lowering pins to match. Only when the project declares nothing for the family does alignment fall back to raising every member to the highest version required anywhere for it (other members' pins, or any resolved component in `ScanReport.components()`). Cucumber's family membership is an explicit artifact allowlist rather than "all of `io.cucumber`", since Cucumber also publishes independently-versioned siblings under the same groupId (formatter/reporting plugins, the standalone `io.cucumber:gherkin` parser) that must NOT be forced to the core version. The same declared-version override and realignment are applied to stored pins at display/Apply time (`realignStoredPins`), so pin lists persisted by older scans converge to the same result as a fresh computation.
 
 This does not reduce the number of pins generated — Phase 2 still pins one entry per conflicting artifact; it only ensures family members agree on a compatible version. A project with a very large, sprawling dependency graph can still legitimately produce a long pin list; that reflects the number of real convergence violations Maven found, not an inefficiency in the pin format itself.
 

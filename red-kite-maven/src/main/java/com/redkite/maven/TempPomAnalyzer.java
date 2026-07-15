@@ -104,8 +104,11 @@ public class TempPomAnalyzer {
     }
 
     /**
-     * Strips all RedKite remediations and all existing dep-management from every POM, applies
-     * the given computed pins to the root POM, then runs the enforcer against the temp tree.
+     * Strips all RedKite remediations from every POM (leaving the project's OWN dep-management
+     * intact — those entries are deliberate choices that must keep participating in resolution),
+     * applies the given computed pins to the root POM, then runs the enforcer against the temp
+     * tree. This verifies exactly the state that clicking Apply would produce: the project as-is,
+     * minus any previous RedKite pins, plus the newly computed ones.
      *
      * @param pins map of "groupId:artifactId" → version to pin
      */
@@ -121,7 +124,6 @@ public class TempPomAnalyzer {
         try {
             writePoms(allPoms, projectRoot, tempRoot, (pom, content) -> {
                 String s = applier.stripRedkiteRemediations(content);
-                s = applier.stripAllDepManagement(s);
                 if (pom.toAbsolutePath().equals(pomPath.toAbsolutePath())) {
                     for (Map.Entry<String, String> pin : pins.entrySet()) {
                         String[] ga = pin.getKey().split(":", 2);

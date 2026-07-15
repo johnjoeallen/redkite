@@ -709,15 +709,22 @@ public class RedKiteServerMain {
             Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings,
             boolean skipDirectEnforce, List<ScanComponent> components) {
         try {
-            // Compute winner as max version — consistent with pristine analysis (all dep mgmt stripped)
+            // The project's own (non-RedKite) dep-management entries are deliberate choices —
+            // pristine analysis strips them, which resurfaces conflicts the project has already
+            // resolved. Respect the project's version for those artifacts instead of re-deriving
+            // a winner from the stripped tree (which max-picks and can cross a release line the
+            // project deliberately avoided, e.g. Netty 4.1 -> 4.2).
+            Map<String, String> declared = projectDeclaredDepMgmt(readFileQuietly(pomPath));
             Map<String, String> pins = new LinkedHashMap<>();
             for (TransitiveConflictFinding f : findings) {
-                String winner = computeWinnerVersion(f, "");
+                String key = f.groupId() + ":" + f.artifactId();
+                String winner = declared.get(key);
+                if (winner == null) winner = computeWinnerVersion(f, "");
                 if (winner != null && !winner.isBlank()) {
-                    pins.put(f.groupId() + ":" + f.artifactId(), winner);
+                    pins.put(key, winner);
                 }
             }
-            alignFamilyVersions(pins, components);
+            alignFamilyVersions(pins, components, declared);
             List<String> pinsList = pins.entrySet().stream()
                     .map(e -> e.getKey() + ":" + e.getValue())
                     .toList();
@@ -772,48 +779,92 @@ public class RedKiteServerMain {
             new FamilyGroup("opentelemetry", "io.opentelemetry", null));
 
     /**
-     * Raises every computed pin belonging to a {@link #COORDINATED_FAMILIES} entry up to the
-     * highest version required anywhere for that family — either another family member's computed
-     * pin, or a family member's version as actually declared/resolved elsewhere in the project
-     * (which never shows up as a "winner" candidate for a DIFFERENT artifact's conflict finding).
-     * Never lowers a pin; a higher independently-computed winner for one member still wins.
-     */
-    /**
      * Computes planned dep-management pins for a set of findings, family-aligned. Used both by
      * {@link #runPhase2Validation} and by display-only fallback paths that recompute pins live
      * when a scan's stored {@code phase2Pins} is empty (e.g. cached data from before Phase 2 ran).
      */
-    private List<String> computePlannedPins(List<TransitiveConflictFinding> findings, List<ScanComponent> components) {
+    private List<String> computePlannedPins(List<TransitiveConflictFinding> findings, List<ScanComponent> components,
+                                            Map<String, String> projectDeclared) {
         Map<String, String> pins = new LinkedHashMap<>();
         for (TransitiveConflictFinding f : findings) {
-            String winner = computeWinnerVersion(f, "");
+            String key = f.groupId() + ":" + f.artifactId();
+            String winner = projectDeclared.get(key);
+            if (winner == null) winner = computeWinnerVersion(f, "");
             if (winner != null && !winner.isBlank()) {
-                pins.put(f.groupId() + ":" + f.artifactId(), winner);
+                pins.put(key, winner);
             }
         }
-        alignFamilyVersions(pins, components);
+        alignFamilyVersions(pins, components, projectDeclared);
         return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
     }
 
     /**
      * Re-runs family alignment over a stored "G:A:V" pin list. Stored {@code phase2Pins} may
-     * predate the family-alignment fix (or this scan of the DB), so the display/Apply paths must
-     * not trust them verbatim — realignment only ever raises versions, so applying it to
-     * already-aligned pins is a no-op.
+     * predate the family-alignment logic (or fixes to it), so the display/Apply paths must not
+     * trust them verbatim — realignment converges the list to the same result a fresh computation
+     * would give, and is a no-op on already-aligned pins.
      */
-    private List<String> realignStoredPins(List<String> storedPins, List<ScanComponent> components) {
+    private List<String> realignStoredPins(List<String> storedPins, List<ScanComponent> components,
+                                           Map<String, String> projectDeclared) {
         Map<String, String> pins = new LinkedHashMap<>();
         for (String gav : storedPins) {
             int last = gav.lastIndexOf(':');
             if (last <= 0) continue;
             pins.put(gav.substring(0, last), gav.substring(last + 1));
         }
-        alignFamilyVersions(pins, components);
+        // A stored pin for an artifact the project itself manages must yield to the project's
+        // declared version, same as a fresh computation would.
+        for (Map.Entry<String, String> e : pins.entrySet()) {
+            String declaredVersion = projectDeclared.get(e.getKey());
+            if (declaredVersion != null) e.setValue(declaredVersion);
+        }
+        alignFamilyVersions(pins, components, projectDeclared);
         return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
     }
 
-    private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components) {
+    /**
+     * Aligns every computed pin belonging to a {@link #COORDINATED_FAMILIES} entry onto one
+     * version per family. The target is the version the PROJECT itself declares for the family —
+     * its own dependencyManagement entries and its direct dependencies — and that target wins
+     * outright, raising or LOWERING pins to match: a transitively-observed higher version must
+     * not drag the family across a release line the project deliberately avoided (e.g. a project
+     * on Netty 4.1.135.Final must not have its Netty modules force-pinned to a 4.2.x observed on
+     * some unrelated transitive path). Only when the project declares nothing for the family does
+     * alignment fall back to raising every member to the highest version required anywhere for
+     * that family (other members' pins, or any resolved component in the tree).
+     */
+    private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components,
+                                     Map<String, String> projectDeclared) {
         for (FamilyGroup family : COORDINATED_FAMILIES) {
+            // 1) Project-declared target: own dep-management entries + direct dependencies.
+            String declaredTarget = null;
+            for (Map.Entry<String, String> e : projectDeclared.entrySet()) {
+                String[] ga = e.getKey().split(":", 2);
+                if (ga.length == 2 && family.matches(ga[0], ga[1])
+                        && (declaredTarget == null || compareVersionsSemantic(e.getValue(), declaredTarget) > 0)) {
+                    declaredTarget = e.getValue();
+                }
+            }
+            for (ScanComponent c : components) {
+                String g = c.coordinate().groupId(), a = c.coordinate().artifactId();
+                if (c.direct() && family.matches(g, a)
+                        && c.version() != null && !c.version().isBlank()
+                        && !c.version().contains("${") && !c.snapshot()
+                        && (declaredTarget == null || compareVersionsSemantic(c.version(), declaredTarget) > 0)) {
+                    declaredTarget = c.version();
+                }
+            }
+            if (declaredTarget != null) {
+                for (Map.Entry<String, String> e : pins.entrySet()) {
+                    String[] ga = e.getKey().split(":", 2);
+                    if (ga.length == 2 && family.matches(ga[0], ga[1])) {
+                        e.setValue(declaredTarget);
+                    }
+                }
+                continue;
+            }
+
+            // 2) Nothing declared: raise-only alignment to the family's highest required version.
             String floor = null;
             for (Map.Entry<String, String> e : pins.entrySet()) {
                 String[] ga = e.getKey().split(":", 2);
@@ -837,6 +888,69 @@ public class RedKiteServerMain {
                 }
             }
         }
+    }
+
+    /**
+     * Extracts the project's OWN (non-RedKite) dependencyManagement entries from the root POM as
+     * a "groupId:artifactId" → version map, resolving single-level {@code ${property}} references
+     * against the POM's {@code <properties>}. RedKite-tagged pins are excluded — they're RedKite's
+     * previous output, not project intent. Returns an empty map if the POM can't be parsed.
+     */
+    private Map<String, String> projectDeclaredDepMgmt(String rootPomXml) {
+        Map<String, String> declared = new LinkedHashMap<>();
+        if (rootPomXml == null || rootPomXml.isBlank()) return declared;
+        try {
+            Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                    .parse(new InputSource(new StringReader(rootPomXml)));
+            Map<String, String> props = new LinkedHashMap<>();
+            NodeList propsBlocks = doc.getElementsByTagName("properties");
+            for (int i = 0; i < propsBlocks.getLength(); i++) {
+                NodeList kids = propsBlocks.item(i).getChildNodes();
+                for (int j = 0; j < kids.getLength(); j++) {
+                    if (kids.item(j) instanceof Element p) props.put(p.getNodeName(), p.getTextContent().trim());
+                }
+            }
+            NodeList depMgmts = doc.getElementsByTagName("dependencyManagement");
+            for (int i = 0; i < depMgmts.getLength(); i++) {
+                NodeList deps = ((Element) depMgmts.item(i)).getElementsByTagName("dependency");
+                for (int j = 0; j < deps.getLength(); j++) {
+                    Element dep = (Element) deps.item(j);
+                    if (isRedkiteDepMgmtPin(dep)) continue;
+                    String g = childText(dep, "groupId"), a = childText(dep, "artifactId"), v = childText(dep, "version");
+                    if (g == null || a == null || v == null) continue;
+                    v = v.trim();
+                    if (v.startsWith("${") && v.endsWith("}")) {
+                        v = props.get(v.substring(2, v.length() - 1));
+                    }
+                    if (v == null || v.isBlank() || v.contains("${")) continue;
+                    declared.put(g.trim() + ":" + a.trim(), v);
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Could not parse root POM for declared dep-management: " + e.getMessage());
+        }
+        return declared;
+    }
+
+    private static String readFileQuietly(Path path) {
+        try {
+            return Files.readString(path, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    /** The root POM's XML from a stored source-POM map (keyed by relative file path). */
+    private static String rootPomXml(Map<String, String> sourcePoms) {
+        String content = sourcePoms.get("pom.xml");
+        if (content != null) return content;
+        // Fall back to the shallowest pom.xml path
+        String bestKey = null;
+        for (String key : sourcePoms.keySet()) {
+            if (!key.endsWith("pom.xml")) continue;
+            if (bestKey == null || key.length() < bestKey.length()) bestKey = key;
+        }
+        return bestKey != null ? sourcePoms.get(bestKey) : "";
     }
 
     /**
@@ -2268,12 +2382,16 @@ public class RedKiteServerMain {
 
         // Auto-fix pin list — from stored Phase 2 computed pins, or derived from Phase 1 findings
         List<String> phase2Pins = entry.phase2Pins();
-        if (phase2Pins.isEmpty() && !findings.isEmpty()) {
-            // Phase 2 hasn't run or data predates this feature — compute planned pins for display
-            phase2Pins = computePlannedPins(findings, store.getScan(scanId).report().components());
-        } else if (!phase2Pins.isEmpty()) {
-            // Stored pins may predate family alignment — never trust them verbatim
-            phase2Pins = realignStoredPins(phase2Pins, store.getScan(scanId).report().components());
+        if (!phase2Pins.isEmpty() || !findings.isEmpty()) {
+            List<ScanComponent> scanComponents = store.getScan(scanId).report().components();
+            Map<String, String> declared = projectDeclaredDepMgmt(rootPomXml(store.loadSourcePoms(scanId)));
+            if (phase2Pins.isEmpty() && !findings.isEmpty()) {
+                // Phase 2 hasn't run or data predates this feature — compute planned pins for display
+                phase2Pins = computePlannedPins(findings, scanComponents, declared);
+            } else {
+                // Stored pins may predate family alignment or its fixes — never trust them verbatim
+                phase2Pins = realignStoredPins(phase2Pins, scanComponents, declared);
+            }
         }
         if (!phase2Pins.isEmpty()) {
             Set<String> stillFailing = new java.util.HashSet<>();
@@ -3630,11 +3748,14 @@ public class RedKiteServerMain {
             // Auto-fix verification summary with diff against original dep management
             List<TransitiveConflictFinding> phase2 = enforcerResult.phase2Findings();
             List<String> phase2Pins = enforcerResult.phase2Pins();
-            if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
-                phase2Pins = computePlannedPins(enforcerResult.findings(), report.components());
-            } else if (!phase2Pins.isEmpty()) {
-                // Stored pins may predate family alignment — never trust them verbatim
-                phase2Pins = realignStoredPins(phase2Pins, report.components());
+            if (!phase2Pins.isEmpty() || !enforcerResult.findings().isEmpty()) {
+                Map<String, String> declared = projectDeclaredDepMgmt(rootPomXml(store.loadSourcePoms(scanId)));
+                if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
+                    phase2Pins = computePlannedPins(enforcerResult.findings(), report.components(), declared);
+                } else {
+                    // Stored pins may predate family alignment or its fixes — never trust them verbatim
+                    phase2Pins = realignStoredPins(phase2Pins, report.components(), declared);
+                }
             }
             if (!phase2Pins.isEmpty()) {
                 java.util.Set<String> stillFailing = new java.util.HashSet<>();
