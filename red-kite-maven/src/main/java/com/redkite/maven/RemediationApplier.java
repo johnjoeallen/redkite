@@ -59,6 +59,13 @@ public class RemediationApplier {
     private static final String USER_PIN_TAG = "redkite:user-pin";
     private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
+    // A summary comment RedKite keeps at the top of every POM it writes, so the pin counts are
+    // visible without having to search the file. Not itself a pin, so it's excluded from counting.
+    private static final String PIN_SUMMARY_TAG = "redkite:pin-summary";
+
+    /** How many RedKite-managed dependency pins (computed or user) a POM contains. */
+    public record PinCounts(int total, int userPinned) {}
+
     // ---- Public API ----
 
     /**
@@ -331,6 +338,8 @@ public class RemediationApplier {
                 // A property-level user-pin marker (sits above a <properties> entry, not a
                 // <dependency>) — strip only the marker, keep the property and its value.
                 comment.getParentNode().removeChild(comment);
+            } else if (data.startsWith(PIN_SUMMARY_TAG)) {
+                comment.getParentNode().removeChild(comment);
             }
         }
         return serialize(doc);
@@ -390,6 +399,65 @@ public class RemediationApplier {
             }
         }
         return result;
+    }
+
+    /**
+     * Counts RedKite-managed dependency pins in {@code content} — both computed
+     * (dependency-management convergence/remediation fixes) and user pins, whether the user pin
+     * sits on a dependencyManagement entry or a {@code <properties>} entry. Does not count
+     * exclusions or the pin-summary comment itself.
+     */
+    public PinCounts countPins(String content) {
+        int total = 0, userPinned = 0;
+        for (Comment comment : allComments(parse(content))) {
+            String data = comment.getData().strip();
+            if (data.startsWith(USER_PIN_TAG)) {
+                total++;
+                userPinned++;
+            } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
+                total++;
+            }
+        }
+        return new PinCounts(total, userPinned);
+    }
+
+    /**
+     * Adds or updates the {@code redkite:pin-summary} comment as the first child of the project
+     * root, reporting {@code fileCounts} (pins in this file) and, when {@code projectCounts} is
+     * non-null, project-wide totals across every module's POM. Pass {@code null} for
+     * {@code projectCounts} on non-root files, or on a root that's the project's only POM (a
+     * project total would just duplicate the file total).
+     */
+    public String applyPinSummaryComment(String content, PinCounts fileCounts, PinCounts projectCounts) {
+        Document doc = parse(content);
+        Element root = doc.getDocumentElement();
+
+        for (Node n = root.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n.getNodeType() == Node.COMMENT_NODE && ((Comment) n).getData().strip().startsWith(PIN_SUMMARY_TAG)) {
+                root.removeChild(n);
+                break;
+            }
+        }
+
+        Comment summary = doc.createComment(" " + buildPinSummaryText(fileCounts, projectCounts) + " ");
+        Node firstChild = root.getFirstChild();
+        if (firstChild != null) {
+            root.insertBefore(summary, firstChild);
+        } else {
+            root.appendChild(summary);
+        }
+        return serialize(doc);
+    }
+
+    private String buildPinSummaryText(PinCounts fileCounts, PinCounts projectCounts) {
+        StringBuilder sb = new StringBuilder(PIN_SUMMARY_TAG).append(" ");
+        if (projectCounts != null) {
+            sb.append("project: ").append(projectCounts.total()).append(" redkite pin(s) (")
+                    .append(projectCounts.userPinned()).append(" user pinned) — this file: ");
+        }
+        sb.append(fileCounts.total()).append(" redkite pin(s) (")
+                .append(fileCounts.userPinned()).append(" user pinned)");
+        return sb.toString();
     }
 
     // ---- DOM builders ----

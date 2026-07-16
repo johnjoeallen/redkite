@@ -1149,8 +1149,13 @@ public class RedKiteServerMain {
                 return;
             }
 
-            // Write the modified POM
-            Files.writeString(targetPom, updatedPom, StandardCharsets.UTF_8);
+            // Write the modified POM, plus a refreshed pin-summary comment on every project POM.
+            Map<Path, String> modified = new LinkedHashMap<>();
+            modified.put(targetPom, updatedPom);
+            refreshPinSummaryComments(applier, scanId, projectRoot, modified, null);
+            for (Map.Entry<Path, String> entry : modified.entrySet()) {
+                Files.writeString(entry.getKey(), entry.getValue(), StandardCharsets.UTF_8);
+            }
 
             sendJson(exchange, 200, "{\"status\":\"ok\"}");
         } catch (Exception e) {
@@ -1255,6 +1260,8 @@ public class RedKiteServerMain {
                         Path target = projectRoot.resolve(patch.getKey()).normalize();
                         if (target.startsWith(projectRoot)) modified.put(target, patch.getValue());
                     }
+
+                    refreshPinSummaryComments(applier, scanId, projectRoot, modified, originals);
 
                     // Write all changes to disk.
                     for (Map.Entry<Path, String> entry : modified.entrySet()) {
@@ -1937,6 +1944,71 @@ public class RedKiteServerMain {
             return best;
         }
         return sourcePoms.isEmpty() ? null : sourcePoms.keySet().iterator().next();
+    }
+
+    /**
+     * Refreshes the {@code redkite:pin-summary} comment across every project POM this apply
+     * touches or coexists with, so pin counts stay accurate project-wide even when this
+     * particular apply only changed a different module. Mutates {@code modified} in place —
+     * files whose only change is the summary comment are added to it (and to {@code originals},
+     * when non-null, so a post-validate revert restores them too).
+     *
+     * <p>Files not already in {@code modified} are read live from disk rather than from the
+     * scan's stored source POMs, which are a scan-time snapshot and may be stale relative to
+     * changes a prior apply already wrote.
+     */
+    private void refreshPinSummaryComments(RemediationApplier applier, String scanId, Path projectRoot,
+                                           Map<Path, String> modified, Map<Path, String> originals) {
+        Map<String, String> sourcePomPaths = store.loadSourcePoms(scanId);
+        String rootPomKey = selectRootPomKey(sourcePomPaths, projectRoot.toString());
+        if (rootPomKey == null) return;
+
+        Map<String, Path> pathByRelPath = new LinkedHashMap<>();
+        for (String relPath : sourcePomPaths.keySet()) {
+            pathByRelPath.put(relPath, projectRoot.resolve(relPath).normalize());
+        }
+        for (Path p : modified.keySet()) {
+            String relPath = projectRoot.relativize(p).toString().replace('\\', '/');
+            pathByRelPath.putIfAbsent(relPath, p);
+        }
+
+        Map<String, String> finalByRelPath = new LinkedHashMap<>();
+        for (Map.Entry<String, Path> e : pathByRelPath.entrySet()) {
+            Path path = e.getValue();
+            String content = modified.containsKey(path) ? modified.get(path) : readIfExists(path);
+            if (content != null) finalByRelPath.put(e.getKey(), content);
+        }
+
+        boolean multiFile = finalByRelPath.size() > 1;
+        Map<String, RemediationApplier.PinCounts> perFileCounts = new LinkedHashMap<>();
+        int projectTotal = 0, projectUserPinned = 0;
+        for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
+            RemediationApplier.PinCounts c = applier.countPins(e.getValue());
+            perFileCounts.put(e.getKey(), c);
+            projectTotal += c.total();
+            projectUserPinned += c.userPinned();
+        }
+        RemediationApplier.PinCounts projectCounts = new RemediationApplier.PinCounts(projectTotal, projectUserPinned);
+
+        for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
+            String relPath = e.getKey();
+            Path path = pathByRelPath.get(relPath);
+            boolean isRoot = relPath.equals(rootPomKey);
+            String withSummary = applier.applyPinSummaryComment(e.getValue(),
+                    perFileCounts.get(relPath), isRoot && multiFile ? projectCounts : null);
+            if (!withSummary.equals(e.getValue())) {
+                if (originals != null) originals.putIfAbsent(path, e.getValue());
+                modified.put(path, withSummary);
+            }
+        }
+    }
+
+    private static String readIfExists(Path path) {
+        try {
+            return Files.exists(path) ? Files.readString(path, StandardCharsets.UTF_8) : null;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     /** Comment tag marking a Maven property (or dependencyManagement entry) as user-pinned —
