@@ -1024,6 +1024,37 @@ public class RedKiteServerMain {
         return winner.isBlank() ? null : winner;
     }
 
+    /**
+     * The version RedKite recommends for a TRANSITIVE component, which deliberately does not
+     * follow the same "latest compatible" logic as direct dependencies — a transitive dependency
+     * was never chosen by the project, so recommending a move for it needs a concrete reason:
+     * <ol>
+     *   <li>An existing dependencyManagement entry (RedKite-pinned or plain project-declared)
+     *       already governs this artifact — respect it as-is, whatever its version.
+     *   <li>Otherwise, an active enforcer convergence conflict for this artifact — recommend the
+     *       highest version already present among the conflict's resolved/conflicting versions
+     *       (never a fresh "latest on Maven Central" lookup, which could cross a release line
+     *       nothing in the tree actually requires).
+     *   <li>Otherwise, the current version — i.e. no upgrade is recommended at all. A transitive
+     *       dependency with no conflict and no existing pin has nothing forcing it to move, so a
+     *       "newer version available" or CVE-only signal alone isn't reason enough to override it.
+     * </ol>
+     */
+    private String transitiveRecommendedVersion(ScanComponent comp, TransitiveConflictFinding finding, String rootPomContent) {
+        String pinned = extractDepMgmtVersion(rootPomContent, comp.coordinate().groupId(), comp.coordinate().artifactId());
+        if (pinned != null && !pinned.isBlank()) {
+            return pinned;
+        }
+        if (finding != null) {
+            String winner = finding.resolvedVersion() != null ? finding.resolvedVersion() : "";
+            for (String v : finding.conflictingVersions()) {
+                if (compareVersionsSemantic(v, winner) > 0) winner = v;
+            }
+            if (!winner.isBlank()) return winner;
+        }
+        return comp.version();
+    }
+
     /** Extracts the pinned version for g:a from an existing <dependencyManagement> block. */
     private static String extractDepMgmtVersion(String pomXml, String groupId, String artifactId) {
         // Simple scan: look for <groupId>G</groupId> / <artifactId>A</artifactId> / <version>V</version>
@@ -2702,6 +2733,7 @@ public class RedKiteServerMain {
                 pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
             } catch (Exception ignored) {}
         }
+        String rootPomContent = rootPomXml(sourcePoms);
 
         List<ComponentView> views = new ArrayList<>();
         for (ScanComponent c : unique.values()) {
@@ -2860,8 +2892,11 @@ public class RedKiteServerMain {
                 .append("\"clean\":").append(!s.needsRemediation()).append(",")
                 .append("\"pin\":").append(pinnedCoords.contains(c.coordinate().groupId() + ":" + c.coordinate().artifactId())).append(",")
                 .append("\"hasvuln\":").append(s.hasVulnerability());
-            if (v.recommendation() != null && v.recommendation().targetVersion() != null) {
-                html.append(",\"rec\":").append(jsonStr(v.recommendation().targetVersion()));
+            String recTarget = c.direct()
+                    ? (v.recommendation() != null ? v.recommendation().targetVersion() : null)
+                    : transitiveRecommendedVersion(c, v.convergenceFinding(), rootPomContent);
+            if (recTarget != null && !recTarget.equals(c.version())) {
+                html.append(",\"rec\":").append(jsonStr(recTarget));
             }
             if (v.versionMetadata() != null) {
                 String latest = v.versionMetadata().latestVersion();
@@ -2982,7 +3017,7 @@ public class RedKiteServerMain {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
             boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
-            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords));
+            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords, rootPomContent));
         }
         html.append("</div>");
 
@@ -3088,12 +3123,28 @@ public class RedKiteServerMain {
         return clean && view.convergenceFinding() == null;
     }
 
-    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords) {
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean hasFixableCve = hasFixableCve(view);
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
         boolean pinned = pinnedCoords.contains(coordStr);
+        // For transitive components only: override what "recommended" means (see
+        // transitiveRecommendedVersion doc) — null when it resolves to a no-op (== current
+        // version), so display code can treat "nothing to recommend" and "no recommendation
+        // object" identically.
+        String transitiveTarget = comp.direct() ? null
+                : transitiveRecommendedVersion(comp, view.convergenceFinding(), rootPomContent);
+        boolean transitiveHasTarget = transitiveTarget != null && !transitiveTarget.equals(comp.version());
+        UpgradeRecommendation effectiveRecommendation = comp.direct() ? view.recommendation()
+                : (transitiveHasTarget
+                    ? new UpgradeRecommendation(comp.id(), comp.coordinate(), comp.version(), transitiveTarget,
+                        view.recommendation() != null ? view.recommendation().reason() : RecommendationReason.MINOR_AVAILABLE,
+                        view.recommendation() != null ? view.recommendation().riskLevel() : RiskLevel.ELEVATED,
+                        view.recommendation() != null ? view.recommendation().confidence() : RecommendationConfidence.HIGH,
+                        view.recommendation() != null ? view.recommendation().fixedCves() : List.of(),
+                        List.of(comp.id()))
+                    : null);
 
         StringBuilder html = new StringBuilder();
         String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
@@ -3142,13 +3193,13 @@ public class RedKiteServerMain {
         // Version info
         html.append("<div class=\"rem-meta\">");
         html.append("<span>Current: <strong>").append(escape(comp.version() != null ? comp.version() : "unknown")).append("</strong></span>");
-        if (view.recommendation() != null && !status.isSnapshot()) {
-            String recLabel = switch (view.recommendation().reason()) {
+        if (effectiveRecommendation != null && !status.isSnapshot()) {
+            String recLabel = switch (effectiveRecommendation.reason()) {
                 case CVE_FIX_DOWNGRADE -> "Downgrade to";
                 case CVE_BEST_EFFORT -> "Best available";
                 default -> "Recommended";
             };
-            html.append("<span>&rarr; ").append(recLabel).append(": <strong>").append(escape(view.recommendation().targetVersion())).append("</strong></span>");
+            html.append("<span>&rarr; ").append(recLabel).append(": <strong>").append(escape(effectiveRecommendation.targetVersion())).append("</strong></span>");
         }
         if (view.versionMetadata() != null && view.versionMetadata().latestVersion() != null
                 && !view.versionMetadata().latestVersion().isBlank()
@@ -3171,16 +3222,16 @@ public class RedKiteServerMain {
         // Remediation reason chips
         List<String> otherReasons = status.reasons().stream()
                 .filter(r -> !"Upgrade recommended".equals(r)).toList();
-        boolean showUpgradeBtn = view.recommendation() != null && !status.isSnapshot();
+        boolean showUpgradeBtn = effectiveRecommendation != null && !status.isSnapshot();
         boolean showNoUpgradeChip = !comp.direct() && !status.isSnapshot()
-                && view.recommendation() == null && view.versionMetadata() != null;
+                && effectiveRecommendation == null && view.versionMetadata() != null;
         if (!otherReasons.isEmpty() || showUpgradeBtn || showNoUpgradeChip) {
             html.append("<div class=\"rem-reasons\">");
             for (String reason : otherReasons) {
                 html.append("<span class=\"reason-chip\">").append(escape(reason)).append("</span>");
             }
             if (showUpgradeBtn) {
-                RecommendationReason recReason = view.recommendation().reason();
+                RecommendationReason recReason = effectiveRecommendation.reason();
                 String verb = switch (recReason) {
                     case CVE_FIX_DOWNGRADE -> "Downgrade to";
                     case CVE_BEST_EFFORT -> "Best available:";
@@ -3188,8 +3239,8 @@ public class RedKiteServerMain {
                 };
                 if (comp.direct()) {
                     html.append("<button class=\"reason-chip reason-chip-btn\" type=\"button\" onclick=\"applyUpgrade(")
-                        .append(comp.id()).append(",'").append(escape(view.recommendation().targetVersion())).append("',this)\">")
-                        .append(verb).append(" ").append(escape(view.recommendation().targetVersion())).append("</button>");
+                        .append(comp.id()).append(",'").append(escape(effectiveRecommendation.targetVersion())).append("',this)\">")
+                        .append(verb).append(" ").append(escape(effectiveRecommendation.targetVersion())).append("</button>");
                 } else {
                     String transitiveChip = switch (recReason) {
                         case CVE_FIX_DOWNGRADE -> "Downgrade available";
@@ -3235,20 +3286,17 @@ public class RedKiteServerMain {
                         view.versionMetadata(), view.recommendation(), false, directConflictVersions,
                         view.convergenceFinding() != null));
             } else if (showVersionSelector && (view.versionMetadata() != null || view.convergenceFinding() != null)) {
+                // Transitive: the selector's default is exactly transitiveTarget's 3-tier result
+                // (existing pin > highest version already in the conflict > current/no-op) — never
+                // conflictDefaultVersion's CVE-driven walk beyond what's already in the tree, and
+                // never the scan-time recommendation's own target.
                 String selectorId = "view_" + comp.id();
                 List<String> conflictVersions = view.convergenceFinding() != null
                         ? view.convergenceFinding().conflictingVersions()
                         : List.of();
-                String selectedVersion = view.convergenceFinding() != null
-                        ? conflictDefaultVersion(view.convergenceFinding(), comp, view.findings(), vulnsByKey, view.versionMetadata())
-                        : (view.recommendation() != null ? view.recommendation().targetVersion() : comp.version());
-                if (view.convergenceFinding() != null && view.recommendation() != null
-                        && view.recommendation().targetVersion() != null
-                        && compareVersionsSemantic(view.recommendation().targetVersion(), selectedVersion != null ? selectedVersion : "") > 0) {
-                    selectedVersion = view.recommendation().targetVersion();
-                }
+                String selectedVersion = transitiveTarget != null ? transitiveTarget : comp.version();
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), view.recommendation(), false,
+                        view.versionMetadata(), effectiveRecommendation, false,
                         conflictVersions, true));
             }
             if (!actionableConvergence) {
