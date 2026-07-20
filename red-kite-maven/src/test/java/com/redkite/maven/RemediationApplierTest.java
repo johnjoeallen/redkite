@@ -291,7 +291,7 @@ class RemediationApplierTest {
     void userPinUsesDistinctTagFromComputedPin() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String result = applier.applyDependencyManagementPin(pom,
-                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", true);
+                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", RemediationApplier.PinKind.USER);
         assertTrue(result.contains("redkite:user-pin"), "Should use the user-pin marker");
         assertFalse(result.contains("redkite:dependency-management"),
                 "Should not also carry the computed-pin marker");
@@ -302,7 +302,7 @@ class RemediationApplierTest {
     void removeUserPinStripsMarkerButKeepsHardcodedVersion() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String pinned = applier.applyDependencyManagementPin(pom,
-                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", true);
+                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", RemediationApplier.PinKind.USER);
         String unpinned = applier.removeUserPin(pinned, "com.google.guava", "guava");
         assertFalse(unpinned.contains("redkite:user-pin"), "Marker should be gone");
         assertTrue(unpinned.contains("<version>32.1.2-jre</version>"), "Version entry should remain");
@@ -337,7 +337,7 @@ class RemediationApplierTest {
                 </project>
                 """;
         String pinned = applier.applyDependencyManagementPin(pom,
-                "ch.qos.logback", "logback-core", "1.5.25", "User pinned via RedKite", true);
+                "ch.qos.logback", "logback-core", "1.5.25", "User pinned via RedKite", RemediationApplier.PinKind.USER);
         assertTrue(pinned.contains("redkite:user-pin"));
         assertEquals(java.util.Set.of("ch.qos.logback:logback-core", "ch.qos.logback:logback-classic"),
                 applier.findUserPinnedCoordinates(pinned),
@@ -356,7 +356,7 @@ class RemediationApplierTest {
         String withComputed = applier.applyDependencyManagementPin(pom,
                 "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
         String withBoth = applier.applyDependencyManagementPin(withComputed,
-                "org.slf4j", "slf4j-api", "2.0.16", "User pinned via RedKite", true);
+                "org.slf4j", "slf4j-api", "2.0.16", "User pinned via RedKite", RemediationApplier.PinKind.USER);
 
         RemediationApplier.PinCounts counts = applier.countPins(withBoth);
         assertEquals(2, counts.total());
@@ -368,7 +368,7 @@ class RemediationApplierTest {
         String withExclusion = applier.applyExclusion(POM_WITH_DEPENDENCIES,
                 "com.example", "service-b", "com.google.guava", "guava", "Fix");
         String withSummary = applier.applyPinSummaryComment(withExclusion,
-                new RemediationApplier.PinCounts(0, 0), null);
+                new RemediationApplier.PinCounts(0, 0, 0), null);
         assertEquals(0, applier.countPins(withSummary).total());
     }
 
@@ -376,7 +376,7 @@ class RemediationApplierTest {
     void pinSummaryCommentIsFirstChildAndReplacesOnReapply() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(3, 1), new RemediationApplier.PinCounts(5, 2));
+                new RemediationApplier.PinCounts(3, 1, 0), new RemediationApplier.PinCounts(5, 2, 0));
         assertTrue(withSummary.contains("redkite:pin-summary"));
         assertTrue(withSummary.contains("project: 5 redkite pin(s) (2 user pinned)"));
         assertTrue(withSummary.contains("this file: 3 redkite pin(s) (1 user pinned)"));
@@ -386,7 +386,7 @@ class RemediationApplierTest {
                 "Summary comment should be the first child of <project>");
 
         String updated = applier.applyPinSummaryComment(withSummary,
-                new RemediationApplier.PinCounts(4, 1), new RemediationApplier.PinCounts(6, 2));
+                new RemediationApplier.PinCounts(4, 1, 0), new RemediationApplier.PinCounts(6, 2, 0));
         assertEquals(1, countOccurrences(updated, "redkite:pin-summary"), "Should replace, not duplicate");
         assertTrue(updated.contains("project: 6 redkite pin(s) (2 user pinned)"));
         assertTrue(updated.contains("this file: 4 redkite pin(s) (1 user pinned)"));
@@ -396,7 +396,7 @@ class RemediationApplierTest {
     void pinSummaryOmitsProjectTotalsWhenNull() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(2, 0), null);
+                new RemediationApplier.PinCounts(2, 0, 0), null);
         assertFalse(withSummary.contains("project:"), "Single-pom projects shouldn't show a redundant project total");
         assertTrue(withSummary.contains("2 redkite pin(s) (0 user pinned)"));
     }
@@ -405,7 +405,7 @@ class RemediationApplierTest {
     void stripRedkiteRemediationsRemovesPinSummaryComment() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(1, 0), null);
+                new RemediationApplier.PinCounts(1, 0, 0), null);
         String stripped = applier.stripRedkiteRemediations(withSummary);
         assertFalse(stripped.contains("redkite:pin-summary"));
     }

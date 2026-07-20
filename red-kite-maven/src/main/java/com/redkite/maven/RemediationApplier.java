@@ -59,12 +59,23 @@ public class RemediationApplier {
     private static final String USER_PIN_TAG = "redkite:user-pin";
     private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
+    // An ignore marker is a dependency-management entry pinned to the component's CURRENT
+    // version — a documented no-op that tells RedKite (and future scans) to stop recommending an
+    // upgrade for this transitive dependency, since it has no CVE or conflict forcing it to move.
+    // Transitive-only; superseded by a user pin the moment the user picks a different version.
+    private static final String IGNORE_TAG = "redkite:ignore";
+    private static final String IGNORE_NOTE = "no CVE/conflict — RedKite leaves this alone; pick a version to override";
+
     // A summary comment RedKite keeps at the top of every POM it writes, so the pin counts are
     // visible without having to search the file. Not itself a pin, so it's excluded from counting.
     private static final String PIN_SUMMARY_TAG = "redkite:pin-summary";
 
-    /** How many RedKite-managed dependency pins (computed or user) a POM contains. */
-    public record PinCounts(int total, int userPinned) {}
+    /** Which kind of marker a dependency-management pin entry carries. */
+    public enum PinKind { COMPUTED, USER, IGNORE }
+
+    /** How many RedKite-managed dependency pins (computed or user) a POM contains, plus how many
+     *  transitive dependencies are explicitly marked ignored. */
+    public record PinCounts(int total, int userPinned, int ignored) {}
 
     // ---- Public API ----
 
@@ -127,25 +138,31 @@ public class RemediationApplier {
     public String applyDependencyManagementPin(String content,
                                                String groupId, String artifactId, String version,
                                                String reason) {
-        return applyDependencyManagementPin(content, groupId, artifactId, version, reason, false);
+        return applyDependencyManagementPin(content, groupId, artifactId, version, reason, PinKind.COMPUTED);
     }
 
     /**
      * Same as {@link #applyDependencyManagementPin(String, String, String, String, String)}, but
-     * when {@code userPin} is true the entry (or the property it delegates to) is marked with the
-     * {@code redkite:user-pin} tag instead of the normal RedKite pin tag, so bulk "upgrade all"
-     * operations and future scans know to leave it alone until the user un-pins it.
+     * lets the caller mark the entry (or the property it delegates to) with a specific
+     * {@link PinKind} instead of the normal RedKite-computed pin tag, so bulk "upgrade all"
+     * operations and future scans know to treat it differently:
+     * <ul>
+     *   <li>{@code USER} — {@code redkite:user-pin}, the user explicitly locked this to a chosen
+     *       version via the Pin checkbox.
+     *   <li>{@code IGNORE} — {@code redkite:ignore}, RedKite should stop recommending an upgrade
+     *       for this transitive dependency (the version passed in is the current one).
+     * </ul>
      */
     public String applyDependencyManagementPin(String content,
                                                String groupId, String artifactId, String version,
-                                               String reason, boolean userPin) {
+                                               String reason, PinKind kind) {
         version = sanitizeVersion(version);
         Document doc = parse(content);
 
         // 1) A redkite-managed entry already exists — update it in place.
         Comment existing = findRedkiteDepMgmtComment(doc, groupId, artifactId);
         if (existing != null) {
-            existing.setData(buildPinCommentData(groupId, artifactId, version, reason, userPin));
+            existing.setData(buildPinCommentData(groupId, artifactId, version, reason, kind));
             Element dep = nextElementSibling(existing);
             if (dep != null && "dependency".equals(dep.getNodeName())) {
                 setChildText(doc, dep, "version", version);
@@ -174,7 +191,7 @@ public class RemediationApplier {
                     // standalone hardcoded pin is worse than not applying the fix.
                     return content;
                 }
-                if (userPin) markPropertyPin(doc, property, version, true);
+                if (kind == PinKind.USER) markPropertyPin(doc, property, version, true);
                 if (version.equals(property.getTextContent().trim())) {
                     return serialize(doc);
                 }
@@ -184,7 +201,7 @@ public class RemediationApplier {
             // Literal version: take the entry over — mark it and update the version in place.
             setChildText(doc, plain, "version", version);
             plain.getParentNode().insertBefore(
-                    buildPinComment(doc, groupId, artifactId, version, reason, userPin), plain);
+                    buildPinComment(doc, groupId, artifactId, version, reason, kind), plain);
             return serialize(doc);
         }
 
@@ -192,7 +209,7 @@ public class RemediationApplier {
         for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
             Element dependencies = directChild(depMgmt, "dependencies");
             if (dependencies != null) {
-                dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, userPin));
+                dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, kind));
                 dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
                 return serialize(doc);
             }
@@ -202,7 +219,7 @@ public class RemediationApplier {
         Element root = doc.getDocumentElement();
         Element depMgmt = doc.createElement("dependencyManagement");
         Element dependencies = doc.createElement("dependencies");
-        dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, userPin));
+        dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, kind));
         dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
         depMgmt.appendChild(dependencies);
         root.appendChild(depMgmt);
@@ -217,23 +234,40 @@ public class RemediationApplier {
      * the next bulk upgrade.
      */
     public String removeUserPin(String content, String groupId, String artifactId) {
+        return removeMarker(content, groupId, artifactId, USER_PIN_TAG);
+    }
+
+    /**
+     * Removes the {@code redkite:ignore} marker (if any) for {@code groupId:artifactId} —
+     * whether it sits on a dependencyManagement entry it created, or one it took over from a
+     * plain project entry — without touching the version value itself. Used when the user
+     * unchecks the "Leave alone" checkbox: the dependency goes back to having no RedKite opinion
+     * recorded, so a future scan can recommend an upgrade for it again.
+     */
+    public String removeIgnoreMarker(String content, String groupId, String artifactId) {
+        return removeMarker(content, groupId, artifactId, IGNORE_TAG);
+    }
+
+    private String removeMarker(String content, String groupId, String artifactId, String tag) {
         Document doc = parse(content);
         boolean changed = false;
 
         Comment existingDep = findRedkiteDepMgmtComment(doc, groupId, artifactId);
-        if (existingDep != null && existingDep.getData().strip().startsWith(USER_PIN_TAG)) {
+        if (existingDep != null && existingDep.getData().strip().startsWith(tag)) {
             existingDep.getParentNode().removeChild(existingDep);
             changed = true;
         }
 
-        for (Element dep : elementsByTag(doc, "dependency")) {
-            if (!coordMatches(dep, groupId, artifactId)) continue;
-            Element versionEl = directChild(dep, "version");
-            String versionText = versionEl != null ? versionEl.getTextContent().trim() : null;
-            if (versionText == null || !versionText.startsWith("${") || !versionText.endsWith("}")) continue;
-            Element property = findProjectProperty(doc, versionText.substring(2, versionText.length() - 1));
-            if (property == null) continue;
-            if (markPropertyPin(doc, property, null, false)) changed = true;
+        if (USER_PIN_TAG.equals(tag)) {
+            for (Element dep : elementsByTag(doc, "dependency")) {
+                if (!coordMatches(dep, groupId, artifactId)) continue;
+                Element versionEl = directChild(dep, "version");
+                String versionText = versionEl != null ? versionEl.getTextContent().trim() : null;
+                if (versionText == null || !versionText.startsWith("${") || !versionText.endsWith("}")) continue;
+                Element property = findProjectProperty(doc, versionText.substring(2, versionText.length() - 1));
+                if (property == null) continue;
+                if (markPropertyPin(doc, property, null, false)) changed = true;
+            }
         }
 
         return changed ? serialize(doc) : content;
@@ -247,11 +281,24 @@ public class RemediationApplier {
      * have independent versions).
      */
     public java.util.Set<String> findUserPinnedCoordinates(String content) {
+        return findMarkedCoordinates(content, USER_PIN_TAG);
+    }
+
+    /**
+     * Returns {@code "groupId:artifactId"} for every transitive dependency currently protected by
+     * a {@code redkite:ignore} marker in {@code content} — i.e. RedKite has recorded that it
+     * should not recommend an upgrade for it.
+     */
+    public java.util.Set<String> findIgnoredCoordinates(String content) {
+        return findMarkedCoordinates(content, IGNORE_TAG);
+    }
+
+    private java.util.Set<String> findMarkedCoordinates(String content, String tag) {
         java.util.Set<String> result = new java.util.LinkedHashSet<>();
         Document doc = parse(content);
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if (!data.startsWith(USER_PIN_TAG)) continue;
+            if (!data.startsWith(tag)) continue;
 
             String g = extractAttrValue(data, "groupId");
             String a = extractAttrValue(data, "artifactId");
@@ -328,6 +375,7 @@ public class RemediationApplier {
                     comment.getParentNode().removeChild(comment);
                 }
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
+                    || data.startsWith(IGNORE_TAG)
                     || (data.startsWith(USER_PIN_TAG) && data.contains("groupId="))) {
                 Element next = nextElementSibling(comment);
                 if (next != null && "dependency".equals(next.getNodeName())) {
@@ -404,21 +452,26 @@ public class RemediationApplier {
     /**
      * Counts RedKite-managed dependency pins in {@code content} — both computed
      * (dependency-management convergence/remediation fixes) and user pins, whether the user pin
-     * sits on a dependencyManagement entry or a {@code <properties>} entry. Does not count
-     * exclusions or the pin-summary comment itself.
+     * sits on a dependencyManagement entry or a {@code <properties>} entry — plus how many
+     * transitive dependencies are marked ignored. Ignored entries are tracked separately from
+     * {@code total}/{@code userPinned}: an ignore marker isn't forcing a version, it's recording
+     * that RedKite should stop suggesting one. Does not count exclusions or the pin-summary
+     * comment itself.
      */
     public PinCounts countPins(String content) {
-        int total = 0, userPinned = 0;
+        int total = 0, userPinned = 0, ignored = 0;
         for (Comment comment : allComments(parse(content))) {
             String data = comment.getData().strip();
             if (data.startsWith(USER_PIN_TAG)) {
                 total++;
                 userPinned++;
+            } else if (data.startsWith(IGNORE_TAG)) {
+                ignored++;
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
                 total++;
             }
         }
-        return new PinCounts(total, userPinned);
+        return new PinCounts(total, userPinned, ignored);
     }
 
     /**
@@ -453,27 +506,32 @@ public class RemediationApplier {
         StringBuilder sb = new StringBuilder(PIN_SUMMARY_TAG).append(" ");
         if (projectCounts != null) {
             sb.append("project: ").append(projectCounts.total()).append(" redkite pin(s) (")
-                    .append(projectCounts.userPinned()).append(" user pinned) — this file: ");
+                    .append(projectCounts.userPinned()).append(" user pinned)");
+            if (projectCounts.ignored() > 0) sb.append(", ").append(projectCounts.ignored()).append(" ignored");
+            sb.append(" — this file: ");
         }
         sb.append(fileCounts.total()).append(" redkite pin(s) (")
                 .append(fileCounts.userPinned()).append(" user pinned)");
+        if (fileCounts.ignored() > 0) sb.append(", ").append(fileCounts.ignored()).append(" ignored");
         return sb.toString();
     }
 
     // ---- DOM builders ----
 
     private Comment buildPinComment(Document doc, String groupId, String artifactId,
-                                    String version, String reason, boolean userPin) {
-        return doc.createComment(buildPinCommentData(groupId, artifactId, version, reason, userPin));
+                                    String version, String reason, PinKind kind) {
+        return doc.createComment(buildPinCommentData(groupId, artifactId, version, reason, kind));
     }
 
-    private String buildPinCommentData(String groupId, String artifactId, String version, String reason, boolean userPin) {
-        return " " + (userPin ? USER_PIN_TAG : DEP_MGMT_TAG)
+    private String buildPinCommentData(String groupId, String artifactId, String version, String reason, PinKind kind) {
+        String tag = switch (kind) { case USER -> USER_PIN_TAG; case IGNORE -> IGNORE_TAG; default -> DEP_MGMT_TAG; };
+        String note = switch (kind) { case USER -> USER_PIN_NOTE; case IGNORE -> IGNORE_NOTE; default -> DEP_MGMT_REMOVE_NOTE; };
+        return " " + tag
                 + " groupId=\"" + groupId + "\""
                 + " artifactId=\"" + artifactId + "\""
                 + " version=\"" + version + "\""
                 + " reason=\"" + escapeAttr(reason) + "\""
-                + " — " + (userPin ? USER_PIN_NOTE : DEP_MGMT_REMOVE_NOTE) + " ";
+                + " — " + note + " ";
     }
 
     private Element buildPinDependency(Document doc, String groupId, String artifactId, String version) {
@@ -521,7 +579,7 @@ public class RemediationApplier {
     private Comment findRedkiteDepMgmtComment(Document doc, String groupId, String artifactId) {
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG))
+            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG) || data.startsWith(IGNORE_TAG))
                     && data.contains("groupId=\"" + groupId + "\"")
                     && data.contains("artifactId=\"" + artifactId + "\"")) {
                 return comment;
