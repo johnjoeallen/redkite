@@ -1035,22 +1035,33 @@ public class RedKiteServerMain {
      *       highest version already present among the conflict's resolved/conflicting versions
      *       (never a fresh "latest on Maven Central" lookup, which could cross a release line
      *       nothing in the tree actually requires).
+     *   <li>Otherwise, a fixable CVE on this component — recommend the fix's target version
+     *       (upgrade, downgrade, or best-effort, whichever direction the fix actually moves). A
+     *       known vulnerability with a known fix is exactly the "concrete reason to move" this
+     *       method otherwise withholds — unlike a bare "newer version exists" signal, it isn't
+     *       optional busywork.
      *   <li>Otherwise, the current version — i.e. no upgrade is recommended at all. A transitive
-     *       dependency with no conflict and no existing pin has nothing forcing it to move, so a
-     *       "newer version available" or CVE-only signal alone isn't reason enough to override it.
+     *       dependency with no conflict, no existing pin, and no CVE fix has nothing forcing it to
+     *       move, so "newer version available" alone isn't reason enough to override it.
      * </ol>
      */
-    private String transitiveRecommendedVersion(ScanComponent comp, TransitiveConflictFinding finding, String rootPomContent) {
+    private String transitiveRecommendedVersion(ComponentView view, String rootPomContent) {
+        ScanComponent comp = view.component();
         String pinned = extractDepMgmtVersion(rootPomContent, comp.coordinate().groupId(), comp.coordinate().artifactId());
         if (pinned != null && !pinned.isBlank()) {
             return pinned;
         }
+        TransitiveConflictFinding finding = view.convergenceFinding();
         if (finding != null) {
             String winner = finding.resolvedVersion() != null ? finding.resolvedVersion() : "";
             for (String v : finding.conflictingVersions()) {
                 if (compareVersionsSemantic(v, winner) > 0) winner = v;
             }
             if (!winner.isBlank()) return winner;
+        }
+        if (hasFixableCve(view) && view.recommendation() != null
+                && view.recommendation().targetVersion() != null && !view.recommendation().targetVersion().isBlank()) {
+            return view.recommendation().targetVersion();
         }
         return comp.version();
     }
@@ -2993,7 +3004,7 @@ public class RedKiteServerMain {
                 .append("\"hasvuln\":").append(s.hasVulnerability());
             String recTarget = c.direct()
                     ? (v.recommendation() != null ? v.recommendation().targetVersion() : null)
-                    : transitiveRecommendedVersion(c, v.convergenceFinding(), rootPomContent);
+                    : transitiveRecommendedVersion(v, rootPomContent);
             if (recTarget != null && !recTarget.equals(c.version())) {
                 html.append(",\"rec\":").append(jsonStr(recTarget));
             }
@@ -3241,7 +3252,7 @@ public class RedKiteServerMain {
         // version), so display code can treat "nothing to recommend" and "no recommendation
         // object" identically.
         String transitiveTarget = comp.direct() ? null
-                : transitiveRecommendedVersion(comp, view.convergenceFinding(), rootPomContent);
+                : transitiveRecommendedVersion(view, rootPomContent);
         boolean transitiveHasTarget = transitiveTarget != null && !transitiveTarget.equals(comp.version());
         UpgradeRecommendation effectiveRecommendation = comp.direct() ? view.recommendation()
                 : (transitiveHasTarget
