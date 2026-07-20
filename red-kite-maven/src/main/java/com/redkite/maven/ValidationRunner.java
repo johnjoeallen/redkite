@@ -22,7 +22,6 @@ public class ValidationRunner {
 
     private static final Logger LOGGER = Logger.getLogger(ValidationRunner.class.getName());
     private static final Pattern SPRING_STARTED = Pattern.compile("Started .+ in [\\d.]+ seconds");
-    private static final Pattern TOMCAT_STARTED = Pattern.compile("Tomcat started on port");
     private static final String SPRING_BOOT_PLUGIN = "spring-boot-maven-plugin";
 
     public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
@@ -132,7 +131,7 @@ public class ValidationRunner {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         startupOutput.append(line).append('\n');
-                        if (SPRING_STARTED.matcher(line).find() || TOMCAT_STARTED.matcher(line).find()) {
+                        if (SPRING_STARTED.matcher(line).find()) {
                             started.set(true);
                             break;
                         }

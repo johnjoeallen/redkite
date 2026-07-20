@@ -1198,7 +1198,7 @@ public class RedKiteServerMain {
                     // authoritative gate.
                     job.phase = ApplyJob.Phase.PRE_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult pre =
-                            runner.validateWithStartup(projectRoot, rootPom, 90, validationMavenArgs, validationEnv);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
                     job.baselinePassed = pre.passed();
                     if (!pre.passed()) {
                         LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
@@ -1271,7 +1271,7 @@ public class RedKiteServerMain {
                     // --- POST-VALIDATE ---
                     job.phase = ApplyJob.Phase.POST_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult post =
-                            runner.validateWithStartup(projectRoot, rootPom, 90, validationMavenArgs, validationEnv);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
                     if (!post.passed()) {
                         // Restore originals.
                         for (Map.Entry<Path, String> entry : originals.entrySet()) {
