@@ -2134,7 +2134,19 @@ public class RedKiteServerMain {
             String versionText = versionNode.getTextContent().trim();
             if (versionText.isEmpty()) continue;
 
-            if (versionText.startsWith("${") && versionText.endsWith("}")) {
+            if ("parent".equals(dep.getNodeName())) {
+                // <parent> versions always stay literal, upgrade or not — even when the parent
+                // is already declared through a ${...} reference. Maven resolves the parent's
+                // coordinates before it processes <properties> (properties can themselves be
+                // inherited from that same parent), so a ${...} reference here is never
+                // interpolated. Falling through to the property branch below would write the
+                // "upgrade" value into the referenced property instead: harmless when it's a
+                // real version, but when the parent's current version couldn't be resolved (e.g.
+                // an inherited property this POM doesn't itself declare) "upgrade" is that same
+                // unresolved "${propName}" text, and the property ends up defined as a reference
+                // to itself.
+                if (upgrade != null) versionNode.setTextContent(upgrade);
+            } else if (versionText.startsWith("${") && versionText.endsWith("}")) {
                 // Existing property reference: update the property value when upgrading.
                 // If two deps share the same property ref but target different versions,
                 // give the second dep its own independent property rather than silently
@@ -2163,13 +2175,6 @@ public class RedKiteServerMain {
                             : existingProp.getLength() > 0 ? existingProp.item(0).getTextContent().trim() : versionText;
                     markPropertyPin(doc, propertiesEl, effectivePropName, effectiveVersion, pinnedCoords.contains(coord));
                 }
-            } else if ("parent".equals(dep.getNodeName())) {
-                // <parent> versions always stay literal, upgrade or not. Maven resolves the
-                // parent's coordinates before it processes <properties> (properties can
-                // themselves be inherited from that same parent), so a ${...} reference here
-                // is never interpolated — Maven fails trying to fetch the literal string
-                // "${propName}" as a version.
-                if (upgrade != null) versionNode.setTextContent(upgrade);
             } else {
                 // Literal version: normalise to a property reference.
                 // Use the upgrade version if selected, otherwise keep the current version.

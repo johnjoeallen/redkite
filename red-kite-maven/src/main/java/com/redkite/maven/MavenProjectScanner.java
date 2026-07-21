@@ -167,7 +167,13 @@ public class MavenProjectScanner {
                 if (rawVersion.startsWith("${") && rawVersion.endsWith("}")) {
                     propertyName = rawVersion.substring(2, rawVersion.length() - 1);
                     String prop = model.properties().get(propertyName);
-                    if (prop != null) resolvedVersion = prop;
+                    // Unlike every other version reference in this scanner, an unresolved parent
+                    // property must not fall back to leaving the raw "${propertyName}" text in
+                    // place — that string would then be treated downstream as if it were a real
+                    // resolved version (e.g. carried into a pin/upgrade as the "current" version),
+                    // and written back into the property it came from, defining it as a reference
+                    // to itself.
+                    resolvedVersion = prop != null ? prop : "unknown";
                     versionSource = VersionSource.PROPERTY;
                 }
                 String sourceFile = sourceFile(root, model.path());
