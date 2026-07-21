@@ -364,6 +364,50 @@ class RemediationApplierTest {
     }
 
     @Test
+    void markUnmanagedAddsCommentOnlyNoDependencyOrVersion() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String result = applier.markUnmanaged(pom,
+                "com.google.guava", "guava", "Non-conflicting transitive — unmanaged by RedKite");
+        assertTrue(result.contains("redkite:unmanaged"), "Should carry the unmanaged marker");
+        assertFalse(result.contains("<dependency>"), "Should never add a <dependency> entry — nothing is being forced");
+        int markerStart = result.indexOf("<!-- redkite:unmanaged");
+        int markerEnd = result.indexOf("-->", markerStart);
+        assertFalse(result.substring(markerStart, markerEnd).contains("version=\""),
+                "The comment itself must not record a version");
+        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(result));
+    }
+
+    @Test
+    void markUnmanagedLeavesExistingPlainEntryUntouched() {
+        String result = applier.markUnmanaged(POM_WITH_DEP_MGMT,
+                "org.slf4j", "slf4j-api", "Non-conflicting transitive — unmanaged by RedKite");
+        assertEquals(POM_WITH_DEP_MGMT, result,
+                "The project's own dependencyManagement entry already documents its intent");
+    }
+
+    @Test
+    void removeUnmanagedMarkerStripsCommentOnly() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String marked = applier.markUnmanaged(pom, "com.google.guava", "guava", "Reason");
+        String removed = applier.removeUnmanagedMarker(marked, "com.google.guava", "guava");
+        assertFalse(removed.contains("redkite:unmanaged"));
+        assertTrue(applier.findUnmanagedCoordinates(removed).isEmpty());
+    }
+
+    @Test
+    void countPinsTracksUnmanagedSeparatelyFromPins() {
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String withPin = applier.applyDependencyManagementPin(pom,
+                "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
+        String withBoth = applier.markUnmanaged(withPin,
+                "org.slf4j", "slf4j-api", "Non-conflicting transitive — unmanaged by RedKite");
+
+        RemediationApplier.PinCounts counts = applier.countPins(withBoth);
+        assertEquals(1, counts.total(), "Unmanaged marker must not count as a pin");
+        assertEquals(1, counts.unmanaged());
+    }
+
+    @Test
     void countPinsIgnoresExclusionsAndSummaryComment() {
         String withExclusion = applier.applyExclusion(POM_WITH_DEPENDENCIES,
                 "com.example", "service-b", "com.google.guava", "guava", "Fix");

@@ -1919,23 +1919,22 @@ public class RedKiteServerMain {
                                     updated, g, a, selectedVersion, "Enforcer dependency convergence fix by RedKite");
                         }
                     } else if (isUnignored) {
-                        // Unchecking "Leave alone": drop the ignore marker. If the user also picked
+                        // Unchecking "Unmanaged": drop the unmanaged marker. If the user also picked
                         // a version in the same apply, that's an explicit override — record it as a
                         // user pin rather than leaving a bare version bump unmarked.
-                        updated = applier.removeIgnoreMarker(content, g, a);
+                        updated = applier.removeUnmanagedMarker(content, g, a);
                         if (versionChanged) {
                             updated = applier.applyDependencyManagementPin(
                                     updated, g, a, selectedVersion, "User pinned via RedKite", RemediationApplier.PinKind.USER);
                         }
                     } else if (isPinned || (isIgnored && versionChanged)) {
-                        // A version change on an ignore-eligible component is a deliberate user
-                        // choice — it supersedes the "Leave alone" default and becomes a user pin.
+                        // A version change on an unmanaged-eligible component is a deliberate user
+                        // choice — it supersedes the "Unmanaged" default and becomes a user pin.
                         updated = applier.applyDependencyManagementPin(
                                 content, g, a, selectedVersion, "User pinned via RedKite", RemediationApplier.PinKind.USER);
                     } else if (isIgnored) {
-                        updated = applier.applyDependencyManagementPin(
-                                content, g, a, selectedVersion,
-                                "Non-conflicting transitive — left alone by RedKite", RemediationApplier.PinKind.IGNORE);
+                        updated = applier.markUnmanaged(
+                                content, g, a, "Non-conflicting transitive — unmanaged by RedKite");
                     } else {
                         updated = applier.applyDependencyManagementPin(
                                 content, g, a, selectedVersion,
@@ -2040,15 +2039,15 @@ public class RedKiteServerMain {
 
         boolean multiFile = finalByRelPath.size() > 1;
         Map<String, RemediationApplier.PinCounts> perFileCounts = new LinkedHashMap<>();
-        int projectTotal = 0, projectUserPinned = 0, projectIgnored = 0;
+        int projectTotal = 0, projectUserPinned = 0, projectUnmanaged = 0;
         for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
             RemediationApplier.PinCounts c = applier.countPins(e.getValue());
             perFileCounts.put(e.getKey(), c);
             projectTotal += c.total();
             projectUserPinned += c.userPinned();
-            projectIgnored += c.ignored();
+            projectUnmanaged += c.unmanaged();
         }
-        RemediationApplier.PinCounts projectCounts = new RemediationApplier.PinCounts(projectTotal, projectUserPinned, projectIgnored);
+        RemediationApplier.PinCounts projectCounts = new RemediationApplier.PinCounts(projectTotal, projectUserPinned, projectUnmanaged);
 
         for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
             String relPath = e.getKey();
@@ -2869,7 +2868,7 @@ public class RedKiteServerMain {
         for (String pomContent : sourcePoms.values()) {
             try {
                 pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
-                ignoredCoords.addAll(pinScanApplier.findIgnoredCoordinates(pomContent));
+                ignoredCoords.addAll(pinScanApplier.findUnmanagedCoordinates(pomContent));
             } catch (Exception ignored) {}
         }
         String rootPomContent = rootPomXml(sourcePoms);
@@ -3268,10 +3267,10 @@ public class RedKiteServerMain {
         boolean hasFixableCve = hasFixableCve(view);
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
         boolean pinned = pinnedCoords.contains(coordStr);
-        // "Leave alone" is only offered for non-conflicting, non-CVE transitives that would
-        // otherwise show a plain "upgrade recommended" nudge — nothing to leave alone on a clean
-        // card, and conflicts/CVEs need an actual decision, not a blanket dismissal. Checked by
-        // default: a component with no marker in the POM yet is *already* being left alone (see
+        // "Unmanaged" is only offered for non-conflicting, non-CVE transitives that would
+        // otherwise show a plain "upgrade recommended" nudge — nothing to leave unmanaged on a
+        // clean card, and conflicts/CVEs need an actual decision, not a blanket dismissal. Checked
+        // by default: a component with no marker in the POM yet is *already* unmanaged (see
         // transitiveRecommendedVersion), this just makes that explicit and persists it on apply.
         boolean ignoreEligible = !comp.direct() && !status.isSnapshot() && !status.hasVulnerability()
                 && view.convergenceFinding() == null && isUpgradeRecommendedOnly(status);
@@ -3460,7 +3459,7 @@ public class RedKiteServerMain {
                 html.append("<label class=\"pin-toggle\" title=\"No CVE or conflict forces this to move — leave it at its current version and stop recommending an upgrade\">")
                         .append("<input type=\"checkbox\" class=\"ignore-chk\" data-comp-id=\"").append(comp.id())
                         .append("\"").append(ignored ? " checked" : "")
-                        .append(" onchange=\"onIgnoreToggle(this)\"> Leave alone</label>");
+                        .append(" onchange=\"onIgnoreToggle(this)\"> Unmanaged</label>");
             }
             html.append("</div>");
         }

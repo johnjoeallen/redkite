@@ -59,23 +59,26 @@ public class RemediationApplier {
     private static final String USER_PIN_TAG = "redkite:user-pin";
     private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
-    // An ignore marker is a dependency-management entry pinned to the component's CURRENT
-    // version — a documented no-op that tells RedKite (and future scans) to stop recommending an
-    // upgrade for this transitive dependency, since it has no CVE or conflict forcing it to move.
-    // Transitive-only; superseded by a user pin the moment the user picks a different version.
-    private static final String IGNORE_TAG = "redkite:ignore";
-    private static final String IGNORE_NOTE = "no CVE/conflict — RedKite leaves this alone; pick a version to override";
+    // An unmanaged marker is a bare bookkeeping comment — never a dependencyManagement entry —
+    // that tells RedKite (and future scans) to stop recommending an upgrade for this transitive
+    // dependency, since it has no CVE or conflict forcing it to move. Unlike a real pin it forces
+    // nothing, so it carries no <dependency> and no version: the whole point is that RedKite isn't
+    // tracking a version for this artifact, so writing one down would just go stale as the
+    // resolved version drifts. Transitive-only; superseded by a user pin the moment the user picks
+    // a different version.
+    private static final String UNMANAGED_TAG = "redkite:unmanaged";
+    private static final String UNMANAGED_NOTE = "no CVE/conflict — unmanaged by RedKite; pick a version to override";
 
     // A summary comment RedKite keeps at the top of every POM it writes, so the pin counts are
     // visible without having to search the file. Not itself a pin, so it's excluded from counting.
     private static final String PIN_SUMMARY_TAG = "redkite:pin-summary";
 
     /** Which kind of marker a dependency-management pin entry carries. */
-    public enum PinKind { COMPUTED, USER, IGNORE }
+    public enum PinKind { COMPUTED, USER }
 
     /** How many RedKite-managed dependency pins (computed or user) a POM contains, plus how many
-     *  transitive dependencies are explicitly marked ignored. */
-    public record PinCounts(int total, int userPinned, int ignored) {}
+     *  transitive dependencies are explicitly marked unmanaged. */
+    public record PinCounts(int total, int userPinned, int unmanaged) {}
 
     // ---- Public API ----
 
@@ -149,9 +152,10 @@ public class RemediationApplier {
      * <ul>
      *   <li>{@code USER} — {@code redkite:user-pin}, the user explicitly locked this to a chosen
      *       version via the Pin checkbox.
-     *   <li>{@code IGNORE} — {@code redkite:ignore}, RedKite should stop recommending an upgrade
-     *       for this transitive dependency (the version passed in is the current one).
      * </ul>
+     * Marking a transitive dependency unmanaged is a distinct operation — see
+     * {@link #markUnmanaged(String, String, String, String)} — since it never forces a version and
+     * so has no place in the {@code PinKind} scheme.
      */
     public String applyDependencyManagementPin(String content,
                                                String groupId, String artifactId, String version,
@@ -227,6 +231,52 @@ public class RemediationApplier {
     }
 
     /**
+     * Adds or updates a {@code redkite:unmanaged} bookkeeping comment for
+     * {@code groupId:artifactId} — a note that RedKite deliberately isn't managing this transitive
+     * dependency (no CVE, no conflict), not a pin. Unlike
+     * {@link #applyDependencyManagementPin(String, String, String, String, String, PinKind)}, this
+     * never adds or touches a {@code <dependency>} entry — there's nothing to force — and the
+     * comment itself carries no version, since RedKite isn't tracking one for this artifact and a
+     * recorded version would just go stale as the resolved one drifts. If a plain (non-RedKite)
+     * dependencyManagement entry already exists for this artifact, the project already documents
+     * its own intent for it, so it's left untouched rather than annotated as "unmanaged" on top.
+     * Does NOT write to disk.
+     */
+    public String markUnmanaged(String content, String groupId, String artifactId, String reason) {
+        Document doc = parse(content);
+
+        Comment existing = findRedkiteDepMgmtComment(doc, groupId, artifactId);
+        if (existing != null) {
+            existing.setData(buildUnmanagedCommentData(groupId, artifactId, reason));
+            Element dep = nextElementSibling(existing);
+            if (dep != null && "dependency".equals(dep.getNodeName())) {
+                dep.getParentNode().removeChild(dep);
+            }
+            return serialize(doc);
+        }
+
+        if (findPlainDepMgmtEntry(doc, groupId, artifactId) != null) {
+            return content;
+        }
+
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            Element dependencies = directChild(depMgmt, "dependencies");
+            if (dependencies != null) {
+                dependencies.appendChild(doc.createComment(buildUnmanagedCommentData(groupId, artifactId, reason)));
+                return serialize(doc);
+            }
+        }
+
+        Element root = doc.getDocumentElement();
+        Element depMgmt = doc.createElement("dependencyManagement");
+        Element dependencies = doc.createElement("dependencies");
+        dependencies.appendChild(doc.createComment(buildUnmanagedCommentData(groupId, artifactId, reason)));
+        depMgmt.appendChild(dependencies);
+        root.appendChild(depMgmt);
+        return serialize(doc);
+    }
+
+    /**
      * Removes the {@code redkite:user-pin} marker (if any) for {@code groupId:artifactId} —
      * whether it sits on a dependencyManagement entry or on the {@code <properties>} entry the
      * artifact's version delegates to — without touching the version value itself. Used when the
@@ -238,14 +288,12 @@ public class RemediationApplier {
     }
 
     /**
-     * Removes the {@code redkite:ignore} marker (if any) for {@code groupId:artifactId} —
-     * whether it sits on a dependencyManagement entry it created, or one it took over from a
-     * plain project entry — without touching the version value itself. Used when the user
-     * unchecks the "Leave alone" checkbox: the dependency goes back to having no RedKite opinion
-     * recorded, so a future scan can recommend an upgrade for it again.
+     * Removes the {@code redkite:unmanaged} marker (if any) for {@code groupId:artifactId}. Used
+     * when the user unchecks the "Unmanaged" checkbox: the dependency goes back to having no
+     * RedKite opinion recorded, so a future scan can recommend an upgrade for it again.
      */
-    public String removeIgnoreMarker(String content, String groupId, String artifactId) {
-        return removeMarker(content, groupId, artifactId, IGNORE_TAG);
+    public String removeUnmanagedMarker(String content, String groupId, String artifactId) {
+        return removeMarker(content, groupId, artifactId, UNMANAGED_TAG);
     }
 
     private String removeMarker(String content, String groupId, String artifactId, String tag) {
@@ -285,12 +333,12 @@ public class RemediationApplier {
     }
 
     /**
-     * Returns {@code "groupId:artifactId"} for every transitive dependency currently protected by
-     * a {@code redkite:ignore} marker in {@code content} — i.e. RedKite has recorded that it
-     * should not recommend an upgrade for it.
+     * Returns {@code "groupId:artifactId"} for every transitive dependency currently marked
+     * {@code redkite:unmanaged} in {@code content} — i.e. RedKite has recorded that it should not
+     * recommend an upgrade for it.
      */
-    public java.util.Set<String> findIgnoredCoordinates(String content) {
-        return findMarkedCoordinates(content, IGNORE_TAG);
+    public java.util.Set<String> findUnmanagedCoordinates(String content) {
+        return findMarkedCoordinates(content, UNMANAGED_TAG);
     }
 
     private java.util.Set<String> findMarkedCoordinates(String content, String tag) {
@@ -375,7 +423,7 @@ public class RemediationApplier {
                     comment.getParentNode().removeChild(comment);
                 }
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
-                    || data.startsWith(IGNORE_TAG)
+                    || data.startsWith(UNMANAGED_TAG)
                     || (data.startsWith(USER_PIN_TAG) && data.contains("groupId="))) {
                 Element next = nextElementSibling(comment);
                 if (next != null && "dependency".equals(next.getNodeName())) {
@@ -453,25 +501,25 @@ public class RemediationApplier {
      * Counts RedKite-managed dependency pins in {@code content} — both computed
      * (dependency-management convergence/remediation fixes) and user pins, whether the user pin
      * sits on a dependencyManagement entry or a {@code <properties>} entry — plus how many
-     * transitive dependencies are marked ignored. Ignored entries are tracked separately from
-     * {@code total}/{@code userPinned}: an ignore marker isn't forcing a version, it's recording
+     * transitive dependencies are marked unmanaged. Unmanaged entries are tracked separately from
+     * {@code total}/{@code userPinned}: an unmanaged marker isn't forcing a version, it's recording
      * that RedKite should stop suggesting one. Does not count exclusions or the pin-summary
      * comment itself.
      */
     public PinCounts countPins(String content) {
-        int total = 0, userPinned = 0, ignored = 0;
+        int total = 0, userPinned = 0, unmanaged = 0;
         for (Comment comment : allComments(parse(content))) {
             String data = comment.getData().strip();
             if (data.startsWith(USER_PIN_TAG)) {
                 total++;
                 userPinned++;
-            } else if (data.startsWith(IGNORE_TAG)) {
-                ignored++;
+            } else if (data.startsWith(UNMANAGED_TAG)) {
+                unmanaged++;
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
                 total++;
             }
         }
-        return new PinCounts(total, userPinned, ignored);
+        return new PinCounts(total, userPinned, unmanaged);
     }
 
     /**
@@ -507,12 +555,12 @@ public class RemediationApplier {
         if (projectCounts != null) {
             sb.append("project: ").append(projectCounts.total()).append(" redkite pin(s) (")
                     .append(projectCounts.userPinned()).append(" user pinned)");
-            if (projectCounts.ignored() > 0) sb.append(", ").append(projectCounts.ignored()).append(" ignored");
+            if (projectCounts.unmanaged() > 0) sb.append(", ").append(projectCounts.unmanaged()).append(" unmanaged");
             sb.append(" — this file: ");
         }
         sb.append(fileCounts.total()).append(" redkite pin(s) (")
                 .append(fileCounts.userPinned()).append(" user pinned)");
-        if (fileCounts.ignored() > 0) sb.append(", ").append(fileCounts.ignored()).append(" ignored");
+        if (fileCounts.unmanaged() > 0) sb.append(", ").append(fileCounts.unmanaged()).append(" unmanaged");
         return sb.toString();
     }
 
@@ -524,8 +572,8 @@ public class RemediationApplier {
     }
 
     private String buildPinCommentData(String groupId, String artifactId, String version, String reason, PinKind kind) {
-        String tag = switch (kind) { case USER -> USER_PIN_TAG; case IGNORE -> IGNORE_TAG; default -> DEP_MGMT_TAG; };
-        String note = switch (kind) { case USER -> USER_PIN_NOTE; case IGNORE -> IGNORE_NOTE; default -> DEP_MGMT_REMOVE_NOTE; };
+        String tag = switch (kind) { case USER -> USER_PIN_TAG; default -> DEP_MGMT_TAG; };
+        String note = switch (kind) { case USER -> USER_PIN_NOTE; default -> DEP_MGMT_REMOVE_NOTE; };
         return " " + tag
                 + " groupId=\"" + groupId + "\""
                 + " artifactId=\"" + artifactId + "\""
@@ -540,6 +588,14 @@ public class RemediationApplier {
         appendTextChild(doc, dep, "artifactId", artifactId);
         appendTextChild(doc, dep, "version", version);
         return dep;
+    }
+
+    private String buildUnmanagedCommentData(String groupId, String artifactId, String reason) {
+        return " " + UNMANAGED_TAG
+                + " groupId=\"" + groupId + "\""
+                + " artifactId=\"" + artifactId + "\""
+                + " reason=\"" + escapeAttr(reason) + "\""
+                + " — " + UNMANAGED_NOTE + " ";
     }
 
     // ---- DOM scanning helpers ----
@@ -579,7 +635,7 @@ public class RemediationApplier {
     private Comment findRedkiteDepMgmtComment(Document doc, String groupId, String artifactId) {
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG) || data.startsWith(IGNORE_TAG))
+            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG) || data.startsWith(UNMANAGED_TAG))
                     && data.contains("groupId=\"" + groupId + "\"")
                     && data.contains("artifactId=\"" + artifactId + "\"")) {
                 return comment;
