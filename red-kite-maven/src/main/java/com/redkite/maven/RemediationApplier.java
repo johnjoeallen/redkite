@@ -68,6 +68,11 @@ public class RemediationApplier {
     // a different version.
     private static final String UNMANAGED_TAG = "redkite:unmanaged";
     private static final String UNMANAGED_NOTE = "no CVE/conflict — unmanaged by RedKite; pick a version to override";
+    // The pre-rename tag ("redkite:ignore"), which — unlike this one — sat above a full
+    // <dependency> entry with a hardcoded version. Recognizing it here means a marker written by
+    // an older RedKite version is found (and its leftover <dependency> cleaned up) instead of
+    // being mistaken for a plain, project-owned dependencyManagement entry and left stuck forever.
+    private static final String UNMANAGED_TAG_LEGACY = "redkite:ignore";
 
     // A summary comment RedKite keeps at the top of every POM it writes, so the pin counts are
     // visible without having to search the file. Not itself a pin, so it's excluded from counting.
@@ -296,12 +301,25 @@ public class RemediationApplier {
         return removeMarker(content, groupId, artifactId, UNMANAGED_TAG);
     }
 
+    /** Whether a comment's data starts with {@code tag} — or, when {@code tag} is
+     *  {@link #UNMANAGED_TAG}, with the pre-rename {@link #UNMANAGED_TAG_LEGACY} either. */
+    private static boolean matchesTag(String data, String tag) {
+        return data.startsWith(tag) || (UNMANAGED_TAG.equals(tag) && data.startsWith(UNMANAGED_TAG_LEGACY));
+    }
+
     private String removeMarker(String content, String groupId, String artifactId, String tag) {
         Document doc = parse(content);
         boolean changed = false;
 
         Comment existingDep = findRedkiteDepMgmtComment(doc, groupId, artifactId);
-        if (existingDep != null && existingDep.getData().strip().startsWith(tag)) {
+        if (existingDep != null && matchesTag(existingDep.getData().strip(), tag)) {
+            Element dep = nextElementSibling(existingDep);
+            if (UNMANAGED_TAG.equals(tag) && dep != null && "dependency".equals(dep.getNodeName())) {
+                // A legacy redkite:ignore marker carried a full <dependency> entry (unlike the
+                // current comment-only unmanaged marker) — drop it too, rather than leaving it
+                // behind looking like a plain, project-owned entry.
+                dep.getParentNode().removeChild(dep);
+            }
             existingDep.getParentNode().removeChild(existingDep);
             changed = true;
         }
@@ -346,7 +364,7 @@ public class RemediationApplier {
         Document doc = parse(content);
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if (!data.startsWith(tag)) continue;
+            if (!matchesTag(data, tag)) continue;
 
             String g = extractAttrValue(data, "groupId");
             String a = extractAttrValue(data, "artifactId");
@@ -423,7 +441,7 @@ public class RemediationApplier {
                     comment.getParentNode().removeChild(comment);
                 }
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)
-                    || data.startsWith(UNMANAGED_TAG)
+                    || matchesTag(data, UNMANAGED_TAG)
                     || (data.startsWith(USER_PIN_TAG) && data.contains("groupId="))) {
                 Element next = nextElementSibling(comment);
                 if (next != null && "dependency".equals(next.getNodeName())) {
@@ -513,7 +531,7 @@ public class RemediationApplier {
             if (data.startsWith(USER_PIN_TAG)) {
                 total++;
                 userPinned++;
-            } else if (data.startsWith(UNMANAGED_TAG)) {
+            } else if (matchesTag(data, UNMANAGED_TAG)) {
                 unmanaged++;
             } else if (data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX)) {
                 total++;
@@ -635,7 +653,7 @@ public class RemediationApplier {
     private Comment findRedkiteDepMgmtComment(Document doc, String groupId, String artifactId) {
         for (Comment comment : allComments(doc)) {
             String data = comment.getData().strip();
-            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG) || data.startsWith(UNMANAGED_TAG))
+            if ((data.startsWith(DEP_MGMT_TAG_DETECT_PREFIX) || data.startsWith(USER_PIN_TAG) || matchesTag(data, UNMANAGED_TAG))
                     && data.contains("groupId=\"" + groupId + "\"")
                     && data.contains("artifactId=\"" + artifactId + "\"")) {
                 return comment;

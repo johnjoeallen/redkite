@@ -1912,7 +1912,12 @@ public class RedKiteServerMain {
                 if (content != null) {
                     String updated;
                     String g = component.coordinate().groupId(), a = component.coordinate().artifactId();
-                    if (isUnpinned) {
+                    if (isUnpinned && !isIgnored) {
+                        // Plain "uncheck Pin, decide nothing else": removeUserPin deliberately
+                        // keeps the <dependency> (just unprotected). When Unmanaged is ALSO being
+                        // checked in this same apply, skip this branch entirely — markUnmanaged
+                        // below runs on the untouched content and cleans up the old pin's
+                        // <dependency> itself, rather than inheriting a stale unmarked entry.
                         updated = applier.removeUserPin(content, g, a);
                         if (versionChanged) {
                             updated = applier.applyDependencyManagementPin(
@@ -1920,10 +1925,10 @@ public class RedKiteServerMain {
                         }
                     } else if (isUnignored) {
                         // Unchecking "Unmanaged": drop the unmanaged marker. If the user also picked
-                        // a version in the same apply, that's an explicit override — record it as a
-                        // user pin rather than leaving a bare version bump unmarked.
+                        // a version, or also checked Pin, in the same apply, that's an explicit
+                        // override — record it as a user pin rather than leaving it untracked.
                         updated = applier.removeUnmanagedMarker(content, g, a);
-                        if (versionChanged) {
+                        if (versionChanged || isPinned) {
                             updated = applier.applyDependencyManagementPin(
                                     updated, g, a, selectedVersion, "User pinned via RedKite", RemediationApplier.PinKind.USER);
                         }

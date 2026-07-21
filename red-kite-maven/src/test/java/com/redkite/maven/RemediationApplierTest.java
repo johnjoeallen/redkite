@@ -395,6 +395,52 @@ class RemediationApplierTest {
     }
 
     @Test
+    void markUnmanagedRemovesAPreExistingPinsDependencyEntry() {
+        // Switching a component directly from Pin to Unmanaged: markUnmanaged must find the old
+        // pin's comment+<dependency> and replace them with a bare marker, not leave the hardcoded
+        // <dependency> behind looking like a plain, project-owned entry.
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String pinned = applier.applyDependencyManagementPin(pom,
+                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", RemediationApplier.PinKind.USER);
+        String unmanaged = applier.markUnmanaged(pinned,
+                "com.google.guava", "guava", "Non-conflicting transitive — unmanaged by RedKite");
+        assertFalse(unmanaged.contains("<dependency>"), "The old pin's <dependency> must be gone");
+        assertFalse(unmanaged.contains("redkite:user-pin"));
+        assertTrue(unmanaged.contains("redkite:unmanaged"));
+        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(unmanaged));
+    }
+
+    @Test
+    void findsAndCleansUpLegacyIgnoreMarkerAndItsDependencyEntry() {
+        // Pre-rename RedKite versions wrote "redkite:ignore" above a full hardcoded <dependency>.
+        // Both the marker lookup and cleanup must still recognize it.
+        String legacy = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <!-- redkite:ignore groupId="com.google.guava" artifactId="guava" version="32.1.2-jre" reason="x" — no CVE/conflict — RedKite leaves this alone; pick a version to override -->
+                      <dependency>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                        <version>32.1.2-jre</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(legacy));
+
+        String remarked = applier.markUnmanaged(legacy, "com.google.guava", "guava", "reason");
+        assertFalse(remarked.contains("<dependency>"), "Legacy hardcoded entry must be dropped");
+        assertFalse(remarked.contains("redkite:ignore"));
+        assertTrue(remarked.contains("redkite:unmanaged"));
+
+        String removed = applier.removeUnmanagedMarker(legacy, "com.google.guava", "guava");
+        assertFalse(removed.contains("redkite:ignore"));
+        assertFalse(removed.contains("<dependency>"), "Unchecking Unmanaged on a legacy marker must drop its dependency too");
+    }
+
+    @Test
     void countPinsTracksUnmanagedSeparatelyFromPins() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withPin = applier.applyDependencyManagementPin(pom,
