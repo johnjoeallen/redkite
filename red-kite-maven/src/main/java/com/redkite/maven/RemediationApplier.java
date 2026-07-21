@@ -175,6 +175,13 @@ public class RemediationApplier {
             Element dep = nextElementSibling(existing);
             if (dep != null && "dependency".equals(dep.getNodeName())) {
                 setChildText(doc, dep, "version", version);
+            } else {
+                // The existing marker was a comment-only "unmanaged" note — nothing was being
+                // forced, so there's no <dependency> to update. Converting it into a real pin
+                // needs one created fresh, or the rewritten comment would claim a version that
+                // nothing actually enforces.
+                existing.getParentNode().insertBefore(
+                        buildPinDependency(doc, groupId, artifactId, version), existing.getNextSibling());
             }
             return serialize(doc);
         }

@@ -395,6 +395,22 @@ class RemediationApplierTest {
     }
 
     @Test
+    void applyingAPinOverAnUnmanagedMarkerCreatesTheMissingDependency() {
+        // A component can be marked unmanaged, then later develop a CVE with a fix — nothing on
+        // the CVE page lets the user first "un-unmanage" it, so applying the fix must convert the
+        // bare comment straight into a real, enforced pin rather than just rewriting the comment
+        // text and leaving nothing to actually force the version.
+        String pom = "<project>\n  <dependencies/>\n</project>";
+        String marked = applier.markUnmanaged(pom, "org.example", "vuln-lib", "Reason");
+        String upgraded = applier.applyDependencyManagementPin(marked,
+                "org.example", "vuln-lib", "9.9.9", "CVE fix by RedKite");
+        assertTrue(upgraded.contains("<dependency>"), "Must create the dependency the rewritten comment claims to pin");
+        assertTrue(upgraded.contains("<version>9.9.9</version>"));
+        assertFalse(upgraded.contains("redkite:unmanaged"));
+        assertEquals(1, applier.countPins(upgraded).total());
+    }
+
+    @Test
     void markUnmanagedRemovesAPreExistingPinsDependencyEntry() {
         // Switching a component directly from Pin to Unmanaged: markUnmanaged must find the old
         // pin's comment+<dependency> and replace them with a bare marker, not leave the hardcoded
