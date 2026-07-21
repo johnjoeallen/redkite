@@ -395,7 +395,7 @@ public class RedKiteServerMain {
             body.append("</section>");
 
             body.append("<section class=\"card span-2\"><h2>Build validation</h2>");
-            body.append("<p class=\"muted\">Extra options used when validating this project's build before/after applying fixes ")
+            body.append("<p class=\"muted\">Extra options used when validating this project's build before/after Applying changes ")
                     .append("(e.g. a Spring profile a spring-boot:run startup check needs). Applies to the next apply.</p>");
             body.append("<form method=\"POST\" action=\"/api/projects/").append(escape(project.id())).append("/validation\">");
             body.append("<div class=\"config-row\"><label for=\"mavenArgs\">Extra mvn arguments</label>");
@@ -1228,7 +1228,7 @@ public class RedKiteServerMain {
                     RemediationApplier applier = new RemediationApplier();
 
                     // --- PRE-VALIDATE ---
-                    // Non-blocking: a failing baseline means we may be applying fixes to a broken project,
+                    // Non-blocking: a failing baseline means we may be Applying changes to a broken project,
                     // which is a valid use case. We record the result and continue; post-validate is the
                     // authoritative gate.
                     job.phase = ApplyJob.Phase.PRE_VALIDATE;
@@ -2637,7 +2637,7 @@ public class RedKiteServerMain {
              + "<div class=\"scan-overlay-box\">"
              + "<div style=\"display:flex;align-items:center;gap:10px\">"
              + "<div class=\"scan-spinner\"></div>"
-             + "<span>Applying fixes…</span>"
+             + "<span>Applying changes…</span>"
              + "</div>"
              + "<div class=\"scan-phase-track\" style=\"width:300px\">"
              + "<div id=\"apply-progress-bar\" class=\"scan-phase-fill active\" style=\"width:0%\"></div>"
