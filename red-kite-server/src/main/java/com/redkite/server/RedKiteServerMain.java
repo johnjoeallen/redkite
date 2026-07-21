@@ -1066,7 +1066,12 @@ public class RedKiteServerMain {
         return comp.version();
     }
 
-    /** Extracts the pinned version for g:a from an existing <dependencyManagement> block. */
+    /** Extracts the pinned version for g:a from an existing <dependencyManagement> block,
+     *  resolving a ${...} property reference against this same POM's <properties> block. Returns
+     *  null (rather than the raw "${propName}" text) when the entry is property-backed but the
+     *  property can't be found here — callers treat this identically to "no pin exists", instead
+     *  of mistaking the unresolved reference for a real version and later writing it back into
+     *  the property itself, defining it as a reference to itself. */
     private static String extractDepMgmtVersion(String pomXml, String groupId, String artifactId) {
         // Simple scan: look for <groupId>G</groupId> / <artifactId>A</artifactId> / <version>V</version>
         // within a <dependencyManagement> block.
@@ -1086,11 +1091,30 @@ public class RedKiteServerMain {
                     && dep.contains("<artifactId>" + artifactId + "</artifactId>")) {
                 int vs = dep.indexOf("<version>");
                 int ve = dep.indexOf("</version>");
-                if (vs >= 0 && ve > vs) return dep.substring(vs + 9, ve).trim();
+                if (vs >= 0 && ve > vs) return resolvePomPropertyRef(pomXml, dep.substring(vs + 9, ve).trim());
             }
             pos = depEnd + 1;
         }
         return null;
+    }
+
+    /** If {@code value} is a {@code ${propName}} reference, resolves it against {@code pomXml}'s
+     *  own <properties> block (single level, no chained/inherited resolution); returns it
+     *  unchanged if it isn't a reference, or null if the property can't be found here. */
+    private static String resolvePomPropertyRef(String pomXml, String value) {
+        if (value == null || !value.startsWith("${") || !value.endsWith("}")) return value;
+        String propName = value.substring(2, value.length() - 1);
+        int psStart = pomXml.indexOf("<properties>");
+        int psEnd = pomXml.indexOf("</properties>");
+        if (psStart < 0 || psEnd <= psStart) return null;
+        String props = pomXml.substring(psStart, psEnd);
+        String openTag = "<" + propName + ">";
+        String closeTag = "</" + propName + ">";
+        int os = props.indexOf(openTag);
+        if (os < 0) return null;
+        int oe = props.indexOf(closeTag, os);
+        if (oe < 0) return null;
+        return props.substring(os + openTag.length(), oe).trim();
     }
 
     private void handleApiEnforcerResults(HttpExchange exchange) throws IOException {
