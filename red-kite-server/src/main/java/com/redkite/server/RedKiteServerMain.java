@@ -1712,14 +1712,10 @@ public class RedKiteServerMain {
             Map<String, String> updates = parseForm(readBody(exchange));
             // "pinned"/"unpinned" are pseudo-fields carrying comma-separated component IDs whose
             // Pin checkbox state changed this apply — pulled out before the rest is treated as
-            // plain compId=version pairs. "ignored"/"unignored" are the same idea for the "Leave
-            // alone" checkbox on non-conflicting transitives.
+            // plain compId=version pairs.
             Set<Long> pinnedIds = parseIdList(updates.remove("pinned"));
             Set<Long> unpinnedIds = parseIdList(updates.remove("unpinned"));
-            Set<Long> ignoredIds = parseIdList(updates.remove("ignored"));
-            Set<Long> unignoredIds = parseIdList(updates.remove("unignored"));
-            if (updates.isEmpty() && pinnedIds.isEmpty() && unpinnedIds.isEmpty()
-                    && ignoredIds.isEmpty() && unignoredIds.isEmpty()) { sendText(exchange, 400, "No updates"); return; }
+            if (updates.isEmpty() && pinnedIds.isEmpty() && unpinnedIds.isEmpty()) { sendText(exchange, 400, "No updates"); return; }
             try {
                 ScanEntry scan = store.getScan(scanId);
                 Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
@@ -1732,7 +1728,7 @@ public class RedKiteServerMain {
                 }
                 Map<String, String> patchedFiles = generatePomPatches(
                         scan.report(), sourcePoms, scan.input().workingTreePath(), updates, conflictsByKey,
-                        pinnedIds, unpinnedIds, ignoredIds, unignoredIds);
+                        pinnedIds, unpinnedIds);
                 if (patchedFiles.isEmpty()) { sendJson(exchange, 200, "{}"); return; }
                 StringBuilder json = new StringBuilder("{");
                 boolean first = true;
@@ -1818,10 +1814,10 @@ public class RedKiteServerMain {
     }
 
     private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey) throws Exception {
-        return generatePomPatches(report, sourcePoms, workingTreePath, rawUpdates, conflictsByKey, Set.of(), Set.of(), Set.of(), Set.of());
+        return generatePomPatches(report, sourcePoms, workingTreePath, rawUpdates, conflictsByKey, Set.of(), Set.of());
     }
 
-    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey, Set<Long> pinnedIds, Set<Long> unpinnedIds, Set<Long> ignoredIds, Set<Long> unignoredIds) throws Exception {
+    private Map<String, String> generatePomPatches(ScanReport report, Map<String, String> sourcePoms, String workingTreePath, Map<String, String> rawUpdates, Map<String, List<TransitiveConflictFinding>> conflictsByKey, Set<Long> pinnedIds, Set<Long> unpinnedIds) throws Exception {
         // rawUpdates keys are component IDs (from the client) — resolve each to its exact component
         Map<Long, String> updateById = new LinkedHashMap<>();
         for (Map.Entry<String, String> e : rawUpdates.entrySet()) {
@@ -1895,12 +1891,10 @@ public class RedKiteServerMain {
             long id = component.id();
             boolean isPinned = pinnedIds.contains(id);
             boolean isUnpinned = unpinnedIds.contains(id);
-            boolean isIgnored = ignoredIds.contains(id);
-            boolean isUnignored = unignoredIds.contains(id);
             String requestedVersion = updateById.get(id);
             boolean versionChanged = requestedVersion != null && !requestedVersion.isBlank()
                     && !requestedVersion.equals(component.version());
-            if (!versionChanged && !isPinned && !isUnpinned && !isIgnored && !isUnignored) {
+            if (!versionChanged && !isPinned && !isUnpinned) {
                 continue;
             }
             String selectedVersion = versionChanged ? requestedVersion : component.version();
@@ -1912,34 +1906,17 @@ public class RedKiteServerMain {
                 if (content != null) {
                     String updated;
                     String g = component.coordinate().groupId(), a = component.coordinate().artifactId();
-                    if (isUnpinned && !isIgnored) {
-                        // Plain "uncheck Pin, decide nothing else": removeUserPin deliberately
-                        // keeps the <dependency> (just unprotected). When Unmanaged is ALSO being
-                        // checked in this same apply, skip this branch entirely — markUnmanaged
-                        // below runs on the untouched content and cleans up the old pin's
-                        // <dependency> itself, rather than inheriting a stale unmarked entry.
+                    if (isUnpinned) {
+                        // Plain "uncheck Pin": removeUserPin deliberately keeps the <dependency>
+                        // (just unprotected).
                         updated = applier.removeUserPin(content, g, a);
                         if (versionChanged) {
                             updated = applier.applyDependencyManagementPin(
                                     updated, g, a, selectedVersion, "Enforcer dependency convergence fix by RedKite");
                         }
-                    } else if (isUnignored) {
-                        // Unchecking "Unmanaged": drop the unmanaged marker. If the user also picked
-                        // a version, or also checked Pin, in the same apply, that's an explicit
-                        // override — record it as a user pin rather than leaving it untracked.
-                        updated = applier.removeUnmanagedMarker(content, g, a);
-                        if (versionChanged || isPinned) {
-                            updated = applier.applyDependencyManagementPin(
-                                    updated, g, a, selectedVersion, "User pinned via RedKite", RemediationApplier.PinKind.USER);
-                        }
-                    } else if (isPinned || (isIgnored && versionChanged)) {
-                        // A version change on an unmanaged-eligible component is a deliberate user
-                        // choice — it supersedes the "Unmanaged" default and becomes a user pin.
+                    } else if (isPinned) {
                         updated = applier.applyDependencyManagementPin(
                                 content, g, a, selectedVersion, "User pinned via RedKite", RemediationApplier.PinKind.USER);
-                    } else if (isIgnored) {
-                        updated = applier.markUnmanaged(
-                                content, g, a, "Non-conflicting transitive — unmanaged by RedKite");
                     } else {
                         updated = applier.applyDependencyManagementPin(
                                 content, g, a, selectedVersion,
@@ -2044,15 +2021,14 @@ public class RedKiteServerMain {
 
         boolean multiFile = finalByRelPath.size() > 1;
         Map<String, RemediationApplier.PinCounts> perFileCounts = new LinkedHashMap<>();
-        int projectTotal = 0, projectUserPinned = 0, projectUnmanaged = 0;
+        int projectTotal = 0, projectUserPinned = 0;
         for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
             RemediationApplier.PinCounts c = applier.countPins(e.getValue());
             perFileCounts.put(e.getKey(), c);
             projectTotal += c.total();
             projectUserPinned += c.userPinned();
-            projectUnmanaged += c.unmanaged();
         }
-        RemediationApplier.PinCounts projectCounts = new RemediationApplier.PinCounts(projectTotal, projectUserPinned, projectUnmanaged);
+        RemediationApplier.PinCounts projectCounts = new RemediationApplier.PinCounts(projectTotal, projectUserPinned);
 
         for (Map.Entry<String, String> e : finalByRelPath.entrySet()) {
             String relPath = e.getKey();
@@ -2868,12 +2844,10 @@ public class RedKiteServerMain {
         }
 
         Set<String> pinnedCoords = new LinkedHashSet<>();
-        Set<String> ignoredCoords = new LinkedHashSet<>();
         RemediationApplier pinScanApplier = new RemediationApplier();
         for (String pomContent : sourcePoms.values()) {
             try {
                 pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
-                ignoredCoords.addAll(pinScanApplier.findUnmanagedCoordinates(pomContent));
             } catch (Exception ignored) {}
         }
         String rootPomContent = rootPomXml(sourcePoms);
@@ -3160,7 +3134,7 @@ public class RedKiteServerMain {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
             boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
-            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords, ignoredCoords, rootPomContent));
+            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords, rootPomContent));
         }
         html.append("</div>");
 
@@ -3266,20 +3240,12 @@ public class RedKiteServerMain {
         return clean && view.convergenceFinding() == null;
     }
 
-    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, Set<String> ignoredCoords, String rootPomContent) {
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean hasFixableCve = hasFixableCve(view);
         String coordStr = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
         boolean pinned = pinnedCoords.contains(coordStr);
-        // "Unmanaged" is only offered for non-conflicting, non-CVE transitives that would
-        // otherwise show a plain "upgrade recommended" nudge — nothing to leave unmanaged on a
-        // clean card, and conflicts/CVEs need an actual decision, not a blanket dismissal. Checked
-        // by default: a component with no marker in the POM yet is *already* unmanaged (see
-        // transitiveRecommendedVersion), this just makes that explicit and persists it on apply.
-        boolean ignoreEligible = !comp.direct() && !status.isSnapshot() && !status.hasVulnerability()
-                && view.convergenceFinding() == null && isUpgradeRecommendedOnly(status);
-        boolean ignored = ignoreEligible && (ignoredCoords.contains(coordStr) || !pinned);
         // For transitive components only: override what "recommended" means (see
         // transitiveRecommendedVersion doc) — null when it resolves to a no-op (== current
         // version), so display code can treat "nothing to recommend" and "no recommendation
@@ -3319,8 +3285,6 @@ public class RedKiteServerMain {
                 .append("\" data-coord=\"").append(escape(coordStr))
                 .append("\" data-pinned=\"").append(pinned)
                 .append("\" data-pinned-initial=\"").append(pinned)
-                .append("\" data-ignored=\"").append(ignored)
-                .append("\" data-ignored-initial=\"").append(ignored)
                 .append("\" data-comp-id=\"").append(comp.id());
         if (actionableConvergence) {
             html.append("\" data-conflict='").append(conflictJson).append("'>");
@@ -3420,10 +3384,8 @@ public class RedKiteServerMain {
         // A pinned component that's since become fully clean (e.g. already at the version it was
         // pinned to, with nothing left to recommend) would otherwise lose its version selector —
         // and with it, the only way to reach the Pin checkbox and un-pin it. Keep the actions row
-        // (checkbox only, no dropdown) for that case. Same reasoning for ignore-eligible cards
-        // without version metadata to build a selector from — the Leave-alone checkbox still needs
-        // somewhere to render.
-        if (showVersionSelector || (pinned && !actionableConvergence) || ignoreEligible) {
+        // (checkbox only, no dropdown) for that case.
+        if (showVersionSelector || (pinned && !actionableConvergence)) {
             html.append("<div class=\"rem-actions\">");
             if (showVersionSelector && comp.direct()) {
                 String selectorId = "view_" + comp.id();
@@ -3459,12 +3421,6 @@ public class RedKiteServerMain {
                         .append("<input type=\"checkbox\" class=\"pin-chk\" data-comp-id=\"").append(comp.id())
                         .append("\"").append(pinned ? " checked" : "")
                         .append(" onchange=\"onPinToggle(this)\"> Pin</label>");
-            }
-            if (ignoreEligible) {
-                html.append("<label class=\"pin-toggle\" title=\"No CVE or conflict forces this to move — leave it at its current version and stop recommending an upgrade\">")
-                        .append("<input type=\"checkbox\" class=\"ignore-chk\" data-comp-id=\"").append(comp.id())
-                        .append("\"").append(ignored ? " checked" : "")
-                        .append(" onchange=\"onIgnoreToggle(this)\"> Unmanaged</label>");
             }
             html.append("</div>");
         }

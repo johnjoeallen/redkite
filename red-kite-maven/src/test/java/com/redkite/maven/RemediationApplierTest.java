@@ -363,45 +363,27 @@ class RemediationApplierTest {
         assertEquals(1, counts.userPinned());
     }
 
-    @Test
-    void markUnmanagedAddsCommentOnlyNoDependencyOrVersion() {
-        String pom = "<project>\n  <dependencies/>\n</project>";
-        String result = applier.markUnmanaged(pom,
-                "com.google.guava", "guava", "Non-conflicting transitive — unmanaged by RedKite");
-        assertTrue(result.contains("redkite:unmanaged"), "Should carry the unmanaged marker");
-        assertFalse(result.contains("<dependency>"), "Should never add a <dependency> entry — nothing is being forced");
-        int markerStart = result.indexOf("<!-- redkite:unmanaged");
-        int markerEnd = result.indexOf("-->", markerStart);
-        assertFalse(result.substring(markerStart, markerEnd).contains("version=\""),
-                "The comment itself must not record a version");
-        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(result));
-    }
-
-    @Test
-    void markUnmanagedLeavesExistingPlainEntryUntouched() {
-        String result = applier.markUnmanaged(POM_WITH_DEP_MGMT,
-                "org.slf4j", "slf4j-api", "Non-conflicting transitive — unmanaged by RedKite");
-        assertEquals(POM_WITH_DEP_MGMT, result,
-                "The project's own dependencyManagement entry already documents its intent");
-    }
-
-    @Test
-    void removeUnmanagedMarkerStripsCommentOnly() {
-        String pom = "<project>\n  <dependencies/>\n</project>";
-        String marked = applier.markUnmanaged(pom, "com.google.guava", "guava", "Reason");
-        String removed = applier.removeUnmanagedMarker(marked, "com.google.guava", "guava");
-        assertFalse(removed.contains("redkite:unmanaged"));
-        assertTrue(applier.findUnmanagedCoordinates(removed).isEmpty());
-    }
+    // RedKite no longer writes "unmanaged" markers — leaving a no-CVE/no-conflict transitive
+    // alone is now purely the UI's default display state, never persisted to the POM. These tests
+    // cover the remaining backward-compat surface: a marker left behind by an older RedKite
+    // version (current bare-comment form, or the pre-rename "redkite:ignore" with a full
+    // hardcoded <dependency>) must still be recognized and converted into a real pin the moment a
+    // fix needs to force a version, and cleaned up by stripRedkiteRemediations.
 
     @Test
     void applyingAPinOverAnUnmanagedMarkerCreatesTheMissingDependency() {
-        // A component can be marked unmanaged, then later develop a CVE with a fix — nothing on
-        // the CVE page lets the user first "un-unmanage" it, so applying the fix must convert the
-        // bare comment straight into a real, enforced pin rather than just rewriting the comment
-        // text and leaving nothing to actually force the version.
-        String pom = "<project>\n  <dependencies/>\n</project>";
-        String marked = applier.markUnmanaged(pom, "org.example", "vuln-lib", "Reason");
+        // A component marked unmanaged by an older RedKite can later develop a CVE with a fix —
+        // applying it must convert the bare comment straight into a real, enforced pin rather than
+        // just rewriting the comment text and leaving nothing to actually force the version.
+        String marked = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <!-- redkite:unmanaged groupId="org.example" artifactId="vuln-lib" reason="x" — no CVE/conflict — unmanaged by RedKite; pick a version to override -->
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
         String upgraded = applier.applyDependencyManagementPin(marked,
                 "org.example", "vuln-lib", "9.9.9", "CVE fix by RedKite");
         assertTrue(upgraded.contains("<dependency>"), "Must create the dependency the rewritten comment claims to pin");
@@ -411,25 +393,10 @@ class RemediationApplierTest {
     }
 
     @Test
-    void markUnmanagedRemovesAPreExistingPinsDependencyEntry() {
-        // Switching a component directly from Pin to Unmanaged: markUnmanaged must find the old
-        // pin's comment+<dependency> and replace them with a bare marker, not leave the hardcoded
-        // <dependency> behind looking like a plain, project-owned entry.
-        String pom = "<project>\n  <dependencies/>\n</project>";
-        String pinned = applier.applyDependencyManagementPin(pom,
-                "com.google.guava", "guava", "32.1.2-jre", "User pinned via RedKite", RemediationApplier.PinKind.USER);
-        String unmanaged = applier.markUnmanaged(pinned,
-                "com.google.guava", "guava", "Non-conflicting transitive — unmanaged by RedKite");
-        assertFalse(unmanaged.contains("<dependency>"), "The old pin's <dependency> must be gone");
-        assertFalse(unmanaged.contains("redkite:user-pin"));
-        assertTrue(unmanaged.contains("redkite:unmanaged"));
-        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(unmanaged));
-    }
-
-    @Test
-    void findsAndCleansUpLegacyIgnoreMarkerAndItsDependencyEntry() {
+    void findsAndConvertsLegacyIgnoreMarkerAndItsDependencyEntry() {
         // Pre-rename RedKite versions wrote "redkite:ignore" above a full hardcoded <dependency>.
-        // Both the marker lookup and cleanup must still recognize it.
+        // Applying a pin over it must recognize the legacy tag too, updating the existing
+        // <dependency> in place rather than leaving the stale marker and duplicating the entry.
         String legacy = """
                 <project>
                   <dependencyManagement>
@@ -444,29 +411,27 @@ class RemediationApplierTest {
                   </dependencyManagement>
                 </project>
                 """;
-        assertEquals(java.util.Set.of("com.google.guava:guava"), applier.findUnmanagedCoordinates(legacy));
+        String upgraded = applier.applyDependencyManagementPin(legacy,
+                "com.google.guava", "guava", "33.0.0-jre", "CVE fix by RedKite");
+        assertFalse(upgraded.contains("redkite:ignore"));
+        assertTrue(upgraded.contains("<version>33.0.0-jre</version>"));
+        assertEquals(1, applier.countPins(upgraded).total());
 
-        String remarked = applier.markUnmanaged(legacy, "com.google.guava", "guava", "reason");
-        assertFalse(remarked.contains("<dependency>"), "Legacy hardcoded entry must be dropped");
-        assertFalse(remarked.contains("redkite:ignore"));
-        assertTrue(remarked.contains("redkite:unmanaged"));
-
-        String removed = applier.removeUnmanagedMarker(legacy, "com.google.guava", "guava");
-        assertFalse(removed.contains("redkite:ignore"));
-        assertFalse(removed.contains("<dependency>"), "Unchecking Unmanaged on a legacy marker must drop its dependency too");
+        String stripped = applier.stripRedkiteRemediations(legacy);
+        assertFalse(stripped.contains("redkite:ignore"));
+        assertFalse(stripped.contains("<dependency>"), "stripRedkiteRemediations must drop the legacy entry too");
     }
 
     @Test
-    void countPinsTracksUnmanagedSeparatelyFromPins() {
+    void countPinsDoesNotCountUnmanagedMarkerAsAPin() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withPin = applier.applyDependencyManagementPin(pom,
                 "com.google.guava", "guava", "32.1.2-jre", "Convergence fix");
-        String withBoth = applier.markUnmanaged(withPin,
-                "org.slf4j", "slf4j-api", "Non-conflicting transitive — unmanaged by RedKite");
+        String withBoth = withPin.replace("</dependencyManagement>",
+                "<!-- redkite:unmanaged groupId=\"org.slf4j\" artifactId=\"slf4j-api\" reason=\"x\" -->\n  </dependencyManagement>");
 
         RemediationApplier.PinCounts counts = applier.countPins(withBoth);
         assertEquals(1, counts.total(), "Unmanaged marker must not count as a pin");
-        assertEquals(1, counts.unmanaged());
     }
 
     @Test
@@ -474,7 +439,7 @@ class RemediationApplierTest {
         String withExclusion = applier.applyExclusion(POM_WITH_DEPENDENCIES,
                 "com.example", "service-b", "com.google.guava", "guava", "Fix");
         String withSummary = applier.applyPinSummaryComment(withExclusion,
-                new RemediationApplier.PinCounts(0, 0, 0), null);
+                new RemediationApplier.PinCounts(0, 0), null);
         assertEquals(0, applier.countPins(withSummary).total());
     }
 
@@ -482,7 +447,7 @@ class RemediationApplierTest {
     void pinSummaryCommentIsFirstChildAndReplacesOnReapply() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(3, 1, 0), new RemediationApplier.PinCounts(5, 2, 0));
+                new RemediationApplier.PinCounts(3, 1), new RemediationApplier.PinCounts(5, 2));
         assertTrue(withSummary.contains("redkite:pin-summary"));
         assertTrue(withSummary.contains("project: 5 redkite pin(s) (2 user pinned)"));
         assertTrue(withSummary.contains("this file: 3 redkite pin(s) (1 user pinned)"));
@@ -492,7 +457,7 @@ class RemediationApplierTest {
                 "Summary comment should be the first child of <project>");
 
         String updated = applier.applyPinSummaryComment(withSummary,
-                new RemediationApplier.PinCounts(4, 1, 0), new RemediationApplier.PinCounts(6, 2, 0));
+                new RemediationApplier.PinCounts(4, 1), new RemediationApplier.PinCounts(6, 2));
         assertEquals(1, countOccurrences(updated, "redkite:pin-summary"), "Should replace, not duplicate");
         assertTrue(updated.contains("project: 6 redkite pin(s) (2 user pinned)"));
         assertTrue(updated.contains("this file: 4 redkite pin(s) (1 user pinned)"));
@@ -502,7 +467,7 @@ class RemediationApplierTest {
     void pinSummaryOmitsProjectTotalsWhenNull() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(2, 0, 0), null);
+                new RemediationApplier.PinCounts(2, 0), null);
         assertFalse(withSummary.contains("project:"), "Single-pom projects shouldn't show a redundant project total");
         assertTrue(withSummary.contains("2 redkite pin(s) (0 user pinned)"));
     }
@@ -511,7 +476,7 @@ class RemediationApplierTest {
     void stripRedkiteRemediationsRemovesPinSummaryComment() {
         String pom = "<project>\n  <dependencies/>\n</project>";
         String withSummary = applier.applyPinSummaryComment(pom,
-                new RemediationApplier.PinCounts(1, 0, 0), null);
+                new RemediationApplier.PinCounts(1, 0), null);
         String stripped = applier.stripRedkiteRemediations(withSummary);
         assertFalse(stripped.contains("redkite:pin-summary"));
     }
