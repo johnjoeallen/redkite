@@ -56,4 +56,23 @@ class VersionControllerResolverTest {
         ScanComponent c = component(true, VersionSource.UNKNOWN, null);
         assertEquals(new VersionController.Unmanaged(), VersionControllerResolver.resolve(c));
     }
+
+    @Test
+    void parentManagedWithLiteralEntryResolvesToParentDependencyManagementWithNoPropertyName() {
+        ScanComponent c = component(false, VersionSource.PARENT_MANAGED,
+                "org.example:parent-pom:1.0.0#literal");
+        VersionController controller = VersionControllerResolver.resolve(c);
+        assertEquals(new VersionController.ParentDependencyManagement("org.example:parent-pom:1.0.0", null), controller);
+    }
+
+    @Test
+    void platformManagedWithPropertyEntryResolvesToImportedBomCarryingThePropertyName() {
+        // The property name matters here: it's what lets ControlSetAnalyzer recognize that a
+        // LocalProperty override and a BOM's own property-backed managed entry are the same
+        // editable declaration, even though one is local and the other lives in a fetched BOM.
+        ScanComponent c = component(false, VersionSource.PLATFORM_MANAGED,
+                "org.example:some-bom:2.0.0#some.version");
+        VersionController controller = VersionControllerResolver.resolve(c);
+        assertEquals(new VersionController.ImportedBom("org.example:some-bom:2.0.0", "some.version"), controller);
+    }
 }

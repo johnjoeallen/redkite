@@ -9,12 +9,17 @@ import com.redkite.core.domain.VersionSource;
  * version, kept separate from how the dependency entered the graph
  * ({@link DependencyOriginClassifier}).
  *
- * <p>This only maps signals the scanner already records today
- * ({@link ScanComponent#versionSource()}, {@link ScanComponent#owningVersionControlPoint()}); it
- * does not itself inspect parent POMs or imported BOMs. Until a later stage adds that, a
- * dependency truly controlled by a parent's or an imported BOM's {@code dependencyManagement}
- * resolves here to {@link VersionController.DependencyMediation} (transitive) or
- * {@link VersionController.Unmanaged} (direct) — an honest "not yet known", not a guess.
+ * <p>This only maps signals the scanner records on {@link ScanComponent}
+ * ({@link ScanComponent#versionSource()}, {@link ScanComponent#owningVersionControlPoint()}), not
+ * parent/BOM content itself — the actual fetching and recursive resolution happens in
+ * red-kite-maven's provenance resolver, which encodes its result back onto the component using
+ * {@link VersionSource#PARENT_MANAGED}/{@link VersionSource#PLATFORM_MANAGED} plus an
+ * {@code owningVersionControlPoint} of the form {@code "<coordinate>#<propertyName-or-literal>"}
+ * — the same {@code "<declaringFile>#<name>"} shape already used for local properties, just with
+ * a parent/BOM coordinate standing in for a local file. A dependency provenance resolution
+ * couldn't reach (fetch failed, or truly unmanaged anywhere) still resolves honestly to
+ * {@link VersionController.DependencyMediation} (transitive) or {@link VersionController.Unmanaged}
+ * (direct) rather than a guess.
  */
 public final class VersionControllerResolver {
     private VersionControllerResolver() {
@@ -37,9 +42,10 @@ public final class VersionControllerResolver {
             return new VersionController.LocalDependencyManagement(declaringFile(owning));
         }
         if (source == VersionSource.PARENT_MANAGED) {
-            // Reserved: the scanner never assigns this today (no parent-POM provenance yet).
-            // Handled defensively so this resolver keeps working the day it does.
-            return new VersionController.ParentDependencyManagement(declaringFile(owning));
+            return new VersionController.ParentDependencyManagement(declaringFile(owning), provenancePropertyName(owning));
+        }
+        if (source == VersionSource.PLATFORM_MANAGED) {
+            return new VersionController.ImportedBom(declaringFile(owning), provenancePropertyName(owning));
         }
         return component.direct() ? new VersionController.Unmanaged() : new VersionController.DependencyMediation();
     }
@@ -48,6 +54,15 @@ public final class VersionControllerResolver {
         if (owningVersionControlPoint == null) return null;
         int hash = owningVersionControlPoint.indexOf('#');
         return hash >= 0 ? owningVersionControlPoint.substring(hash + 1) : null;
+    }
+
+    /** Same "part after #" extraction as {@link #propertyName}, but for
+     *  PARENT_MANAGED/PLATFORM_MANAGED components — where red-kite-maven's provenance resolver
+     *  writes the literal sentinel {@code "literal"} (not a real property name) when the managed
+     *  entry it found wasn't a property reference. */
+    private static String provenancePropertyName(String owningVersionControlPoint) {
+        String name = propertyName(owningVersionControlPoint);
+        return "literal".equals(name) ? null : name;
     }
 
     private static String declaringFile(String owningVersionControlPoint) {

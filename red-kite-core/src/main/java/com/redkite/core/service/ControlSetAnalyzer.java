@@ -16,8 +16,12 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Groups dependencies by the single local declaration that controls their version — a Maven
- * property or a local {@code dependencyManagement} entry — into {@link ControlSet}s.
+ * Groups dependencies by the single local, editable declaration that controls their version into
+ * {@link ControlSet}s: a Maven property (whether a dependency references it directly, or a
+ * parent/BOM's own managed entry happens to be written as that same property — either way,
+ * editing one property line moves both), a local {@code dependencyManagement} entry, or a
+ * literal-versioned parent/BOM entry (which, having no property, cannot be shared with anything
+ * else and never forms a group of its own).
  *
  * <p>A control set is only ever proof that changing its controller moves every member together;
  * it is never treated as proof the members are genuinely related upstream (see
@@ -38,11 +42,7 @@ public final class ControlSetAnalyzer {
         Map<String, List<ScanComponent>> byController = new LinkedHashMap<>();
         for (ScanComponent component : components) {
             VersionController controller = VersionControllerResolver.resolve(component);
-            if (!(controller instanceof VersionController.LocalProperty)
-                    && !(controller instanceof VersionController.LocalDependencyManagement)) {
-                continue;
-            }
-            String key = component.owningVersionControlPoint();
+            String key = groupingKey(controller, component.owningVersionControlPoint());
             if (key == null) continue;
             byController.computeIfAbsent(key, k -> new ArrayList<>()).add(component);
         }
@@ -60,14 +60,15 @@ public final class ControlSetAnalyzer {
             // dependency doesn't create a coordinated-change relationship worth surfacing.
             if (coordinates.size() < 2) continue;
 
-            controlSets.add(new ControlSet(entry.getKey(), List.copyOf(coordinates)));
+            String label = displayLabel(entry.getKey());
+            controlSets.add(new ControlSet(label, List.copyOf(coordinates)));
 
             Set<String> familyNames = new LinkedHashSet<>();
             for (ComponentCoordinate coordinate : coordinates) {
                 ReleaseFamilyRegistry.familyOf(coordinate).map(ReleaseFamily::name).ifPresent(familyNames::add);
             }
             if (familyNames.size() >= 2) {
-                String description = "Property or managed declaration '" + entry.getKey()
+                String description = "Property or managed declaration '" + label
                         + "' controls artifacts from multiple upstream release families ("
                         + String.join(", ", familyNames) + "). Changing it may produce an "
                         + "unavailable or incompatible version combination.";
@@ -77,5 +78,37 @@ public final class ControlSetAnalyzer {
             }
         }
         return new Result(controlSets, warnings);
+    }
+
+    /** Human-readable form of an internal grouping key, for {@link ControlSet#controllerDescription()}
+     *  and warning text — a bare property name rather than the internal {@code "property:"} prefix. */
+    private static String displayLabel(String key) {
+        if (key.startsWith("property:")) return "property " + key.substring("property:".length());
+        if (key.startsWith("localDepMgmt:")) return key.substring("localDepMgmt:".length());
+        return key;
+    }
+
+    /** The grouping key for one component's controller, or {@code null} if it can't share a
+     *  control set with anything. A property name is used as the key on its own — deliberately
+     *  ignoring which file/coordinate declares it — since a {@link VersionController.LocalProperty}
+     *  override and a parent/BOM's own property-backed managed entry of the same name are, once
+     *  Maven resolves the property, the exact same editable value; grouping only by the raw
+     *  {@code owningVersionControlPoint} string would miss that they're the same declaration. A
+     *  literal-versioned {@link VersionController.ParentDependencyManagement}/{@link VersionController.ImportedBom}
+     *  entry has no property to share, so it never groups with anything else. */
+    private static String groupingKey(VersionController controller, String owningVersionControlPoint) {
+        if (controller instanceof VersionController.LocalProperty p) {
+            return "property:" + p.propertyName();
+        }
+        if (controller instanceof VersionController.LocalDependencyManagement) {
+            return "localDepMgmt:" + owningVersionControlPoint;
+        }
+        if (controller instanceof VersionController.ParentDependencyManagement p && p.propertyName() != null) {
+            return "property:" + p.propertyName();
+        }
+        if (controller instanceof VersionController.ImportedBom b && b.propertyName() != null) {
+            return "property:" + b.propertyName();
+        }
+        return null;
     }
 }

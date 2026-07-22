@@ -213,6 +213,9 @@ public class MavenProjectScanner {
                 return false;
             });
 
+            progress.accept("Resolving parent/BOM version provenance…");
+            resolveProvenanceForUnknownComponents(root, models, componentsByKey);
+
             if (componentsByKey.isEmpty()) {
                 LOGGER.warning(() -> "No dependencies discovered in " + root + "; creating placeholder component");
                 componentsByKey.put("pom.xml|unknown:unknown|unknown|false", new ScanComponent(
@@ -891,6 +894,45 @@ public class MavenProjectScanner {
                 versionControlPoint(dep, model),
                 relativePom);
         replaceComponent(componentsByKey, treeMatch, corrected);
+    }
+
+    /** Best-effort enrichment: for every component still {@code VersionSource.UNKNOWN} (nothing
+     *  local controls it — the tree resolved it purely by mediation, as far as anything read so
+     *  far can tell), fetches its module's parent chain and imported BOMs to see whether one of
+     *  them actually manages that coordinate. Only applies the correction when the managed
+     *  version found this way matches what dependency:tree actually resolved — a mismatch means
+     *  this simplified model diverged from Maven's real resolution somewhere, and it would be
+     *  wrong to claim a controller for a version that isn't the one truly in effect. Fetch
+     *  failures (offline, private repos) just leave affected components as UNKNOWN, same as
+     *  before this method existed. */
+    private void resolveProvenanceForUnknownComponents(Path root, Map<String, PomModel> models, Map<String, ScanComponent> componentsByKey) {
+        PomFetcher fetcher = new PomFetcher(root);
+        ManagedVersionResolver resolver = new ManagedVersionResolver(fetcher);
+        for (PomModel model : models.values()) {
+            String relativePom = sourceFile(root, model.path());
+            Map<String, ManagedVersionResolver.ManagedVersion> managed = null; // resolved lazily, at most once per module
+            for (Map.Entry<String, ScanComponent> entry : componentsByKey.entrySet()) {
+                ScanComponent c = entry.getValue();
+                if (c.versionSource() != VersionSource.UNKNOWN || !relativePom.equals(c.sourceFilePath())) continue;
+                if (managed == null) {
+                    managed = resolver.resolve(model);
+                }
+                ManagedVersionResolver.ManagedVersion mv = managed.get(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
+                if (mv == null || mv.controllerCoordinate() == null) continue;
+                if (!mv.version().equals(c.version())) {
+                    String g = c.coordinate().groupId(), a = c.coordinate().artifactId();
+                    LOGGER.fine(() -> "Provenance model disagrees with dependency:tree for " + g + ":" + a
+                            + " (model=" + mv.version() + ", tree=" + c.version() + ") — leaving as mediation");
+                    continue;
+                }
+                VersionSource newSource = mv.bomImport() ? VersionSource.PLATFORM_MANAGED : VersionSource.PARENT_MANAGED;
+                String owning = mv.controllerCoordinate() + "#" + (mv.propertyName() != null ? mv.propertyName() : "literal");
+                entry.setValue(new ScanComponent(
+                        c.id(), c.coordinate(), c.version(), c.scope(), c.direct(),
+                        newSource, c.sourceFilePath(), c.declarationPath(), c.properties(),
+                        c.snapshot(), owning, c.modulePath()));
+            }
+        }
     }
 
     private String versionControlPoint(PomModel.PomDependency dep, PomModel model) {

@@ -5,13 +5,14 @@ package com.redkite.core.domain;
  * dependency entered the graph) and from the editable declaration a fix would change.
  *
  * <p>Every variant in this sealed interface is part of the target model described for RedKite's
- * update analysis. {@link com.redkite.core.service.VersionControllerResolver} — the only producer
- * today — can only populate a subset from what the scanner currently observes: it never reads a
- * parent POM's or an imported BOM's own {@code dependencyManagement}, so {@link ImportedBom},
- * {@link ParentDependencyManagement}, and {@link ParentProperty} are not yet resolvable and are
- * reserved for the provenance stage described in the design notes. Until then, a dependency
- * actually controlled by one of those falls back to {@link DependencyMediation} or
- * {@link Unmanaged} — an honest "we don't yet know", not a guess dressed up as a real answer.
+ * update analysis. {@link com.redkite.core.service.VersionControllerResolver} populates
+ * {@link ImportedBom} and {@link ParentDependencyManagement} using red-kite-maven's provenance
+ * resolver (fetching and recursively walking the parent chain and imported BOMs); a dependency
+ * that resolver couldn't reach (fetch failure, or genuinely nothing manages it) falls back to
+ * {@link DependencyMediation} or {@link Unmanaged} — an honest "we don't know", not a guess.
+ * {@link ParentProperty} remains reserved: distinguishing "a property defined by a parent" from
+ * "a property defined by the project" needs tracking where each property is textually declared,
+ * which the current resolver doesn't do (see its class-level javadoc's noted simplification).
  */
 public sealed interface VersionController {
 
@@ -24,11 +25,24 @@ public sealed interface VersionController {
     /** An entry in this project's own (non-imported) {@code <dependencyManagement>}. */
     record LocalDependencyManagement(String declaringFile) implements VersionController {}
 
-    /** A {@code <dependencyManagement>} entry imported via {@code <type>pom</type><scope>import</scope>}. */
-    record ImportedBom(String bomCoordinate) implements VersionController {}
+    /** A {@code <dependencyManagement>} entry imported via {@code <type>pom</type><scope>import</scope>}.
+     *  {@code propertyName} is non-null when the BOM's own managed entry is itself a property
+     *  reference — e.g. Spring Boot's BOM managing {@code logback-classic} via its own
+     *  {@code ${logback.version}} — since that same property name is exactly what a project-level
+     *  override (a {@link LocalProperty} elsewhere) also controls; null for a literal entry. */
+    record ImportedBom(String bomCoordinate, String propertyName) implements VersionController {
+        public ImportedBom(String bomCoordinate) {
+            this(bomCoordinate, null);
+        }
+    }
 
-    /** A parent POM's own {@code <dependencyManagement>} entry. */
-    record ParentDependencyManagement(String parentCoordinate) implements VersionController {}
+    /** A parent POM's own {@code <dependencyManagement>} entry. {@code propertyName} follows the
+     *  same rule as {@link ImportedBom#propertyName()}. */
+    record ParentDependencyManagement(String parentCoordinate, String propertyName) implements VersionController {
+        public ParentDependencyManagement(String parentCoordinate) {
+            this(parentCoordinate, null);
+        }
+    }
 
     /** A property declared by a parent POM (rather than the project itself). */
     record ParentProperty(String propertyName, String parentCoordinate) implements VersionController {}
