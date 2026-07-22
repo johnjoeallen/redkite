@@ -11,7 +11,9 @@ import com.redkite.maven.RemediationApplier;
 import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
+import com.redkite.core.service.CandidateUpdateResolver;
 import com.redkite.core.service.RemediationClassifier;
+import com.redkite.core.service.UpdatePlanBuilder;
 
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -265,6 +267,8 @@ public class RedKiteServerMain {
         server.createContext("/api/scans/remediation/apply", exchange -> safeHandle(exchange, this::handleApiRemediationApply));
         server.createContext("/api/scans/remediation/apply-batch", exchange -> safeHandle(exchange, this::handleApiRemediationApplyBatch));
         server.createContext("/api/scans/remediation/apply-status", exchange -> safeHandle(exchange, this::handleApiRemediationApplyStatus));
+        server.createContext("/api/scans/remediation/resolve", exchange -> safeHandle(exchange, this::handleApiRemediationResolve));
+        server.createContext("/api/scans/remediation/plan", exchange -> safeHandle(exchange, this::handleApiRemediationPlan));
         server.createContext("/config", exchange -> safeHandle(exchange, this::handleConfig));
         server.createContext("/api/config", exchange -> safeHandle(exchange, this::handleApiConfig));
     }
@@ -1348,6 +1352,201 @@ public class RedKiteServerMain {
             LOGGER.warning(() -> "Failed to start apply job: " + e.getMessage());
             sendText(exchange, 500, "Failed to start apply: " + e.getMessage());
         }
+    }
+
+    /**
+     * Resolves a batch of user selections ("change this coordinate to this version") into
+     * {@link CandidateUpdate}s — collapsing selections that share a control set into one proposed
+     * edit, per {@link CandidateUpdateResolver}. Read-only: computes candidates from the already-
+     * loaded scan data, touches no POM file. Distinct from {@code apply-batch}, which assumes the
+     * edits are already fully decided.
+     */
+    private void handleApiRemediationResolve(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) { sendText(exchange, 405, "Method not allowed"); return; }
+        String body = readBody(exchange);
+        String scanId = parseJsonField(body, "scanId");
+        if (scanId == null) { sendText(exchange, 400, "Missing scanId"); return; }
+        List<Map<String, String>> selections = parseJsonObjectArray(body, "selections");
+        if (selections.isEmpty()) { sendText(exchange, 400, "Missing selections"); return; }
+
+        try {
+            ScanEntry scan = store.getScan(scanId);
+            List<ScanComponent> components = scan.report().components();
+            Map<Long, ScanComponent> byId = new LinkedHashMap<>();
+            for (ScanComponent c : components) byId.put(c.id(), c);
+
+            Map<ComponentCoordinate, String> selectedTargets = new LinkedHashMap<>();
+            for (Map<String, String> selection : selections) {
+                String idStr = selection.get("componentId");
+                String targetVersion = selection.get("targetVersion");
+                if (idStr == null || targetVersion == null) continue;
+                try {
+                    ScanComponent c = byId.get(Long.parseLong(idStr));
+                    if (c != null) selectedTargets.put(c.coordinate(), targetVersion);
+                } catch (NumberFormatException ignored) {}
+            }
+            if (selectedTargets.isEmpty()) { sendText(exchange, 400, "No valid selections"); return; }
+
+            Map<ComponentCoordinate, List<DependencyFinding>> findingsByCoordinate =
+                    findingsByCoordinate(scan.report(), selectedTargets.keySet());
+            Set<ComponentCoordinate> pinnedCoordinates = userPinnedCoordinates(scanId);
+
+            List<CandidateUpdate> candidates = CandidateUpdateResolver.resolve(
+                    components, selectedTargets, findingsByCoordinate, pinnedCoordinates);
+
+            StringBuilder json = new StringBuilder("[");
+            for (int i = 0; i < candidates.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(candidateUpdateJson(candidates.get(i)));
+            }
+            json.append("]");
+            sendJson(exchange, 200, json.toString());
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Remediation resolve failed: " + e.getMessage());
+            sendText(exchange, 500, "Resolve failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Builds an {@link UpdatePlan} for one component — alternative strategies (the natural fix, a
+     * local-override-only alternative, pin/ignore) for a caller to compare, per
+     * {@link UpdatePlanBuilder}. Read-only, same as {@code resolve}.
+     */
+    private void handleApiRemediationPlan(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) { sendText(exchange, 405, "Method not allowed"); return; }
+        // parseJsonField only extracts quoted-string values; componentId is naturally a JSON
+        // number, so this uses parseJsonObject (handles both quoted and bare-numeric values) like
+        // handleApiRemediationApply already does, rather than silently misparsing a number here.
+        Map<String, String> params = parseJsonObject(readBody(exchange));
+        String scanId = params.get("scanId");
+        String componentIdStr = params.get("componentId");
+        String targetVersion = params.get("targetVersion");
+        if (scanId == null || componentIdStr == null || targetVersion == null) {
+            sendText(exchange, 400, "Missing scanId/componentId/targetVersion");
+            return;
+        }
+
+        try {
+            long componentId = Long.parseLong(componentIdStr);
+            ScanEntry scan = store.getScan(scanId);
+            List<ScanComponent> components = scan.report().components();
+            ScanComponent target = components.stream().filter(c -> c.id() == componentId).findFirst().orElse(null);
+            if (target == null) { sendText(exchange, 404, "Component not found"); return; }
+
+            List<DependencyFinding> findings = findingsByCoordinate(scan.report(), Set.of(target.coordinate()))
+                    .getOrDefault(target.coordinate(), List.of());
+            Set<ComponentCoordinate> pinnedCoordinates = userPinnedCoordinates(scanId);
+
+            UpdatePlan plan = UpdatePlanBuilder.buildForCoordinate(
+                    components, target.coordinate(), targetVersion, findings, pinnedCoordinates);
+
+            StringBuilder json = new StringBuilder("{\"findingsAddressed\":[");
+            List<DependencyFinding> planFindings = plan.findingsAddressed();
+            for (int i = 0; i < planFindings.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(findingJson(planFindings.get(i)));
+            }
+            json.append("],\"candidates\":[");
+            List<CandidateUpdate> candidates = plan.candidates();
+            for (int i = 0; i < candidates.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(candidateUpdateJson(candidates.get(i)));
+            }
+            json.append("]}");
+            sendJson(exchange, 200, json.toString());
+        } catch (NumberFormatException e) {
+            sendText(exchange, 400, "Invalid componentId");
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Remediation plan failed: " + e.getMessage());
+            sendText(exchange, 500, "Plan failed: " + e.getMessage());
+        }
+    }
+
+    /** Vulnerability findings for the given coordinates, translated into the newer
+     *  {@link DependencyFinding} shape — the real cross-reference against existing CVE data that
+     *  {@link CandidateUpdate}'s class-level javadoc notes isn't wired up for CVEs-fixed/introduced
+     *  yet; this is the narrower "what finding(s) justify this selection" case, not that broader one. */
+    private static Map<ComponentCoordinate, List<DependencyFinding>> findingsByCoordinate(
+            ScanReport report, Set<ComponentCoordinate> coordinates) {
+        Map<ComponentCoordinate, List<DependencyFinding>> result = new LinkedHashMap<>();
+        for (VulnerabilityFinding vf : report.vulnerabilityFindings()) {
+            if (vf.coordinate() == null || !coordinates.contains(vf.coordinate())) continue;
+            long componentId = -1L;
+            for (ScanComponent c : report.components()) {
+                if (c.coordinate().equals(vf.coordinate()) && c.version().equals(vf.affectedVersion())) {
+                    componentId = c.id();
+                    break;
+                }
+            }
+            String description = vf.cves() != null && !vf.cves().isEmpty() ? String.join(", ", vf.cves()) : vf.advisoryId();
+            result.computeIfAbsent(vf.coordinate(), k -> new ArrayList<>())
+                    .add(new DependencyFinding(componentId, DependencyFindingReason.CVE, description, AdvisoryClassifier.severity(vf)));
+        }
+        return result;
+    }
+
+    /** User-pinned coordinates across every source POM in this scan, as {@link ComponentCoordinate}s
+     *  — the same data {@code pinnedCoords} elsewhere derives as raw "g:a" strings, but
+     *  {@link CandidateUpdateResolver}/{@link UpdatePlanBuilder} need the typed form. */
+    private Set<ComponentCoordinate> userPinnedCoordinates(String scanId) {
+        Set<ComponentCoordinate> result = new LinkedHashSet<>();
+        RemediationApplier applier = new RemediationApplier();
+        for (String pomContent : store.loadSourcePoms(scanId).values()) {
+            try {
+                for (String coordStr : applier.findUserPinnedCoordinates(pomContent)) {
+                    int idx = coordStr.indexOf(':');
+                    if (idx > 0) result.add(new ComponentCoordinate(coordStr.substring(0, idx), coordStr.substring(idx + 1)));
+                }
+            } catch (Exception ignored) {}
+        }
+        return result;
+    }
+
+    private static String candidateUpdateJson(CandidateUpdate c) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append("\"action\":").append(jsonStr(c.action().name())).append(",");
+        sb.append("\"editableDeclaration\":").append(jsonStr(c.editableDeclaration())).append(",");
+        sb.append("\"oldValue\":").append(jsonStr(c.oldValue())).append(",");
+        sb.append("\"proposedValue\":").append(jsonStr(c.proposedValue())).append(",");
+        sb.append("\"reason\":").append(jsonStr(c.reason())).append(",");
+        sb.append("\"findingsAddressed\":[");
+        for (int i = 0; i < c.findingsAddressed().size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(findingJson(c.findingsAddressed().get(i)));
+        }
+        sb.append("],");
+        sb.append("\"resultingChanges\":").append(changeSetJson(c.resultingChanges())).append(",");
+        sb.append("\"confidence\":").append(jsonStr(c.confidence().name())).append(",");
+        sb.append("\"autoApplySafe\":").append(c.autoApplySafe()).append(",");
+        sb.append("\"conflictsWithUserPin\":").append(c.conflictsWithUserPin()).append(",");
+        sb.append("\"introducesDowngrade\":").append(c.introducesDowngrade()).append(",");
+        sb.append("\"overridesPlatform\":").append(c.overridesPlatform());
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private static String changeSetJson(ProposedChangeSet changeSet) {
+        StringBuilder sb = new StringBuilder("{\"movements\":[");
+        List<ProposedChangeSet.DependencyMovement> movements = changeSet.movements();
+        for (int i = 0; i < movements.size(); i++) {
+            if (i > 0) sb.append(",");
+            ProposedChangeSet.DependencyMovement m = movements.get(i);
+            sb.append("{\"groupId\":").append(jsonStr(m.coordinate().groupId()))
+                    .append(",\"artifactId\":").append(jsonStr(m.coordinate().artifactId()))
+                    .append(",\"fromVersion\":").append(jsonStr(m.fromVersion()))
+                    .append(",\"toVersion\":").append(jsonStr(m.toVersion()))
+                    .append("}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private static String findingJson(DependencyFinding f) {
+        return "{\"componentId\":" + f.componentId()
+                + ",\"reason\":" + jsonStr(f.reason().name())
+                + ",\"description\":" + jsonStr(f.description())
+                + ",\"severity\":" + (f.severity() != null ? jsonStr(f.severity().name()) : "null")
+                + "}";
     }
 
     private void handleApiRemediationApplyStatus(HttpExchange exchange) throws IOException {
