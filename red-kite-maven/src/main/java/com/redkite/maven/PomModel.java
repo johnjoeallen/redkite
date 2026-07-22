@@ -34,6 +34,15 @@ public record PomModel(
             DependencyScope scope,
             boolean optional,
             VersionSource versionSource,
-            String propertyName) {
+            String propertyName,
+            /** {@code <type>pom</type><scope>import</scope>} — a BOM import, not a version
+             *  override for {@code groupId:artifactId} itself. Only ever true for entries read
+             *  from {@code <dependencyManagement>}; always false elsewhere. */
+            boolean bomImport) {
+
+        public PomDependency(String groupId, String artifactId, String version, DependencyScope scope,
+                              boolean optional, VersionSource versionSource, String propertyName) {
+            this(groupId, artifactId, version, scope, optional, versionSource, propertyName, false);
+        }
     }
 }

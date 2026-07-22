@@ -43,4 +43,18 @@ class DependencyOriginClassifierTest {
         ScanComponent c = component(true, DependencyScope.COMPILE, "/project/parent");
         assertEquals(DependencyOrigin.PARENT, DependencyOriginClassifier.classify(c));
     }
+
+    @Test
+    void bomImportDependencyManagementEntryIsOriginImportedBom() {
+        ScanComponent c = component(true, DependencyScope.COMPILE,
+                "/project/dependencyManagement/dependencies/dependency[import:example:library]");
+        assertEquals(DependencyOrigin.IMPORTED_BOM, DependencyOriginClassifier.classify(c));
+    }
+
+    @Test
+    void plainDependencyManagementEntryIsNotOriginImportedBom() {
+        ScanComponent c = component(true, DependencyScope.COMPILE,
+                "/project/dependencyManagement/dependencies/dependency[example:library]");
+        assertEquals(DependencyOrigin.DIRECT, DependencyOriginClassifier.classify(c));
+    }
 }

@@ -677,6 +677,8 @@ public class MavenProjectScanner {
         for (int i = 0; i < items.getLength(); i++) {
             Element dep = (Element) items.item(i);
             String version = optionalText(dep, "version");
+            String rawScope = optionalText(dep, "scope");
+            boolean bomImport = "pom".equalsIgnoreCase(optionalText(dep, "type")) && "import".equalsIgnoreCase(rawScope);
             String propertyName = null;
             VersionSource source = VersionSource.BOM_MANAGED;
             if (version != null && version.startsWith("${") && version.endsWith("}")) {
@@ -688,10 +690,11 @@ public class MavenProjectScanner {
                     optionalText(dep, "groupId"),
                     optionalText(dep, "artifactId"),
                     version,
-                    parseScope(optionalText(dep, "scope")),
+                    parseScope(rawScope),
                     false,
                     source,
-                    propertyName));
+                    propertyName,
+                    bomImport));
         }
         return result;
     }
@@ -816,6 +819,18 @@ public class MavenProjectScanner {
         return (groupId == null ? "" : groupId) + ":" + (artifactId == null ? "" : artifactId);
     }
 
+    /** A {@code <dependencyManagement>} entry's declarationPath — distinguishing a BOM import
+     *  ({@code <type>pom</type><scope>import</scope>}) with a literal {@code "import:"} prefix so
+     *  {@code DependencyOriginClassifier} (red-kite-core) can tell "this component IS an imported
+     *  BOM" apart from "this component's version is pinned by local dependencyManagement", without
+     *  needing a new field on the persisted {@link ScanComponent} record. */
+    private String managedDeclarationPath(PomModel.PomDependency dep) {
+        String coord = dep.groupId() + ":" + dep.artifactId();
+        return dep.bomImport()
+                ? "/project/dependencyManagement/dependencies/dependency[import:" + coord + "]"
+                : "/project/dependencyManagement/dependencies/dependency[" + coord + "]";
+    }
+
     /** Adds {@code dep} (an entry from this module's own {@code dependencyManagement}) as its own
      *  component when nothing already represents its coordinate — an override currently unused by
      *  anything in the resolved graph, but still worth surfacing rather than hiding silently. */
@@ -832,7 +847,7 @@ public class MavenProjectScanner {
                 true,
                 dep.versionSource(),
                 relativePom,
-                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
+                managedDeclarationPath(dep),
                 model.properties(),
                 snapshot,
                 versionControlPoint(dep, model),
@@ -870,7 +885,7 @@ public class MavenProjectScanner {
                 true,
                 dep.versionSource(),
                 relativePom,
-                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
+                managedDeclarationPath(dep),
                 model.properties(),
                 treeMatch.snapshot(),
                 versionControlPoint(dep, model),
