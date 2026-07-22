@@ -128,27 +128,30 @@ public class MavenProjectScanner {
                     LOGGER.info(() -> "Skipping dependency:tree for aggregator POM " + relativePom + " (packaging=" + model.packaging() + ", modules=" + model.modules().size() + ")");
                     for (PomModel.PomDependency dep : model.dependencyManagement()) {
                         if (isSelfDependency(model, dep)) continue;
-                        String key = directKey(relativePom, dep.groupId(), dep.artifactId());
-                        if (componentsByKey.containsKey(key)) continue;
-                        boolean snapshot = dep.version() != null && dep.version().contains("SNAPSHOT");
-                        ScanComponent component = new ScanComponent(
-                                nextId.getAndIncrement(),
-                                new ComponentCoordinate(dep.groupId(), dep.artifactId()),
-                                dep.version() == null ? "unknown" : dep.version(),
-                                dep.scope(),
-                                true,
-                                dep.versionSource(),
-                                relativePom,
-                                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
-                                model.properties(),
-                                snapshot,
-                                versionControlPoint(dep, model),
-                                relativePom);
-                        componentsByKey.put(key, component);
+                        addUnmatchedManagedDependencyComponent(dep, model, relativePom, componentsByKey, nextId);
                     }
                 } else {
                     progress.accept("Running dependency:tree for " + relativePom + "…");
                     treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId, projectModuleKeys));
+                    // A non-aggregator module's own dependencyManagement entries were previously
+                    // invisible as components entirely — including RedKite's own prior CVE-fix
+                    // pins — surfacing only (if at all) as a plain dependency-tree node with no
+                    // way to tell "locally managed" apart from "mediation picked this". Correct
+                    // any such node now that the tree has run, and add entries the tree didn't
+                    // discover at all (an override nothing currently pulls in) the same way the
+                    // aggregator branch above already does.
+                    for (PomModel.PomDependency dep : model.dependencyManagement()) {
+                        if (isSelfDependency(model, dep)) continue;
+                        if (componentsByKey.containsKey(directKey(relativePom, dep.groupId(), dep.artifactId()))) {
+                            continue; // a direct declaration already represents this coordinate
+                        }
+                        ScanComponent treeMatch = findTransitiveComponent(componentsByKey, relativePom, dep.groupId(), dep.artifactId());
+                        if (treeMatch != null) {
+                            correctManagedComponentSource(componentsByKey, treeMatch, dep, model, relativePom);
+                        } else {
+                            addUnmatchedManagedDependencyComponent(dep, model, relativePom, componentsByKey, nextId);
+                        }
+                    }
                 }
             }
 
@@ -811,6 +814,68 @@ public class MavenProjectScanner {
 
     private String key(String groupId, String artifactId) {
         return (groupId == null ? "" : groupId) + ":" + (artifactId == null ? "" : artifactId);
+    }
+
+    /** Adds {@code dep} (an entry from this module's own {@code dependencyManagement}) as its own
+     *  component when nothing already represents its coordinate — an override currently unused by
+     *  anything in the resolved graph, but still worth surfacing rather than hiding silently. */
+    private void addUnmatchedManagedDependencyComponent(PomModel.PomDependency dep, PomModel model, String relativePom,
+            Map<String, ScanComponent> componentsByKey, AtomicLong nextId) {
+        String key = directKey(relativePom, dep.groupId(), dep.artifactId());
+        if (componentsByKey.containsKey(key)) return;
+        boolean snapshot = dep.version() != null && dep.version().contains("SNAPSHOT");
+        componentsByKey.put(key, new ScanComponent(
+                nextId.getAndIncrement(),
+                new ComponentCoordinate(dep.groupId(), dep.artifactId()),
+                dep.version() == null ? "unknown" : dep.version(),
+                dep.scope(),
+                true,
+                dep.versionSource(),
+                relativePom,
+                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
+                model.properties(),
+                snapshot,
+                versionControlPoint(dep, model),
+                relativePom));
+    }
+
+    /** Finds a non-direct component discovered by {@code dependency:tree} for {@code groupId:artifactId}
+     *  within {@code sourceFile}'s own module — scoped to one module since a dependencyManagement
+     *  entry only controls resolution for the POM that declares it (or its descendants), never a
+     *  sibling module's already-computed tree. */
+    private ScanComponent findTransitiveComponent(Map<String, ScanComponent> componentsByKey, String sourceFile,
+            String groupId, String artifactId) {
+        for (ScanComponent component : componentsByKey.values()) {
+            if (component.direct()) continue;
+            if (!sourceFile.equals(component.sourceFilePath())) continue;
+            if (!component.coordinate().groupId().equals(groupId)) continue;
+            if (!component.coordinate().artifactId().equals(artifactId)) continue;
+            return component;
+        }
+        return null;
+    }
+
+    /** Corrects a dependency-tree-discovered component's version-source metadata once it's known
+     *  to actually be controlled by this module's own dependencyManagement entry {@code dep} —
+     *  keeping the tree's resolved version and component id (that resolution is authoritative),
+     *  but replacing the generic "mediation" classification with the real controlling
+     *  declaration. */
+    private void correctManagedComponentSource(Map<String, ScanComponent> componentsByKey, ScanComponent treeMatch,
+            PomModel.PomDependency dep, PomModel model, String relativePom) {
+        ScanComponent corrected = new ScanComponent(
+                treeMatch.id(),
+                treeMatch.coordinate(),
+                treeMatch.version(),
+                treeMatch.scope(),
+                true,
+                dep.versionSource(),
+                relativePom,
+                "/project/dependencyManagement/dependencies/dependency[" + dep.groupId() + ":" + dep.artifactId() + "]",
+                model.properties(),
+                treeMatch.snapshot(),
+                versionControlPoint(dep, model),
+                relativePom);
+        replaceComponent(componentsByKey, treeMatch, corrected);
     }
 
     private String versionControlPoint(PomModel.PomDependency dep, PomModel model) {
