@@ -3157,25 +3157,43 @@ public class RedKiteServerMain {
             html.append("</select>");
         }
 
-        // Filter toggle: CVE Upgrade | CVE Downgrade | CVE Nofix | Conflict | Snapshot | Upgrade | Transitive | Clean | All
+        // Three workflow-level views (mutually exclusive, like a tab really is one) plus, within
+        // Findings, independent multi-select filter chips — CVE/Conflict/Transitive/etc. are
+        // overlapping properties a dependency can have at once, not disjoint categories, so they
+        // no longer compete for one exclusive tab slot the way Findings/Clean/All genuinely do.
         long cveUpgradeCount = views.stream().filter(this::isCveFixByUpgrade).count();
         long cveDowngradeCount = views.stream().filter(this::isCveFixByDowngrade).count();
         long cveNofixCount = views.stream().filter(this::isCveNofix).count();
         long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
-        long transitiveCount = views.stream().filter(v -> !v.component().direct() && !v.component().snapshot()).count();
+        long outdatedCount = views.stream().filter(v -> isUpgradeRecommendedOnly(v.status())).count();
+        long directCount = views.stream().filter(v -> v.component().direct()).count();
+        long transitiveOriginCount = views.stream().filter(v -> !v.component().direct()).count();
         long cleanCount = views.stream().filter(this::isCardClean).count();
-        long upgradeCount = views.stream().filter(v -> isUpgradeRecommendedOnly(v.status())).count();
+        long findingsCount = views.size() - cleanCount;
+
         html.append("<div class=\"rem-toggle\">");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cveupgrade\" onclick=\"setRemediationMode('cveupgrade')\">CVE Upgrade <span class=\"tab-count\">").append(cveUpgradeCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cvedowngrade\" onclick=\"setRemediationMode('cvedowngrade')\">CVE Downgrade <span class=\"tab-count\">").append(cveDowngradeCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"cvenofix\" onclick=\"setRemediationMode('cvenofix')\">CVE Nofix <span class=\"tab-count\">").append(cveNofixCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"conflict\" onclick=\"setRemediationMode('conflict')\">&#9651; Conflict <span class=\"tab-count\">").append(conflictCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"snapshot\" onclick=\"setRemediationMode('snapshot')\">Snapshot <span class=\"tab-count\">").append(snapshotCount).append("</span></button>");
-        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-mode=\"upgrade\" onclick=\"setRemediationMode('upgrade')\">Upgradeable <span class=\"tab-count\" id=\"upg-all-count\">").append(upgradeCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"transitive\" onclick=\"setRemediationMode('transitive')\">Transitive <span class=\"tab-count\">").append(transitiveCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"clean\" onclick=\"setRemediationMode('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-mode=\"all\" onclick=\"setRemediationMode('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
+        html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-view=\"findings\" onclick=\"setRemView('findings')\">Findings <span class=\"tab-count\">").append(findingsCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-view=\"clean\" onclick=\"setRemView('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-view=\"all\" onclick=\"setRemView('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
+        html.append("</div>");
+
+        html.append("<div class=\"rem-filters\" id=\"rem-filters\">");
+        html.append("<div class=\"filter-group\" data-group=\"reason\">");
+        html.append("<span class=\"filter-group-label\">Reason</span>");
+        html.append(filterChipHtml("reason", "cveupgrade", "CVE Upgrade", cveUpgradeCount));
+        html.append(filterChipHtml("reason", "cvedowngrade", "CVE Downgrade", cveDowngradeCount));
+        html.append(filterChipHtml("reason", "cvenofix", "CVE Nofix", cveNofixCount));
+        html.append(filterChipHtml("reason", "conflict", "Conflict", conflictCount));
+        html.append(filterChipHtml("reason", "outdated", "Outdated", outdatedCount));
+        html.append(filterChipHtml("reason", "snapshot", "Snapshot", snapshotCount));
+        html.append("</div>");
+        html.append("<div class=\"filter-group\" data-group=\"origin\">");
+        html.append("<span class=\"filter-group-label\">Origin</span>");
+        html.append(filterChipHtml("origin", "direct", "Direct", directCount));
+        html.append(filterChipHtml("origin", "transitive", "Transitive", transitiveOriginCount));
+        html.append("</div>");
+        html.append("<div class=\"filter-rule\" id=\"rem-filter-rule\"></div>");
         html.append("</div>");
 
         // Apply bar
@@ -3473,9 +3491,15 @@ public class RedKiteServerMain {
         boolean dataCveUpgrade = isCveFixByUpgrade(view);
         boolean dataCveDowngrade = isCveFixByDowngrade(view);
         boolean dataCveNofix = isCveNofix(view);
+        // Origin (direct/transitive) purely from comp.direct() — independent of snapshot status,
+        // unlike "kind" below, which conflates the two. A snapshot dependency is still either
+        // direct or transitive for filtering purposes; "kind" stays as-is since badge/label text
+        // elsewhere still wants snapshot called out as its own thing.
+        String origin = comp.direct() ? "direct" : "transitive";
         html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
+                .append("\" data-origin=\"").append(origin)
                 .append("\" data-cveupgrade=\"").append(dataCveUpgrade)
                 .append("\" data-cvedowngrade=\"").append(dataCveDowngrade)
                 .append("\" data-cvenofix=\"").append(dataCveNofix)
@@ -3943,18 +3967,21 @@ public class RedKiteServerMain {
         return p1.length >= 1 && p2.length >= 1 && !p1[0].isBlank() && p1[0].equals(p2[0]);
     }
 
+    /** Whether a card shows up in the default view (Findings) — used only to pick which module
+     *  tab is initially selected, so it should match exactly what the Findings view itself shows. */
     private boolean isDefaultVisibleRemediationCard(ComponentView view) {
-        if (view == null) {
-            return false;
-        }
-        if (view.convergenceFinding() != null) {
-            return true;
-        }
-        RemediationStatus status = view.status();
-        return status != null
-                && status.needsRemediation()
-                && !status.hasVulnerability()
-                && !status.isSnapshot();
+        return view != null && !isCardClean(view);
+    }
+
+    /** One checkbox filter chip — a pill, not a button, since several can be active in the same
+     *  group at once. {@code dataFilterValue} matches what {@code applyRemediationFilters} in
+     *  scripts.js reads off each card's own {@code data-*} attributes for this group. */
+    private static String filterChipHtml(String group, String dataFilterValue, String label, long count) {
+        return "<label class=\"filter-chip\"><input type=\"checkbox\" data-filter-group=\"" + group
+                + "\" data-filter-value=\"" + dataFilterValue + "\" onchange=\"toggleFilterChip(this)\">"
+                + "<span class=\"filter-chip-check\" aria-hidden=\"true\"></span>"
+                + escape(label) + " <span class=\"tab-count\" data-chip-count=\"" + group + ":" + dataFilterValue + "\">"
+                + count + "</span></label>";
     }
 
     private TransitiveConflictFinding findMatchingConflict(Map<String, List<TransitiveConflictFinding>> conflictsByKey, ScanComponent component) {
