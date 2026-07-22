@@ -149,7 +149,7 @@ public class RedKiteServerMain {
         return "[{\"name\":\"Dependency analysis\",\"pct\":" + p0 + ",\"status\":\"" + s0 + "\"},"
              + "{\"name\":\"Version metadata\",\"pct\":" + p1 + ",\"status\":\"" + s1 + "\"},"
              + "{\"name\":\"Vulnerability scan\",\"pct\":" + p2 + ",\"status\":\"" + s2 + "\"},"
-             + "{\"name\":\"Upgrade analysis\",\"pct\":" + p3 + ",\"status\":\"" + s3 + "\"},"
+             + "{\"name\":\"Update analysis\",\"pct\":" + p3 + ",\"status\":\"" + s3 + "\"},"
              + "{\"name\":\"Dependency management\",\"pct\":" + p4 + ",\"status\":\"" + s4 + "\"}]";
     }
 
@@ -598,7 +598,7 @@ public class RedKiteServerMain {
                             int pct = t > 0 ? n * 100 / t : 0;
                             job.phasesJson = scanPhases(100,"done",100,"done",pct,"active",0,"pending",0,"pending");
                         } catch (Exception ignored) {}
-                    } else if ("Upgrades".equals(msg)) {
+                    } else if ("Updates".equals(msg)) {
                         job.phasesJson = scanPhases(100,"done",100,"done",100,"done",0,"active",0,"pending");
                     }
                 };
@@ -3114,7 +3114,7 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-banner-row\">");
         if (summary.snapshotCount() > 0) html.append("<span class=\"sev-chip sev-snap\"").append(reasonChipTitle(summary, RemediationReason.SNAPSHOT)).append(">&#9889; ").append(summary.snapshotCount()).append(" Snapshot</span>");
         if (summary.declaredVersionWarningCount() > 0) html.append("<span class=\"sev-chip sev-declared\"").append(reasonChipTitle(summary, RemediationReason.DECLARED_VERSION)).append(">&#128196; ").append(summary.declaredVersionWarningCount()).append(" Declared version</span>");
-        if (summary.recommendationCount() > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(summary.recommendationCount()).append(" Upgrade recommended</span>");
+        if (summary.recommendationCount() > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(summary.recommendationCount()).append(" Update recommended</span>");
         if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\"").append(reasonChipTitle(summary, RemediationReason.STALE_METADATA)).append(">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
         html.append("</div>");
         html.append("</div>");
@@ -3433,9 +3433,9 @@ public class RedKiteServerMain {
         return view.status().hasVulnerability() && view.recommendation() == null;
     }
 
-    /** Matches the "Upgrade recommended" reason counted in RemediationClassifier.summarize() —
-     *  the single source of truth for both the "Upgrade recommended" banner chip and the
-     *  Upgradeable tab, so the two numbers never diverge like they did when the tab computed
+    /** Matches the "Update recommended" reason counted in RemediationClassifier.summarize() —
+     *  the single source of truth for both the "Update recommended" banner chip and the
+     *  Outdated filter chip, so the two numbers never diverge like they did when a tab computed
      *  its own definition client-side. */
     private static boolean isUpgradeRecommendedOnly(RemediationStatus status) {
         return status.hasUpgradeRecommendation() && !status.hasVulnerability() && !status.isSnapshot();
@@ -3561,7 +3561,7 @@ public class RedKiteServerMain {
 
         // Remediation reason chips
         List<String> otherReasons = status.reasons().stream()
-                .filter(r -> !"Upgrade recommended".equals(r)).toList();
+                .filter(r -> !"Update recommended".equals(r)).toList();
         boolean showUpgradeBtn = effectiveRecommendation != null && !status.isSnapshot();
         boolean showNoUpgradeChip = !comp.direct() && !status.isSnapshot()
                 && effectiveRecommendation == null && view.versionMetadata() != null;
@@ -3585,7 +3585,7 @@ public class RedKiteServerMain {
                     String transitiveChip = switch (recReason) {
                         case CVE_FIX_DOWNGRADE -> "Downgrade available";
                         case CVE_BEST_EFFORT -> "Lower-severity version available";
-                        default -> view.canUpgradeViaDirect() ? "Upgrade available" : "Major upgrade available";
+                        default -> view.canUpgradeViaDirect() ? "Update available" : "Major update available";
                     };
                     html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");
                 }
@@ -4998,8 +4998,8 @@ public class RedKiteServerMain {
                 }
             }
 
-            // Pass 3: upgrade analysis
-            progress.accept("Upgrades");
+            // Pass 3: update analysis
+            progress.accept("Updates");
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
             List<MetadataResult> metadata = new ArrayList<>();

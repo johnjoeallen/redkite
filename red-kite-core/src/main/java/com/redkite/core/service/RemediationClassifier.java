@@ -37,7 +37,7 @@ public final class RemediationClassifier {
 
         boolean hasRecommendation = hasRecommendationFor(component, allRecommendations);
         if (hasRecommendation && !hasVulnerability && !isSnapshot) {
-            reasons.add("Upgrade recommended");
+            reasons.add("Update recommended");
         }
 
         boolean hasStaleMetadata = hasStaleMetadataFor(component, allMetadata);
@@ -100,7 +100,7 @@ public final class RemediationClassifier {
                 declaredVersionCount++;
                 depsByReason.computeIfAbsent(RemediationReason.DECLARED_VERSION, k -> new ArrayList<>()).add(dependency);
             }
-            // Matches the "Upgrade recommended" reason in classify(): only counted here when it's
+            // Matches the "Update recommended" reason in classify(): only counted here when it's
             // not already covered by the vulnerability or snapshot buckets, so a dependency isn't
             // double-labeled across banners for essentially the same underlying issue.
             if (hasRecommendation && !hasVulnerability && !isSnapshot) {
