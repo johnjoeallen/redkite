@@ -35,6 +35,14 @@ public final class CandidateUpdateResolver {
     private CandidateUpdateResolver() {
     }
 
+    /** Convenience overload for callers with no user pins to check against. */
+    public static List<CandidateUpdate> resolve(
+            List<ScanComponent> allComponents,
+            Map<ComponentCoordinate, String> selectedTargetVersions,
+            Map<ComponentCoordinate, List<DependencyFinding>> findingsByCoordinate) {
+        return resolve(allComponents, selectedTargetVersions, findingsByCoordinate, Set.of());
+    }
+
     /**
      * @param allComponents             every component from the scan — needed to compute control
      *                                  sets and to know each coordinate's current version.
@@ -43,11 +51,14 @@ public final class CandidateUpdateResolver {
      * @param findingsByCoordinate      findings driving each selection, for {@code reason}/
      *                                  {@code findingsAddressed} — may omit or leave empty for a
      *                                  coordinate with no associated finding (a plain manual pick).
+     * @param userPinnedCoordinates     coordinates the user has explicitly pinned, for
+     *                                  {@link CandidateUpdate#conflictsWithUserPin()}.
      */
     public static List<CandidateUpdate> resolve(
             List<ScanComponent> allComponents,
             Map<ComponentCoordinate, String> selectedTargetVersions,
-            Map<ComponentCoordinate, List<DependencyFinding>> findingsByCoordinate) {
+            Map<ComponentCoordinate, List<DependencyFinding>> findingsByCoordinate,
+            Set<ComponentCoordinate> userPinnedCoordinates) {
 
         Map<ComponentCoordinate, ScanComponent> currentByCoordinate = new LinkedHashMap<>();
         for (ScanComponent c : allComponents) {
@@ -100,8 +111,15 @@ public final class CandidateUpdateResolver {
                 findings.addAll(findingsByCoordinate.getOrDefault(coordinate, List.of()));
             }
 
+            UpdateAction action = actionFor(controller, movements);
+            boolean introducesDowngrade = movements.stream().anyMatch(m -> compareVersions(m.toVersion(), m.fromVersion()) < 0);
+            boolean overridesPlatform = action == UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE
+                    && (controller instanceof VersionController.ParentDependencyManagement
+                        || controller instanceof VersionController.ImportedBom);
+            boolean conflictsWithUserPin = affected.stream().anyMatch(userPinnedCoordinates::contains);
+
             results.add(new CandidateUpdate(
-                    actionFor(controller, movements),
+                    action,
                     set != null ? set.controllerDescription() : describeController(controller),
                     oldValue,
                     proposedVersion,
@@ -109,7 +127,10 @@ public final class CandidateUpdateResolver {
                     List.copyOf(findings),
                     new ProposedChangeSet(List.copyOf(movements)),
                     RecommendationConfidence.HIGH,
-                    true));
+                    true,
+                    conflictsWithUserPin,
+                    introducesDowngrade,
+                    overridesPlatform));
         }
         return results;
     }
@@ -152,11 +173,12 @@ public final class CandidateUpdateResolver {
         return String.join(", ", reasons);
     }
 
-    // ---- minimal version comparison (kept local — red-kite-core has no dependency on a shared one) ----
+    // ---- minimal version comparison (kept local — red-kite-core has no dependency on a shared
+    // one — package-visible so UpdatePlanBuilder can reuse it rather than duplicating it) ----
 
     private static final Pattern SEPARATOR = Pattern.compile("[.\\-]");
 
-    private static int compareVersions(String left, String right) {
+    static int compareVersions(String left, String right) {
         if (left.equals(right)) return 0;
         String[] leftParts = SEPARATOR.split(left);
         String[] rightParts = SEPARATOR.split(right);

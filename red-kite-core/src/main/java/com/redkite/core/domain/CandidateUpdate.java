@@ -17,6 +17,14 @@ import java.util.List;
  * a policy-rule concept that doesn't exist yet, and a risk model. Adding empty placeholder fields
  * for them now would claim a completeness this doesn't have; they belong here once each has a
  * real algorithm behind it.
+ *
+ * @param conflictsWithUserPin whether this update would touch a coordinate the user has
+ *      explicitly pinned — a real, computable signal (given the caller's known pinned
+ *      coordinates), unlike the fields this deliberately omits.
+ * @param introducesDowngrade  whether any resulting movement lowers a version.
+ * @param overridesPlatform    whether this candidate shadows a parent's or an imported BOM's own
+ *      management with a local override, rather than cooperating with it (e.g. by changing a
+ *      property the platform's own managed entry already references).
  */
 public record CandidateUpdate(
         UpdateAction action,
@@ -29,5 +37,8 @@ public record CandidateUpdate(
         List<DependencyFinding> findingsAddressed,
         ProposedChangeSet resultingChanges,
         RecommendationConfidence confidence,
-        boolean autoApplySafe) {
+        boolean autoApplySafe,
+        boolean conflictsWithUserPin,
+        boolean introducesDowngrade,
+        boolean overridesPlatform) {
 }
