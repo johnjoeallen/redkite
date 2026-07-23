@@ -2410,6 +2410,33 @@ public class RedKiteServerMain {
             }
         }
 
+        // Pass 3: RedKite's own dependencyManagement pins are excluded from patchTargets above —
+        // deliberately, so an unrelated bulk upgrade never re-normalises a pin's hardcoded version
+        // into a ${...} property. But a scan surfaces every unmatched dependencyManagement entry
+        // (including RedKite's own prior pins) as its own component, so a user can explicitly pick
+        // a newer version for one — that selection must still land somewhere. Update the pin's
+        // version (and the version= attribute on its marker comment, so the comment stays
+        // truthful) in place, without touching who owns it or why.
+        for (int i = 0; i < allElements.getLength(); i++) {
+            Node n = allElements.item(i);
+            if (!(n instanceof Element e) || !"dependency".equals(e.getNodeName()) || !isRedkiteDepMgmtPin(e)) continue;
+            String pg = childText(e, "groupId"), pa = childText(e, "artifactId");
+            if (pg == null || pa == null) continue;
+            String upgrade = versionUpdates.get(pg.trim() + ":" + pa.trim());
+            if (upgrade == null) continue;
+            Node versionNode = directChildVersion(e);
+            if (versionNode == null) continue;
+            if (upgrade.equals(versionNode.getTextContent().trim())) continue;
+            versionNode.setTextContent(upgrade);
+            Node sibling = e.getPreviousSibling();
+            while (sibling != null && sibling.getNodeType() == Node.TEXT_NODE && sibling.getTextContent().isBlank()) {
+                sibling = sibling.getPreviousSibling();
+            }
+            if (sibling instanceof Comment c) {
+                c.setData(c.getData().replaceFirst("version=\"[^\"]*\"", "version=\"" + upgrade + "\""));
+            }
+        }
+
         stripWhitespaceNodes(doc);
         var tf = TransformerFactory.newInstance();
         var transformer = tf.newTransformer();
