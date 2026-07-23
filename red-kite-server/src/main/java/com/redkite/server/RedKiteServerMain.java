@@ -3099,6 +3099,13 @@ public class RedKiteServerMain {
                     .compareTo(b.component().coordinate().artifactId());
         });
 
+        // Computed here (rather than solely from summary.recommendationCount(), which is a
+        // RemediationClassifier/core computation with no visibility into POM content or conflict
+        // findings) so the "Update recommended" banner chip and the Outdated filter chip below
+        // both reflect the same, more accurate signal: a transitive dependency with no concrete
+        // reason to move (see transitiveRecommendedVersion) is excluded from both, not just one.
+        long outdatedCount = views.stream().filter(v -> isEffectivelyOutdatedOnly(v, rootPomContent)).count();
+
         StringBuilder html = new StringBuilder();
 
         // Summary banner
@@ -3126,7 +3133,7 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-banner-row\">");
         if (summary.snapshotCount() > 0) html.append("<span class=\"sev-chip sev-snap\"").append(reasonChipTitle(summary, RemediationReason.SNAPSHOT)).append(">&#9889; ").append(summary.snapshotCount()).append(" Snapshot</span>");
         if (summary.declaredVersionWarningCount() > 0) html.append("<span class=\"sev-chip sev-declared\"").append(reasonChipTitle(summary, RemediationReason.DECLARED_VERSION)).append(">&#128196; ").append(summary.declaredVersionWarningCount()).append(" Declared version</span>");
-        if (summary.recommendationCount() > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(summary.recommendationCount()).append(" Update recommended</span>");
+        if (outdatedCount > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(outdatedCount).append(" Update recommended</span>");
         if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\"").append(reasonChipTitle(summary, RemediationReason.STALE_METADATA)).append(">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
         html.append("</div>");
         html.append("</div>");
@@ -3178,7 +3185,6 @@ public class RedKiteServerMain {
         long cveNofixCount = views.stream().filter(this::isCveNofix).count();
         long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
-        long outdatedCount = views.stream().filter(v -> isEffectivelyOutdatedOnly(v, rootPomContent)).count();
         long directCount = views.stream().filter(v -> v.component().direct()).count();
         long transitiveOriginCount = views.stream().filter(v -> !v.component().direct()).count();
         long cleanCount = views.stream().filter(this::isCardClean).count();
