@@ -127,6 +127,9 @@ public class RedKiteServerMain {
         volatile String revertedVersion;
         volatile String failedVersion;
         volatile String failureSignature;
+        /** True when the fully-computed patched POM set turned out identical to what's already on
+         *  disk — nothing was validated or written, since there was nothing to apply. */
+        volatile boolean noChanges = false;
     }
 
     private final ConcurrentHashMap<String, ApplyJob> applyJobs = new ConcurrentHashMap<>();
@@ -1231,22 +1234,9 @@ public class RedKiteServerMain {
                     com.redkite.maven.ValidationRunner runner = new com.redkite.maven.ValidationRunner();
                     RemediationApplier applier = new RemediationApplier();
 
-                    // --- PRE-VALIDATE ---
-                    // Non-blocking: a failing baseline means we may be Applying changes to a broken project,
-                    // which is a valid use case. We record the result and continue; post-validate is the
-                    // authoritative gate.
-                    job.phase = ApplyJob.Phase.PRE_VALIDATE;
-                    com.redkite.maven.ValidationRunner.ValidationResult pre =
-                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
-                    job.baselinePassed = pre.passed();
-                    if (!pre.passed()) {
-                        LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
-                    }
-
-                    // --- APPLYING ---
-                    job.phase = ApplyJob.Phase.APPLYING;
-
-                    // Determine all POMs that will be modified and save their originals.
+                    // Compute the fully-patched POM set FIRST, before running any build — if it
+                    // turns out identical to what's already on disk, there's nothing to validate
+                    // or write, and no point spending a build cycle finding that out.
                     Map<Path, String> originals = new java.util.LinkedHashMap<>();
                     for (Map<String, String> action : actions) {
                         Path targetPom = resolveActionPomPath(projectRoot, action.get("pomFile"));
@@ -1301,6 +1291,29 @@ public class RedKiteServerMain {
                     }
 
                     refreshPinSummaryComments(applier, scanId, projectRoot, modified, originals);
+
+                    boolean anyRealChange = modified.entrySet().stream()
+                            .anyMatch(e -> !e.getValue().equals(originals.get(e.getKey())));
+                    if (!anyRealChange) {
+                        job.noChanges = true;
+                        job.status = ApplyJob.Status.DONE;
+                        return;
+                    }
+
+                    // --- PRE-VALIDATE ---
+                    // Non-blocking: a failing baseline means we may be Applying changes to a broken project,
+                    // which is a valid use case. We record the result and continue; post-validate is the
+                    // authoritative gate.
+                    job.phase = ApplyJob.Phase.PRE_VALIDATE;
+                    com.redkite.maven.ValidationRunner.ValidationResult pre =
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
+                    job.baselinePassed = pre.passed();
+                    if (!pre.passed()) {
+                        LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
+                    }
+
+                    // --- APPLYING ---
+                    job.phase = ApplyJob.Phase.APPLYING;
 
                     // Write all changes to disk.
                     for (Map.Entry<Path, String> entry : modified.entrySet()) {
@@ -1566,8 +1579,9 @@ public class RedKiteServerMain {
             }
             case DONE -> {
                 boolean baselinePassed = job.baselinePassed;
+                boolean noChanges = job.noChanges;
                 applyJobs.remove(jobId);
-                sendJson(exchange, 200, "{\"status\":\"done\",\"baselinePassed\":" + baselinePassed + "}");
+                sendJson(exchange, 200, "{\"status\":\"done\",\"baselinePassed\":" + baselinePassed + ",\"noChanges\":" + noChanges + "}");
             }
             case FAILED -> {
                 applyJobs.remove(jobId);
@@ -3389,6 +3403,19 @@ public class RedKiteServerMain {
         html.append("<button class=\"button\" type=\"button\" onclick=\"closePomModal()\">Close</button>");
         html.append("</div></div>");
         html.append("<div class=\"pom-modal-body\"><pre id=\"pom-modal-content\"></pre></div>");
+        html.append("</div></div>");
+
+        // Apply preview modal — shown on every "Apply selected" click before the apply-batch job runs
+        html.append("<div id=\"apply-preview-modal\" class=\"pom-modal\" style=\"display:none\">");
+        html.append("<div class=\"pom-modal-backdrop\" onclick=\"closeApplyPreview()\"></div>");
+        html.append("<div class=\"pom-modal-box\" style=\"width:min(560px,92vw)\">");
+        html.append("<div class=\"pom-modal-head\">");
+        html.append("<span class=\"pom-modal-filename\">Apply changes</span>");
+        html.append("<div style=\"display:flex;gap:8px;flex-shrink:0\">");
+        html.append("<button class=\"button\" type=\"button\" onclick=\"closeApplyPreview()\">Cancel</button>");
+        html.append("<button class=\"button primary\" type=\"button\" id=\"apply-preview-ok\" onclick=\"confirmApplyPreview()\">OK</button>");
+        html.append("</div></div>");
+        html.append("<div class=\"pom-modal-body\"><div id=\"apply-preview-body\" style=\"padding:20px\"></div></div>");
         html.append("</div></div>");
 
         return html.toString();
