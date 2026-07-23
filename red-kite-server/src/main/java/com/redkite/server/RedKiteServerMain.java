@@ -14,6 +14,7 @@ import com.redkite.core.service.AdvisoryClassifier;
 import com.redkite.core.service.CandidateUpdateResolver;
 import com.redkite.core.service.RemediationClassifier;
 import com.redkite.core.service.UpdatePlanBuilder;
+import com.redkite.core.service.VersionControllerResolver;
 
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
@@ -2053,6 +2054,23 @@ public class RedKiteServerMain {
             if (c != null) unpinnedCoords.add(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
         }
 
+        // Every property name the scan's own provenance resolution found actually controlling a
+        // component's version — whether declared locally or by a parent/imported BOM (Spring
+        // Boot's BOM managing logback-classic via its own ${logback-classic.version}, say). Used
+        // below to tell a genuinely orphaned RedKite-created property (nothing anywhere claims it)
+        // apart from a project-authored override of a property an inherited BOM controls, which
+        // never appears as a literal ${...} reference in this project's own POM text at all.
+        Set<String> activeProperties = new LinkedHashSet<>();
+        for (ScanComponent c : report.components()) {
+            VersionController vc = VersionControllerResolver.resolve(c);
+            String propertyName = null;
+            if (vc instanceof VersionController.LocalProperty lp) propertyName = lp.propertyName();
+            else if (vc instanceof VersionController.ImportedBom ib) propertyName = ib.propertyName();
+            else if (vc instanceof VersionController.ParentDependencyManagement pdm) propertyName = pdm.propertyName();
+            else if (vc instanceof VersionController.ParentProperty pp) propertyName = pp.propertyName();
+            if (propertyName != null) activeProperties.add(propertyName);
+        }
+
         // Direct dependency upgrades stay property-backed through the normal version patch flow.
         // Only transitive convergence fixes should introduce dependencyManagement pins.
         Map<String, List<ScanComponent>> directByFile = new LinkedHashMap<>();
@@ -2078,7 +2096,7 @@ public class RedKiteServerMain {
                 if (updateById.containsKey(c.id())) fileUpdates.put(coord, updateById.get(c.id()));
                 else if (pinnedIds.contains(c.id()) && c.version() != null) fileUpdates.put(coord, c.version());
             }
-            result.put(entry.getKey(), patchPomXml(content, fileUpdates, pinnedCoords, unpinnedCoords));
+            result.put(entry.getKey(), patchPomXml(content, fileUpdates, pinnedCoords, unpinnedCoords, activeProperties));
         }
 
         // Sync the root POM's declared version properties to match any direct dep upgrades so
@@ -2088,7 +2106,7 @@ public class RedKiteServerMain {
         if (rootPomKey != null && (!allDirectUpdates.isEmpty() || !pinnedCoords.isEmpty() || !unpinnedCoords.isEmpty())) {
             String rootContent = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
             if (rootContent != null) {
-                String updated = patchPomXml(rootContent, allDirectUpdates, pinnedCoords, unpinnedCoords);
+                String updated = patchPomXml(rootContent, allDirectUpdates, pinnedCoords, unpinnedCoords, activeProperties);
                 if (!updated.equals(rootContent)) {
                     result.put(rootPomKey, updated);
                 }
@@ -2270,11 +2288,17 @@ public class RedKiteServerMain {
     private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates) throws Exception {
-        return patchPomXml(content, versionUpdates, Set.of(), Set.of());
+        return patchPomXml(content, versionUpdates, Set.of(), Set.of(), Set.of());
     }
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates,
                                       Set<String> pinnedCoords, Set<String> unpinnedCoords) throws Exception {
+        return patchPomXml(content, versionUpdates, pinnedCoords, unpinnedCoords, Set.of());
+    }
+
+    private static String patchPomXml(String content, Map<String, String> versionUpdates,
+                                      Set<String> pinnedCoords, Set<String> unpinnedCoords,
+                                      Set<String> activeProperties) throws Exception {
         var dbf = DocumentBuilderFactory.newInstance();
         dbf.setNamespaceAware(false);
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
@@ -2437,6 +2461,53 @@ public class RedKiteServerMain {
             }
         }
 
+        // Pass 4: drop <properties> entries no longer referenced by ${name} anywhere in this
+        // file's own text — leftover cruft from an earlier upgrade that normalised a literal
+        // version into a property whose owning <dependency> (or dependencyManagement pin) was
+        // later removed some other way (as seen with a stale bcprov-jdk18on.version left behind
+        // after its pin was replaced). Scoped to names ending in ".version": Maven's own
+        // convention-consumed properties (maven.compiler.source, skipITs, etc.) are read directly
+        // by plugins without ever appearing as a ${...} reference, so a blind "never referenced"
+        // rule would delete those outright. activeProperties is the other half of the safety net —
+        // properties the scan's own provenance resolution found actually controlling some
+        // component's version, including ones a parent/imported BOM manages internally (Spring
+        // Boot's BOM referencing its own ${logback-classic.version}, say) that never appear as a
+        // literal ${...} anywhere in *this* project's own POM text at all. Also skipped entirely
+        // for parent/aggregator POMs (packaging=pom), whose properties commonly exist purely for
+        // child-module inheritance.
+        if (!"pom".equals(childText(root, "packaging"))) {
+            Element propertiesEl = null;
+            for (int i = 0; i < root.getChildNodes().getLength(); i++) {
+                Node n = root.getChildNodes().item(i);
+                if (n instanceof Element e && "properties".equals(e.getNodeName())) { propertiesEl = e; break; }
+            }
+            if (propertiesEl != null) {
+                StringBuilder allText = new StringBuilder();
+                collectText(doc.getDocumentElement(), allText);
+                String text = allText.toString();
+                List<Element> orphaned = new ArrayList<>();
+                for (int i = 0; i < propertiesEl.getChildNodes().getLength(); i++) {
+                    Node n = propertiesEl.getChildNodes().item(i);
+                    if (n instanceof Element propEl && propEl.getNodeName().endsWith(".version")
+                            && !activeProperties.contains(propEl.getNodeName())
+                            && !text.contains("${" + propEl.getNodeName() + "}")) {
+                        orphaned.add(propEl);
+                    }
+                }
+                for (Element propEl : orphaned) {
+                    Node sibling = propEl.getPreviousSibling();
+                    while (sibling != null && sibling.getNodeType() == Node.TEXT_NODE && sibling.getTextContent().isBlank()) {
+                        sibling = sibling.getPreviousSibling();
+                    }
+                    if (sibling instanceof Comment c && c.getTextContent() != null
+                            && c.getTextContent().strip().startsWith(USER_PIN_TAG)) {
+                        propertiesEl.removeChild(sibling);
+                    }
+                    propertiesEl.removeChild(propEl);
+                }
+            }
+        }
+
         stripWhitespaceNodes(doc);
         var tf = TransformerFactory.newInstance();
         var transformer = tf.newTransformer();
@@ -2446,6 +2517,18 @@ public class RedKiteServerMain {
         StringWriter sw = new StringWriter();
         transformer.transform(new DOMSource(doc), new StreamResult(sw));
         return sw.toString();
+    }
+
+    /** Concatenates every text-node value under {@code node}, separated so adjacent text nodes
+     *  can never accidentally merge into a false {@code ${name}} match. */
+    private static void collectText(Node node, StringBuilder sb) {
+        if (node.getNodeType() == Node.TEXT_NODE) {
+            sb.append(node.getTextContent()).append('\n');
+        }
+        NodeList children = node.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            collectText(children.item(i), sb);
+        }
     }
 
     private static Node directChildVersion(Element dep) {
