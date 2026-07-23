@@ -3178,7 +3178,7 @@ public class RedKiteServerMain {
         long cveNofixCount = views.stream().filter(this::isCveNofix).count();
         long conflictCount = views.stream().filter(v -> v.convergenceFinding() != null).count();
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
-        long outdatedCount = views.stream().filter(v -> isUpgradeRecommendedOnly(v.status())).count();
+        long outdatedCount = views.stream().filter(v -> isEffectivelyOutdatedOnly(v, rootPomContent)).count();
         long directCount = views.stream().filter(v -> v.component().direct()).count();
         long transitiveOriginCount = views.stream().filter(v -> !v.component().direct()).count();
         long cleanCount = views.stream().filter(this::isCardClean).count();
@@ -3453,6 +3453,20 @@ public class RedKiteServerMain {
         return status.hasUpgradeRecommendation() && !status.hasVulnerability() && !status.isSnapshot();
     }
 
+    /** {@link #isUpgradeRecommendedOnly}, further narrowed to cases where a target version is
+     *  actually offered — matching renderComponentCard's own effectiveRecommendation/upgradeOnly
+     *  logic. A transitive dependency's raw recommendation is withheld (see
+     *  transitiveRecommendedVersion) when there's no concrete reason to move it, and its version
+     *  selector defaults to "No change" accordingly; counting it toward "Outdated" anyway would
+     *  advertise an update the UI itself doesn't actually offer. */
+    private boolean isEffectivelyOutdatedOnly(ComponentView view, String rootPomContent) {
+        if (!isUpgradeRecommendedOnly(view.status())) return false;
+        ScanComponent comp = view.component();
+        if (comp.direct()) return true;
+        String transitiveTarget = transitiveRecommendedVersion(view, rootPomContent);
+        return transitiveTarget != null && !transitiveTarget.equals(comp.version());
+    }
+
     /** Whether a card is treated as "clean" for tab-filtering/counting purposes — the single
      *  source of truth shared by the banner counts and the per-card rendering, so the CVE and
      *  Clean tabs can never double-count the same card. */
@@ -3494,7 +3508,11 @@ public class RedKiteServerMain {
 
         StringBuilder html = new StringBuilder();
         String kind = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
-        boolean upgradeOnly = isUpgradeRecommendedOnly(status);
+        // Matches effectiveRecommendation above: a transitive dependency with no concrete reason
+        // to move has its recommendation withheld there (the version selector defaults to "No
+        // change" for it), so it must be withheld here too — otherwise the Outdated chip's count
+        // and card-matching would include cards with nothing actually shown as available to apply.
+        boolean upgradeOnly = isUpgradeRecommendedOnly(status) && (comp.direct() || transitiveHasTarget);
         boolean actionableConvergence = view.convergenceFinding() != null;
         String conflictJson = actionableConvergence ? buildConflictJson(view.convergenceFinding()) : "";
         boolean dataClean = isCardClean(view);
