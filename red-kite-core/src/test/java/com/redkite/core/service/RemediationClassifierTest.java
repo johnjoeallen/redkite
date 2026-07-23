@@ -107,6 +107,40 @@ class RemediationClassifierTest {
     }
 
     @Test
+    void pinnedCoordinateSuppressesPlainUpdateRecommendation() {
+        // A pin records a deliberate decision to hold this version — counting it as "needs
+        // remediation" for a plain (non-CVE) update recommendation would contradict that decision.
+        ScanComponent comp = releaseComponent(1L);
+        RemediationStatus status = RemediationClassifier.classify(
+                comp, List.of(), List.of(recommendation(1L)), List.of(), java.util.Set.of(COORD));
+        assertFalse(status.needsRemediation());
+        assertFalse(status.hasUpgradeRecommendation());
+        assertFalse(status.reasons().contains("Update recommended"));
+    }
+
+    @Test
+    void pinnedCoordinateDoesNotSuppressCveFinding() {
+        // A pin only suppresses the plain "nice to have" recommendation — a known vulnerability
+        // must still surface regardless of pin status.
+        ScanComponent comp = releaseComponent(1L);
+        RemediationStatus status = RemediationClassifier.classify(
+                comp, List.of(finding("HIGH")), List.of(recommendation(1L)), List.of(), java.util.Set.of(COORD));
+        assertTrue(status.needsRemediation());
+        assertTrue(status.hasVulnerability());
+        assertFalse(status.hasUpgradeRecommendation(), "The plain recommendation is still suppressed even alongside a CVE");
+    }
+
+    @Test
+    void unpinnedCoordinateIsUnaffectedByPinnedSet() {
+        ScanComponent comp = releaseComponent(1L);
+        ComponentCoordinate otherCoord = new ComponentCoordinate("com.example", "other-lib");
+        RemediationStatus status = RemediationClassifier.classify(
+                comp, List.of(), List.of(recommendation(1L)), List.of(), java.util.Set.of(otherCoord));
+        assertTrue(status.needsRemediation());
+        assertTrue(status.hasUpgradeRecommendation());
+    }
+
+    @Test
     void staleMetadataNeedsRemediation() {
         ScanComponent comp = releaseComponent(1L);
         RemediationStatus status = RemediationClassifier.classify(
@@ -177,6 +211,26 @@ class RemediationClassifierTest {
         assertEquals(1, summary.highCount());
         assertEquals(0, summary.criticalCount());
         assertEquals(1, summary.snapshotCount());
+    }
+
+    @Test
+    void summarizeExcludesPinnedCoordinateFromRecommendationCount() {
+        ScanComponent pinned = componentAt(1L, "pinned-lib", false, true, VersionSource.PROPERTY);
+        ScanComponent unpinned = componentAt(2L, "unpinned-lib", false, true, VersionSource.PROPERTY);
+        UpgradeRecommendation recForPinned = new UpgradeRecommendation(1L, pinned.coordinate(), "1.0.0", "2.0.0",
+                RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH, RecommendationConfidence.HIGH, List.of(), List.of(1L));
+        UpgradeRecommendation recForUnpinned = new UpgradeRecommendation(2L, unpinned.coordinate(), "1.0.0", "2.0.0",
+                RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH, RecommendationConfidence.HIGH, List.of(), List.of(2L));
+
+        ScanReport report = minimalReport(
+                List.of(pinned, unpinned), List.of(), List.of(recForPinned, recForUnpinned),
+                List.of(freshMetadata(1L), freshMetadata(2L)));
+
+        ReportSummary summary = RemediationClassifier.summarize(report, java.util.Set.of(pinned.coordinate()));
+
+        assertEquals(1, summary.recommendationCount(), "Only the unpinned dependency should count");
+        assertEquals(1, summary.needsRemediation());
+        assertEquals(1, summary.clean(), "The pinned dependency is now clean, not a finding");
     }
 
     @Test

@@ -2989,11 +2989,30 @@ public class RedKiteServerMain {
 
 
     private String renderRemediationView(ScanReport report, String scanId, boolean pomExists, Map<String, String> moduleArtifactIds, Map<String, String> sourcePoms, Map<String, List<TransitiveConflictFinding>> conflictsByKey) {
-        ReportSummary summary = RemediationClassifier.summarize(report);
         List<ScanComponent> components = report.components();
         if (components.isEmpty()) {
             return "<p class=\"muted\">No dependency inventory is available for this scan.</p>";
         }
+
+        // Computed up front (rather than down where this was historically built) so both
+        // summarize() and the per-component classify() loop below can use it — a pinned
+        // coordinate's plain "update recommended" reason is suppressed by RemediationClassifier
+        // itself, so the summary banner and every per-card/chip count stay consistent instead of
+        // separately re-deciding what a pin means.
+        Set<String> pinnedCoords = new LinkedHashSet<>();
+        RemediationApplier pinScanApplier = new RemediationApplier();
+        for (String pomContent : sourcePoms.values()) {
+            try {
+                pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
+            } catch (Exception ignored) {}
+        }
+        Set<ComponentCoordinate> pinnedCoordinates = new LinkedHashSet<>();
+        for (String coordStr : pinnedCoords) {
+            int idx = coordStr.indexOf(':');
+            if (idx > 0) pinnedCoordinates.add(new ComponentCoordinate(coordStr.substring(0, idx), coordStr.substring(idx + 1)));
+        }
+
+        ReportSummary summary = RemediationClassifier.summarize(report, pinnedCoordinates);
 
         // Build lookup maps
         Map<Long, UpgradeRecommendation> recByComponent = new LinkedHashMap<>();
@@ -3042,19 +3061,12 @@ public class RedKiteServerMain {
             } catch (NumberFormatException ignored) {}
         }
 
-        Set<String> pinnedCoords = new LinkedHashSet<>();
-        RemediationApplier pinScanApplier = new RemediationApplier();
-        for (String pomContent : sourcePoms.values()) {
-            try {
-                pinnedCoords.addAll(pinScanApplier.findUserPinnedCoordinates(pomContent));
-            } catch (Exception ignored) {}
-        }
         String rootPomContent = rootPomXml(sourcePoms);
 
         List<ComponentView> views = new ArrayList<>();
         for (ScanComponent c : unique.values()) {
             RemediationStatus status = RemediationClassifier.classify(
-                    c, report.vulnerabilityFindings(), report.recommendations(), report.metadataResults());
+                    c, report.vulnerabilityFindings(), report.recommendations(), report.metadataResults(), pinnedCoordinates);
             MetadataResult versionMeta = versionMetaByComponent.get(c.id());
             UpgradeRecommendation rec = recByComponent.get(c.id());
             TransitiveConflictFinding conflict = findMatchingConflict(conflictsByKey, c);

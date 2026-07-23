@@ -19,6 +19,23 @@ public final class RemediationClassifier {
             List<VulnerabilityFinding> allFindings,
             List<UpgradeRecommendation> allRecommendations,
             List<MetadataResult> allMetadata) {
+        return classify(component, allFindings, allRecommendations, allMetadata, Set.of());
+    }
+
+    /**
+     * @param pinnedCoordinates coordinates the user has explicitly pinned. A pin records a
+     *      deliberate decision to hold a dependency at its current version, so a plain (non-CVE)
+     *      update recommendation is suppressed for a pinned coordinate — counting it as still
+     *      "needing remediation" would contradict the decision the pin itself records. CVE
+     *      findings are never suppressed this way, pinned or not; only the "update recommended"
+     *      reason is.
+     */
+    public static RemediationStatus classify(
+            ScanComponent component,
+            List<VulnerabilityFinding> allFindings,
+            List<UpgradeRecommendation> allRecommendations,
+            List<MetadataResult> allMetadata,
+            Set<ComponentCoordinate> pinnedCoordinates) {
 
         List<String> reasons = new ArrayList<>();
         boolean isSnapshot = component.snapshot();
@@ -35,7 +52,8 @@ public final class RemediationClassifier {
             reasons.add("Known " + highestSeverity.label().toLowerCase() + " severity advisory");
         }
 
-        boolean hasRecommendation = hasRecommendationFor(component, allRecommendations);
+        boolean isPinned = pinnedCoordinates != null && pinnedCoordinates.contains(component.coordinate());
+        boolean hasRecommendation = hasRecommendationFor(component, allRecommendations) && !isPinned;
         if (hasRecommendation && !hasVulnerability && !isSnapshot) {
             reasons.add("Update recommended");
         }
@@ -52,6 +70,11 @@ public final class RemediationClassifier {
     }
 
     public static ReportSummary summarize(ScanReport report) {
+        return summarize(report, Set.of());
+    }
+
+    /** @param pinnedCoordinates see {@link #classify(ScanComponent, List, List, List, Set)}. */
+    public static ReportSummary summarize(ScanReport report, Set<ComponentCoordinate> pinnedCoordinates) {
         // Group by distinct dependency (coordinate + version), not by per-module ScanComponent
         // instance — the same dependency resolved into many modules is one real dependency, not
         // one per module. This keeps every number in the banner (totals, severities, reasons) on
@@ -83,7 +106,8 @@ public final class RemediationClassifier {
                 RemediationStatus status = classify(component,
                         report.vulnerabilityFindings(),
                         report.recommendations(),
-                        report.metadataResults());
+                        report.metadataResults(),
+                        pinnedCoordinates);
                 needsRemediation |= status.needsRemediation();
                 isSnapshot |= status.isSnapshot();
                 hasDeclaredVersion |= status.hasDeclaredVersionDeclaration();
