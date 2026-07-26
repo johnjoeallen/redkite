@@ -29,8 +29,13 @@ class LicensePermissivenessTest {
     }
 
     @Test
-    void aSingleLicenseHasNothingToPickOverSoReturnsNull() {
-        assertNull(LicensePermissiveness.mostPermissive(List.of("MIT"), RANKS));
+    void aSingleRankedLicenseIsStillReturned() {
+        assertEquals("MIT", LicensePermissiveness.mostPermissive(List.of("MIT"), RANKS));
+    }
+
+    @Test
+    void aSingleUnrankedLicenseReturnsNull() {
+        assertNull(LicensePermissiveness.mostPermissive(List.of("Bouncy Castle Licence"), RANKS));
     }
 
     @Test

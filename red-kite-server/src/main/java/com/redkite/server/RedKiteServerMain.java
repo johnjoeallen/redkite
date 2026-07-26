@@ -3861,10 +3861,11 @@ public class RedKiteServerMain {
             html.append("<span class=\"badge license-badge license-none\">No License</span>");
         } else {
             // Shown exactly as declared (not canonicalized) — full fidelity on the per-dependency
-            // view; normalization only groups the top-panel breakdown's counts. When more than one
-            // license is declared, the most permissive (per the configured rank table) gets a
-            // distinct highlight — nothing to highlight for a single license, since there's no
-            // choice being made between options.
+            // view; normalization only groups the top-panel breakdown's counts. The most permissive
+            // declared license (per the configured rank table) gets a distinct highlight — even
+            // when there's only one, so a quick visual scan across many cards shows which
+            // dependencies have a known-permissive license at all, not just which ones had a choice
+            // between several. A license with no configured rank is never highlighted.
             String mostPermissive = LicensePermissiveness.mostPermissive(view.licenses(), licenseRanks);
             for (String license : view.licenses()) {
                 String cls = license.equals(mostPermissive) ? "badge license-badge license-most-permissive" : "badge license-badge";
