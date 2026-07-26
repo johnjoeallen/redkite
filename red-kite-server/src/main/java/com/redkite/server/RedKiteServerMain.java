@@ -530,7 +530,7 @@ public class RedKiteServerMain {
             body.append("</section>");
             if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
                 body.append("<section class=\"card span-2\">");
-                body.append(renderEnforcerSection(scanId, enforcerResult));
+                body.append(renderEnforcerSection(report, scanId, enforcerResult));
                 body.append("</section>");
             }
             Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
@@ -2963,9 +2963,41 @@ public class RedKiteServerMain {
              + "</div></div>";
     }
 
-    private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
+    /** Every distinct license declared across all components, most common first, plus a
+     *  "No License" bucket for components with nothing declared anywhere in their POM's own
+     *  chain. A dual-licensed component counts toward every license it declares, so these can sum
+     *  to more than the total component count. */
+    private String licenseBreakdownHtml(ScanReport report) {
+        Map<String, Long> licenseCounts = new LinkedHashMap<>();
+        long noLicenseCount = 0;
+        for (MetadataResult m : report.metadataResults()) {
+            if (m.metadataType() != MetadataType.LICENSE) continue;
+            List<String> licenses = m.upgradePathVersions();
+            if (licenses == null || licenses.isEmpty()) {
+                noLicenseCount++;
+                continue;
+            }
+            for (String license : licenses) {
+                licenseCounts.merge(license, 1L, Long::sum);
+            }
+        }
+        if (licenseCounts.isEmpty() && noLicenseCount == 0) return "";
+        StringBuilder html = new StringBuilder();
+        html.append("<div class=\"rem-banner-row\" style=\"margin-bottom:14px\">");
+        licenseCounts.entrySet().stream()
+                .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+                .forEach(e -> html.append("<span class=\"sev-chip sev-license\">&#128220; ").append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>"));
+        if (noLicenseCount > 0) {
+            html.append("<span class=\"sev-chip sev-license-none\">&#128220; ").append(noLicenseCount).append(" No License</span>");
+        }
+        html.append("</div>");
+        return html.toString();
+    }
+
+    private String renderEnforcerSection(ScanReport report, String scanId, Store.EnforcerResultEntry entry) {
         StringBuilder html = new StringBuilder();
         html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency management</h2>");
+        html.append(licenseBreakdownHtml(report));
 
         EnforcerStatus status = entry.status();
         if (status == EnforcerStatus.ENFORCER_CONFIGURED_NO_CONVERGENCE_RULES) {
@@ -3277,32 +3309,6 @@ public class RedKiteServerMain {
         if (outdatedCount > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(outdatedCount).append(" Update recommended</span>");
         if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\"").append(reasonChipTitle(summary, RemediationReason.STALE_METADATA)).append(">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
         html.append("</div>");
-
-        // License breakdown — every distinct license declared across all components, most common
-        // first, plus a "No License" bucket for components with nothing declared anywhere in
-        // their POM's own chain. A dual-licensed component counts toward every license it
-        // declares, so these can sum to more than the total component count.
-        Map<String, Long> licenseCounts = new LinkedHashMap<>();
-        long noLicenseCount = 0;
-        for (ComponentView v : views) {
-            if (v.licenses().isEmpty()) {
-                noLicenseCount++;
-                continue;
-            }
-            for (String license : v.licenses()) {
-                licenseCounts.merge(license, 1L, Long::sum);
-            }
-        }
-        if (!licenseCounts.isEmpty() || noLicenseCount > 0) {
-            html.append("<div class=\"rem-banner-row\">");
-            licenseCounts.entrySet().stream()
-                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
-                    .forEach(e -> html.append("<span class=\"sev-chip sev-license\">&#128220; ").append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>"));
-            if (noLicenseCount > 0) {
-                html.append("<span class=\"sev-chip sev-license-none\">&#128220; ").append(noLicenseCount).append(" No License</span>");
-            }
-            html.append("</div>");
-        }
         html.append("</div>");
 
         // Build module index — seed from all known source POMs so empty modules still appear
