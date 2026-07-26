@@ -3860,17 +3860,24 @@ public class RedKiteServerMain {
         if (view.licenses().isEmpty()) {
             html.append("<span class=\"badge license-badge license-none\">No License</span>");
         } else {
-            // Shown exactly as declared (not canonicalized) — full fidelity on the per-dependency
-            // view; normalization only groups the top-panel breakdown's counts. The most permissive
-            // declared license (per the configured rank table) gets a distinct highlight — even
-            // when there's only one, so a quick visual scan across many cards shows which
-            // dependencies have a known-permissive license at all, not just which ones had a choice
-            // between several. A license with no configured rank is never highlighted.
+            // A license that LicenseNormalizer recognises is shown in its canonicalized form (e.g.
+            // "ASL-2.0" rather than "The Apache Software License, Version 2.0") so the common cases
+            // read consistently across every card; the original declared string is never lost, just
+            // moved into the tooltip. An unrecognised license passes through unchanged either way.
+            // The most permissive declared license (per the configured rank table) gets a distinct
+            // highlight — even when there's only one, so a quick visual scan across many cards shows
+            // which dependencies have a known-permissive license at all, not just which ones had a
+            // choice between several. A license with no configured rank is never highlighted.
             String mostPermissive = LicensePermissiveness.mostPermissive(view.licenses(), licenseRanks);
             for (String license : view.licenses()) {
-                String cls = license.equals(mostPermissive) ? "badge license-badge license-most-permissive" : "badge license-badge";
-                String title = license.equals(mostPermissive) ? " title=\"Most permissive of this dependency's declared licenses\"" : "";
-                html.append("<span class=\"").append(cls).append("\"").append(title).append(">").append(escape(license)).append("</span>");
+                String canonical = LicenseNormalizer.canonicalize(license);
+                boolean isMostPermissive = license.equals(mostPermissive);
+                String cls = isMostPermissive ? "badge license-badge license-most-permissive" : "badge license-badge";
+                List<String> notes = new ArrayList<>();
+                if (!canonical.equals(license)) notes.add("Declared as: " + license);
+                if (isMostPermissive) notes.add("Most permissive of this dependency's declared licenses");
+                String title = notes.isEmpty() ? "" : " title=\"" + escape(String.join(" — ", notes)) + "\"";
+                html.append("<span class=\"").append(cls).append("\"").append(title).append(">").append(escape(canonical)).append("</span>");
             }
         }
         if (actionableConvergence) {
