@@ -5,8 +5,10 @@ import com.redkite.core.service.SerializationSupport;
 import com.redkite.maven.ConflictOutputParser;
 import com.redkite.maven.EnforcerDetector;
 import com.redkite.maven.EnforcerRunner;
+import com.redkite.maven.LicenseResolver;
 import com.redkite.maven.MavenProjectScanner;
 import com.redkite.maven.MavenSettingsReader;
+import com.redkite.maven.PomFetcher;
 import com.redkite.maven.RemediationApplier;
 import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
@@ -88,6 +90,13 @@ public class RedKiteServerMain {
 
     private record ConfigTtlEntry(String key, String label, Duration defaultValue) {}
 
+    /** Config key + compiled-in default for the license cache — a resolved license for a fixed
+     *  {@code groupId:artifactId:version} is effectively immutable, so this defaults far longer
+     *  than the version/vulnerability TTLs above, which track things that genuinely change over
+     *  time. */
+    private static final String CONFIG_KEY_LICENSE_FRESH_TTL = "cache.ttl.license.fresh";
+    private static final Duration DEFAULT_LICENSE_FRESH_TTL = Duration.ofDays(30);
+
     /** The cache TTLs editable from the /config page — single source of truth shared by the
      *  first-run seeding logic and the config page's rendering, so the two never drift apart. */
     private static final List<ConfigTtlEntry> CONFIG_TTL_ENTRIES = List.of(
@@ -100,7 +109,9 @@ public class RedKiteServerMain {
             new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_NEGATIVE_TTL,
                     "Version metadata cache (artifact not found)", HttpVersionMetadataProvider.DEFAULT_NEGATIVE_TTL),
             new ConfigTtlEntry(HttpVersionMetadataProvider.CONFIG_KEY_ERROR_TTL,
-                    "Version metadata cache (provider error)", HttpVersionMetadataProvider.DEFAULT_ERROR_TTL));
+                    "Version metadata cache (provider error)", HttpVersionMetadataProvider.DEFAULT_ERROR_TTL),
+            new ConfigTtlEntry(CONFIG_KEY_LICENSE_FRESH_TTL,
+                    "License lookup cache (POM licenses)", DEFAULT_LICENSE_FRESH_TTL));
 
     /** Preset choices offered by each TTL dropdown on the /config page, in minutes. */
     private static final List<Map.Entry<Long, String>> CONFIG_TTL_OPTIONS = List.of(
@@ -1894,6 +1905,7 @@ public class RedKiteServerMain {
         store.versionProvider.clearAll();
         store.clearVersionCache();
         store.vulnerabilityProvider.clearAll();
+        store.clearLicenseCache();
         sendJson(exchange, 200, "{\"cleared\":true}");
     }
 
@@ -2890,7 +2902,8 @@ public class RedKiteServerMain {
             UpgradeRecommendation recommendation,
             List<VulnerabilityFinding> findings,
             boolean canUpgradeViaDirect,
-            TransitiveConflictFinding convergenceFinding) {}
+            TransitiveConflictFinding convergenceFinding,
+            List<String> licenses) {}
 
     private static String enforcerBadge(Store.EnforcerResultEntry e) {
         if (e == null) return "";
@@ -3150,9 +3163,12 @@ public class RedKiteServerMain {
             }
         }
         Map<Long, MetadataResult> versionMetaByComponent = new LinkedHashMap<>();
+        Map<Long, List<String>> licensesByComponent = new LinkedHashMap<>();
         for (MetadataResult m : report.metadataResults()) {
             if (m.metadataType() == MetadataType.VERSION) {
                 versionMetaByComponent.put(m.componentId(), m);
+            } else if (m.metadataType() == MetadataType.LICENSE) {
+                licensesByComponent.put(m.componentId(), m.upgradePathVersions());
             }
         }
         Map<String, List<VulnerabilityFinding>> vulnsByKey = new LinkedHashMap<>();
@@ -3209,7 +3225,8 @@ public class RedKiteServerMain {
                     }
                 }
             }
-            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect, conflict));
+            List<String> licenses = licensesByComponent.getOrDefault(c.id(), List.of());
+            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect, conflict, licenses));
         }
 
         // Sort: CRITICAL → HIGH → MEDIUM → LOW → UNKNOWN advisory → SNAPSHOT → STALE → VERSION_MGMT → UPGRADE → CLEAN
@@ -3260,6 +3277,32 @@ public class RedKiteServerMain {
         if (outdatedCount > 0) html.append("<span class=\"sev-chip sev-recommended\"").append(reasonChipTitle(summary, RemediationReason.UPGRADE_RECOMMENDED)).append(">&#8593; ").append(outdatedCount).append(" Update recommended</span>");
         if (summary.staleMetadataCount() > 0) html.append("<span class=\"sev-chip sev-stale\"").append(reasonChipTitle(summary, RemediationReason.STALE_METADATA)).append(">&#8635; ").append(summary.staleMetadataCount()).append(" Stale metadata</span>");
         html.append("</div>");
+
+        // License breakdown — every distinct license declared across all components, most common
+        // first, plus a "No License" bucket for components with nothing declared anywhere in
+        // their POM's own chain. A dual-licensed component counts toward every license it
+        // declares, so these can sum to more than the total component count.
+        Map<String, Long> licenseCounts = new LinkedHashMap<>();
+        long noLicenseCount = 0;
+        for (ComponentView v : views) {
+            if (v.licenses().isEmpty()) {
+                noLicenseCount++;
+                continue;
+            }
+            for (String license : v.licenses()) {
+                licenseCounts.merge(license, 1L, Long::sum);
+            }
+        }
+        if (!licenseCounts.isEmpty() || noLicenseCount > 0) {
+            html.append("<div class=\"rem-banner-row\">");
+            licenseCounts.entrySet().stream()
+                    .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+                    .forEach(e -> html.append("<span class=\"sev-chip sev-license\">&#128220; ").append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>"));
+            if (noLicenseCount > 0) {
+                html.append("<span class=\"sev-chip sev-license-none\">&#128220; ").append(noLicenseCount).append(" No License</span>");
+            }
+            html.append("</div>");
+        }
         html.append("</div>");
 
         // Build module index — seed from all known source POMs so empty modules still appear
@@ -3697,6 +3740,13 @@ public class RedKiteServerMain {
         String kindLabel = comp.snapshot() ? "snapshot" : comp.direct() ? "declared" : "transitive";
         html.append("<span class=\"badge ").append(kindClass).append("\">").append(kindLabel).append("</span>");
         html.append("<span class=\"badge neutral\">").append(scopeLabel(comp.scope())).append("</span>");
+        if (view.licenses().isEmpty()) {
+            html.append("<span class=\"badge license-badge license-none\">No License</span>");
+        } else {
+            for (String license : view.licenses()) {
+                html.append("<span class=\"badge license-badge\">").append(escape(license)).append("</span>");
+            }
+        }
         if (actionableConvergence) {
             html.append("<span class=\"badge conflict-badge\">&#9651; Conflict</span>");
         }
@@ -4832,6 +4882,7 @@ public class RedKiteServerMain {
         private final String dbPassword;
         volatile HttpVersionMetadataProvider versionProvider;
         final HttpVulnerabilityProvider vulnerabilityProvider;
+        volatile LicenseResolver licenseResolver;
         volatile List<String> effectiveMavenRepos;
         volatile String mavenSettingsPath;
 
@@ -4854,6 +4905,7 @@ public class RedKiteServerMain {
             LOGGER.info(() -> "Maven settings: " + (mavenSettingsPath != null ? mavenSettingsPath : "(none)"));
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
             this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"), this::dbConnection);
+            this.licenseResolver = new LicenseResolver(new PomFetcher(null));
             initializeSchema();
             seedConfigDefaults();
         }
@@ -4872,6 +4924,7 @@ public class RedKiteServerMain {
             LOGGER.info(() -> "Reconfiguring Maven settings for project " + projectRoot + ": " + newPath);
             this.mavenSettingsPath = newPath;
             this.versionProvider = buildVersionProvider(projectRoot); // instance method — has access to this::connection
+            this.licenseResolver = new LicenseResolver(new PomFetcher(projectRoot));
             this.effectiveMavenRepos = this.versionProvider.getRepositoryBaseUrls();
             LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
         }
@@ -4904,6 +4957,83 @@ public class RedKiteServerMain {
             } catch (SQLException e) {
                 LOGGER.warning(() -> "Failed to clear rk_version_cache: " + e.getMessage());
             }
+        }
+
+        synchronized void clearLicenseCache() {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement("delete from rk_license_cache")) {
+                int rows = ps.executeUpdate();
+                LOGGER.info(() -> "Cleared rk_license_cache: " + rows + " rows deleted");
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to clear rk_license_cache: " + e.getMessage());
+            }
+        }
+
+        /** Resolves the license(s) declared by {@code coordinate}'s own POM (walking its parent
+         *  chain), backed by a DB cache — a resolved license for a fixed groupId:artifactId:version
+         *  essentially never changes, so this is worth persisting across restarts even though
+         *  {@link LicenseResolver}'s own in-memory cache already avoids re-fetching within one
+         *  project's scan session. */
+        List<String> resolveLicenses(ComponentCoordinate coordinate, String version) {
+            String key = coordinate.groupId() + ":" + coordinate.artifactId() + ":" + version;
+            List<String> cached = dbLoadLicenses(key);
+            if (cached != null) return cached;
+            List<String> resolved = licenseResolver.resolve(coordinate.groupId(), coordinate.artifactId(), version);
+            dbSaveLicenses(key, resolved);
+            return resolved;
+        }
+
+        private List<String> dbLoadLicenses(String key) {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "select licenses_json, expires_at_epoch_ms from rk_license_cache where cache_key = ?")) {
+                ps.setString(1, key);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+                    if (System.currentTimeMillis() > rs.getLong("expires_at_epoch_ms")) return null;
+                    return parseLicensesJson(rs.getString("licenses_json"));
+                }
+            } catch (Exception e) {
+                LOGGER.warning(() -> "License cache load failed for " + key + ": " + e.getMessage());
+                return null;
+            }
+        }
+
+        private void dbSaveLicenses(String key, List<String> licenses) {
+            long expires = System.currentTimeMillis() + readLicenseTtl().toMillis();
+            String json = "[" + licenses.stream().map(RedKiteServerMain::jsonStr).collect(java.util.stream.Collectors.joining(",")) + "]";
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement(
+                         "merge into rk_license_cache (cache_key, licenses_json, expires_at_epoch_ms, updated_at) key (cache_key) values (?, ?, ?, current_timestamp)")) {
+                ps.setString(1, key);
+                ps.setString(2, json);
+                ps.setLong(3, expires);
+                ps.executeUpdate();
+            } catch (Exception e) {
+                LOGGER.warning(() -> "License cache save failed for " + key + ": " + e.getMessage());
+            }
+        }
+
+        private Duration readLicenseTtl() {
+            try (Connection c = connection();
+                 PreparedStatement ps = c.prepareStatement("select config_value from rk_config where config_key = ?")) {
+                ps.setString(1, CONFIG_KEY_LICENSE_FRESH_TTL);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return DEFAULT_LICENSE_FRESH_TTL;
+                    return Duration.ofMinutes(Long.parseLong(rs.getString("config_value").trim()));
+                }
+            } catch (Exception e) {
+                return DEFAULT_LICENSE_FRESH_TTL;
+            }
+        }
+
+        private static List<String> parseLicensesJson(String json) {
+            com.google.gson.JsonArray array = com.google.gson.JsonParser.parseString(json).getAsJsonArray();
+            List<String> licenses = new ArrayList<>();
+            for (com.google.gson.JsonElement e : array) {
+                licenses.add(e.getAsString());
+            }
+            return List.copyOf(licenses);
         }
 
         static Store connect(String jdbcUrl, String dbUser, String dbPassword) {
@@ -5171,7 +5301,18 @@ public class RedKiteServerMain {
                 }
             }
 
-            // Pass 3: update analysis
+            // Pass 3: license lookup — unlike version/vulnerability checks, this runs for
+            // SNAPSHOT components too: a snapshot artifact's own POM still declares a real
+            // license (or inherits one), independent of whether it can be verified against
+            // stable Maven/CVE metadata.
+            Map<Long, List<String>> licenseMap = new LinkedHashMap<>();
+            for (int i = 0; i < components.size(); i++) {
+                ScanComponent c = components.get(i);
+                progress.accept("License " + (i + 1) + "/" + total);
+                licenseMap.put(c.id(), resolveLicenses(c.coordinate(), c.version()));
+            }
+
+            // Pass 4: update analysis
             progress.accept("Updates");
             List<SnapshotDependencyRisk> snapshotRisks = new ArrayList<>();
             List<UpgradeRecommendation> recs = new ArrayList<>();
@@ -5188,6 +5329,9 @@ public class RedKiteServerMain {
                     LOGGER.info(() -> "No Maven/CVE verification attempted for SNAPSHOT component " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VERSION, "none", component.version(), "unknown", "unknown", List.of(), List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "none", component.version(), "unknown", "unknown", List.of(), List.of(), false, MetadataStatus.NOT_APPLICABLE, CacheState.MISSING, null, null, Instant.now(), null, "SNAPSHOT dependency cannot be verified against stable Maven/CVE metadata."));
+                    List<String> snapshotLicenses = licenseMap.getOrDefault(component.id(), List.of());
+                    String snapshotLicenseMessage = snapshotLicenses.isEmpty() ? "No license declared." : "Declared: " + String.join(", ", snapshotLicenses) + ".";
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.LICENSE, "pom", component.version(), "unknown", "unknown", snapshotLicenses, List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, snapshotLicenseMessage));
                 } else {
                     VersionMetadata versionMetadata = versionMap.get(component.id());
                     LOGGER.info(() -> "Maven version metadata for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " => latest=" + versionMetadata.latestVersion() + ", sameMajor=" + versionMetadata.latestSameMajorVersion() + ", complete=" + versionMetadata.complete() + ", status=" + versionMetadata.status());
@@ -5205,6 +5349,11 @@ public class RedKiteServerMain {
                             ? "Found " + compVulns.size() + " vulnerabilit" + (compVulns.size() == 1 ? "y" : "ies") + "."
                             : "No known vulnerabilities.";
                     metadata.add(new MetadataResult(scanId, component.id(), MetadataType.VULNERABILITY, "osv.dev", component.version(), "unknown", "unknown", List.of(), List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, vulnMessage));
+
+                    List<String> licenses = licenseMap.getOrDefault(component.id(), List.of());
+                    String licenseMessage = licenses.isEmpty() ? "No license declared." : "Declared: " + String.join(", ", licenses) + ".";
+                    metadata.add(new MetadataResult(scanId, component.id(), MetadataType.LICENSE, "pom", component.version(), "unknown", "unknown", licenses, List.of(), true, MetadataStatus.FRESH, CacheState.FRESH, Instant.now(), null, Instant.now(), null, licenseMessage));
+
                     for (VulnerabilityFinding f : compVulns) {
                         vulnerabilityFindings.add(new VulnerabilityFinding(f.advisoryId(), f.severity(), f.coordinate(), f.affectedVersion(), f.fixedVersion(), f.introducedVersion(), component.direct(), component.owningVersionControlPoint(), f.cves(), null));
                     }
@@ -5730,6 +5879,15 @@ public class RedKiteServerMain {
                         create table if not exists rk_vuln_cache (
                           cache_key varchar(512) primary key,
                           response_json text not null,
+                          expires_at_epoch_ms bigint not null,
+                          updated_at timestamp with time zone not null default current_timestamp
+                        )
+                        """);
+
+                st.executeUpdate("""
+                        create table if not exists rk_license_cache (
+                          cache_key varchar(512) primary key,
+                          licenses_json text not null,
                           expires_at_epoch_ms bigint not null,
                           updated_at timestamp with time zone not null default current_timestamp
                         )
