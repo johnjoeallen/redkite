@@ -1,8 +1,8 @@
 # RedKite
 
-RedKite is a local Maven dependency analyser and upgrade assistant for checked-out Java repositories.
+RedKite is a local Maven dependency analyser and upgrade assistant.
 
-It analyses local working copies, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
+It analyses a Maven project, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
 
 ![RedKite analysis](images/screenshot.png)
 
@@ -101,7 +101,7 @@ java -Dredkite.port=8080 -jar red-kite.jar
 
 ### Build Validation Settings
 
-Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different checked-out projects can need different values — set them on the **Build validation** panel on each project's page (`/projects/{id}`):
+Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different projects can need different values — set them on the **Build validation** panel on each project's page (`/projects/{id}`):
 
 - **Extra mvn arguments** — whitespace-separated arguments appended to every validation `mvn` call (build and `spring-boot:run`), e.g. `-Pdev -Dspring.profiles.active=dev`
 - **Extra environment variables** — comma-separated `KEY=VALUE` pairs set on the spawned validation processes, e.g. `SPRING_PROFILES_ACTIVE=dev,DB_HOST=localhost`

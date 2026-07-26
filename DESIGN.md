@@ -2,7 +2,7 @@
 
 ## Overview
 
-RedKite is a self-contained Maven dependency analysis tool. It runs as a local HTTP server, analyses checked-out Maven projects by invoking Maven subprocesses, fetches version metadata and vulnerability data from external services, and presents an interactive remediation UI. There is no framework dependency — the server uses the JDK built-in `com.sun.net.httpserver.HttpServer`, H2 for persistence, and Thymeleaf for page shell templating.
+RedKite is a self-contained Maven dependency analysis tool. It runs as a local HTTP server, analyses local Maven projects by invoking Maven subprocesses, fetches version metadata and vulnerability data from external services, and presents an interactive remediation UI. There is no framework dependency — the server uses the JDK built-in `com.sun.net.httpserver.HttpServer`, H2 for persistence, and Thymeleaf for page shell templating.
 
 ---
 
@@ -647,7 +647,7 @@ mvn clean install -DskipTests -Denforcer.skip=true -f <rootPom>
 
 Enforcer is skipped because enforcer violations are what RedKite is fixing — running it during validation would create an unresolvable catch-22 on broken projects. Tests are skipped for speed.
 
-Both the build and the `spring-boot:run` startup check accept extra configuration, stored per-project (`projects.validation_maven_args`, `projects.validation_env`), editable via the "Build validation" panel on `/projects/{id}` and POSTed to `/api/projects/{id}/validation`: whitespace-separated extra `mvn` arguments (e.g. `-Pdev -Dspring.profiles.active=dev`) and comma-separated `KEY=VALUE` environment variables. Loaded fresh from `ProjectEntry` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., extraMavenArgs, extraEnv)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different checked-out projects need different values.
+Both the build and the `spring-boot:run` startup check accept extra configuration, stored per-project (`projects.validation_maven_args`, `projects.validation_env`), editable via the "Build validation" panel on `/projects/{id}` and POSTed to `/api/projects/{id}/validation`: whitespace-separated extra `mvn` arguments (e.g. `-Pdev -Dspring.profiles.active=dev`) and comma-separated `KEY=VALUE` environment variables. Loaded fresh from `ProjectEntry` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., extraMavenArgs, extraEnv)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different projects need different values.
 
 ### Status responses
 
