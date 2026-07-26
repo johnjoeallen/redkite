@@ -3047,6 +3047,7 @@ public class RedKiteServerMain {
      *  Version 2.0" are the same license and share one bucket — with the distinct raw variants
      *  that rolled into each bucket shown in its tooltip, so nothing is silently hidden. */
     private String licenseBreakdownHtml(ScanReport report) {
+        Map<String, Integer> ranks = store.loadLicenseRanks();
         Map<String, Long> licenseCounts = new LinkedHashMap<>();
         Map<String, Set<String>> rawVariantsByCanonical = new LinkedHashMap<>();
         long noLicenseCount = 0;
@@ -3057,11 +3058,13 @@ public class RedKiteServerMain {
                 noLicenseCount++;
                 continue;
             }
-            for (String license : licenses) {
-                String canonical = LicenseNormalizer.canonicalize(license);
-                licenseCounts.merge(canonical, 1L, Long::sum);
-                rawVariantsByCanonical.computeIfAbsent(canonical, k -> new java.util.TreeSet<>()).add(license);
-            }
+            // Counted once per dependency, not once per declared license: a dual-licensed
+            // dependency is only as restrictive as its most permissive option, so it belongs in
+            // that one bucket rather than inflating every license it happens to also offer.
+            String representative = representativeLicense(licenses, ranks);
+            String canonical = LicenseNormalizer.canonicalize(representative);
+            licenseCounts.merge(canonical, 1L, Long::sum);
+            rawVariantsByCanonical.computeIfAbsent(canonical, k -> new java.util.TreeSet<>()).add(representative);
         }
         if (licenseCounts.isEmpty() && noLicenseCount == 0) return "";
         StringBuilder html = new StringBuilder();
@@ -3081,6 +3084,17 @@ public class RedKiteServerMain {
         }
         html.append("</div>");
         return html.toString();
+    }
+
+    /** The single license a dependency is counted and filtered under: its only declared license,
+     *  or — if it declares more than one — the most permissive per the configured rank table,
+     *  falling back to the first declared if several are unranked. Badge display is unaffected by
+     *  this: a card always shows every declared license exactly as-is, this is only for the
+     *  breakdown's counts and the license filter's matching. */
+    private static String representativeLicense(List<String> licenses, Map<String, Integer> ranks) {
+        if (licenses.size() == 1) return licenses.get(0);
+        String best = LicensePermissiveness.mostPermissive(licenses, ranks);
+        return best != null ? best : licenses.get(0);
     }
 
     private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
@@ -3808,11 +3822,12 @@ public class RedKiteServerMain {
         // direct or transitive for filtering purposes; "kind" stays as-is since badge/label text
         // elsewhere still wants snapshot called out as its own thing.
         String origin = comp.direct() ? "direct" : "transitive";
-        String licensesJson = "[" + view.licenses().stream()
-                .map(LicenseNormalizer::canonicalize)
-                .distinct()
-                .map(RedKiteServerMain::jsonStr)
-                .collect(java.util.stream.Collectors.joining(",")) + "]";
+        // Matches the panel's own counting: a dependency is filterable under the one license
+        // it's actually counted under (its most permissive, when it declares more than one), not
+        // every license it happens to also offer — otherwise clicking a chip could surface more
+        // dependencies than the chip's own displayed count.
+        String licensesJson = view.licenses().isEmpty() ? "[]"
+                : "[" + jsonStr(LicenseNormalizer.canonicalize(representativeLicense(view.licenses(), licenseRanks))) + "]";
         html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
