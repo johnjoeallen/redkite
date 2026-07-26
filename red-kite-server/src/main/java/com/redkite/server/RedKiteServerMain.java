@@ -15,6 +15,8 @@ import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
 import com.redkite.core.service.CandidateUpdateResolver;
 import com.redkite.core.service.LicenseNormalizer;
+import com.redkite.core.service.LicensePermissiveness;
+import com.redkite.core.service.LicensePermissivenessDefaults;
 import com.redkite.core.service.RemediationClassifier;
 import com.redkite.core.service.UpdatePlanBuilder;
 import com.redkite.core.service.VersionControllerResolver;
@@ -287,6 +289,7 @@ public class RedKiteServerMain {
         server.createContext("/api/scans/remediation/plan", exchange -> safeHandle(exchange, this::handleApiRemediationPlan));
         server.createContext("/config", exchange -> safeHandle(exchange, this::handleConfig));
         server.createContext("/api/config", exchange -> safeHandle(exchange, this::handleApiConfig));
+        server.createContext("/api/config/license-ranks", exchange -> safeHandle(exchange, this::handleApiConfigLicenseRanks));
     }
 
     private void safeHandle(HttpExchange exchange, ExchangeHandler handler) throws IOException {
@@ -1874,6 +1877,37 @@ public class RedKiteServerMain {
         body.append("<button class=\"button primary\" type=\"submit\">Save</button>");
         body.append("</form>");
         body.append("</section>");
+
+        body.append("<section class=\"card\">");
+        body.append("<h2>License permissiveness</h2>");
+        body.append("<p class=\"muted\">Ranks licenses from most to least permissive (lower number = more permissive). ")
+                .append("Used to highlight a dependency's most permissive declared license when it has more than one. ")
+                .append("Add a name not listed yet to rank it too.</p>");
+        body.append("<form method=\"POST\" action=\"/api/config/license-ranks\">");
+        Map<String, Integer> ranks = store.loadLicenseRanks();
+        List<Map.Entry<String, Integer>> sortedRanks = ranks.entrySet().stream()
+                .sorted(Map.Entry.comparingByValue())
+                .toList();
+        int rowIndex = 0;
+        for (Map.Entry<String, Integer> entry : sortedRanks) {
+            body.append("<div class=\"config-row\">");
+            body.append("<input type=\"hidden\" name=\"license_").append(rowIndex).append("\" value=\"").append(escape(entry.getKey())).append("\">");
+            body.append("<label>").append(escape(entry.getKey())).append("</label>");
+            body.append("<div class=\"config-row-input\"><input type=\"number\" name=\"rank_").append(rowIndex)
+                    .append("\" value=\"").append(entry.getValue()).append("\" min=\"0\" style=\"width:80px\"></div>");
+            body.append("</div>");
+            rowIndex++;
+        }
+        body.append("<div class=\"config-row\">");
+        body.append("<label for=\"license_new\">Add a license</label>");
+        body.append("<div class=\"config-row-input\" style=\"display:flex;gap:8px\">");
+        body.append("<input type=\"text\" id=\"license_new\" name=\"license_new\" placeholder=\"e.g. WTFPL\">");
+        body.append("<input type=\"number\" name=\"rank_new\" placeholder=\"rank\" min=\"0\" style=\"width:80px\">");
+        body.append("</div></div>");
+        body.append("<button class=\"button primary\" type=\"submit\">Save</button>");
+        body.append("</form>");
+        body.append("</section>");
+
         sendHtml(exchange, 200, renderPage("config", "Configuration", "Cache TTL settings", body.toString()));
     }
 
@@ -1895,6 +1929,42 @@ public class RedKiteServerMain {
                 }
                 if (minutes < 1) continue;
                 store.updateConfigValue(field.getKey(), Long.toString(minutes));
+            }
+        } catch (SQLException e) {
+            sendText(exchange, 500, BRAND + " error: " + escape(e.getMessage()));
+            return;
+        }
+        sendRedirect(exchange, "/config");
+    }
+
+    private void handleApiConfigLicenseRanks(HttpExchange exchange) throws IOException {
+        if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendText(exchange, 405, "Method not allowed");
+            return;
+        }
+        Map<String, String> form = parseForm(readBody(exchange));
+        try {
+            int i = 0;
+            while (form.containsKey("license_" + i)) {
+                String name = form.get("license_" + i);
+                String rankStr = form.get("rank_" + i);
+                if (name != null && !name.isBlank() && rankStr != null) {
+                    try {
+                        store.updateLicenseRank(name.trim(), Integer.parseInt(rankStr.trim()));
+                    } catch (NumberFormatException ignored) {
+                        // skip an invalid entry rather than fail the whole save
+                    }
+                }
+                i++;
+            }
+            String newName = form.get("license_new");
+            String newRankStr = form.get("rank_new");
+            if (newName != null && !newName.isBlank() && newRankStr != null && !newRankStr.isBlank()) {
+                try {
+                    store.updateLicenseRank(newName.trim(), Integer.parseInt(newRankStr.trim()));
+                } catch (NumberFormatException ignored) {
+                    // skip
+                }
             }
         } catch (SQLException e) {
             sendText(exchange, 500, BRAND + " error: " + escape(e.getMessage()));
@@ -3556,12 +3626,13 @@ public class RedKiteServerMain {
         html.append("</script>");
 
         // Component cards
+        Map<String, Integer> licenseRanks = store.loadLicenseRanks();
         html.append("<div class=\"rem-list\">");
         for (ComponentView view : views) {
             String mod = view.component().modulePath() == null || view.component().modulePath().isBlank()
                     ? "(root)" : view.component().modulePath();
             boolean hasParents = !parentIdsByChild.getOrDefault(view.component().id(), List.of()).isEmpty();
-            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords, rootPomContent));
+            html.append(renderComponentCard(view, mod, hasParents, vulnsByKey, pinnedCoords, rootPomContent, licenseRanks));
         }
         html.append("</div>");
 
@@ -3694,7 +3765,7 @@ public class RedKiteServerMain {
         return clean && view.convergenceFinding() == null;
     }
 
-    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent) {
+    private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent, Map<String, Integer> licenseRanks) {
         ScanComponent comp = view.component();
         RemediationStatus status = view.status();
         boolean hasFixableCve = hasFixableCve(view);
@@ -3775,9 +3846,15 @@ public class RedKiteServerMain {
             html.append("<span class=\"badge license-badge license-none\">No License</span>");
         } else {
             // Shown exactly as declared (not canonicalized) — full fidelity on the per-dependency
-            // view; normalization only groups the top-panel breakdown's counts.
+            // view; normalization only groups the top-panel breakdown's counts. When more than one
+            // license is declared, the most permissive (per the configured rank table) gets a
+            // distinct highlight — nothing to highlight for a single license, since there's no
+            // choice being made between options.
+            String mostPermissive = LicensePermissiveness.mostPermissive(view.licenses(), licenseRanks);
             for (String license : view.licenses()) {
-                html.append("<span class=\"badge license-badge\">").append(escape(license)).append("</span>");
+                String cls = license.equals(mostPermissive) ? "badge license-badge license-most-permissive" : "badge license-badge";
+                String title = license.equals(mostPermissive) ? " title=\"Most permissive of this dependency's declared licenses\"" : "";
+                html.append("<span class=\"").append(cls).append("\"").append(title).append(">").append(escape(license)).append("</span>");
             }
         }
         if (actionableConvergence) {
@@ -4941,6 +5018,7 @@ public class RedKiteServerMain {
             this.licenseResolver = new LicenseResolver(new PomFetcher(null));
             initializeSchema();
             seedConfigDefaults();
+            seedLicenseRankDefaults();
         }
 
         /** Re-resolve settings from the project root before a scan. No-op when overridden by system property. */
@@ -5927,6 +6005,14 @@ public class RedKiteServerMain {
                         """);
 
                 st.executeUpdate("""
+                        create table if not exists rk_license_rank (
+                          license_name varchar(255) primary key,
+                          rank int not null,
+                          updated_at timestamp with time zone not null default current_timestamp
+                        )
+                        """);
+
+                st.executeUpdate("""
                         create table if not exists rk_config (
                           config_key varchar(100) primary key,
                           config_value varchar(255) not null,
@@ -5992,6 +6078,55 @@ public class RedKiteServerMain {
                          "merge into rk_config (config_key, config_value, updated_at) key (config_key) values (?, ?, current_timestamp)")) {
                 ps.setString(1, key);
                 ps.setString(2, value);
+                ps.executeUpdate();
+            }
+        }
+
+        /** Inserts each default license's seed rank into rk_license_rank, but only if that license
+         *  has no row yet — never overwrites a rank the user already changed from the config page. */
+        private void seedLicenseRankDefaults() {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "insert into rk_license_rank (license_name, rank) " +
+                         "select ?, ? where not exists (select 1 from rk_license_rank where license_name = ?)")) {
+                List<String> order = LicensePermissivenessDefaults.DEFAULT_ORDER;
+                for (int i = 0; i < order.size(); i++) {
+                    ps.setString(1, order.get(i));
+                    ps.setInt(2, i);
+                    ps.setString(3, order.get(i));
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to seed license rank defaults: " + e.getMessage());
+            }
+        }
+
+        /** All configured license ranks, license name -> rank (lower = more permissive). Missing
+         *  from this map means unranked, not "least permissive" — callers must treat the two
+         *  differently rather than defaulting an absent rank to some large number. */
+        synchronized Map<String, Integer> loadLicenseRanks() {
+            Map<String, Integer> ranks = new LinkedHashMap<>();
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement("select license_name, rank from rk_license_rank order by rank");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ranks.put(rs.getString("license_name"), rs.getInt("rank"));
+                }
+            } catch (SQLException e) {
+                LOGGER.warning(() -> "Failed to load license ranks: " + e.getMessage());
+            }
+            return ranks;
+        }
+
+        /** Adds or updates a single license's rank — an upsert, so this also handles ranking a
+         *  license name that isn't in the seeded default set at all yet. */
+        synchronized void updateLicenseRank(String licenseName, int rank) throws SQLException {
+            try (Connection connection = connection();
+                 PreparedStatement ps = connection.prepareStatement(
+                         "merge into rk_license_rank (license_name, rank, updated_at) key (license_name) values (?, ?, current_timestamp)")) {
+                ps.setString(1, licenseName);
+                ps.setInt(2, rank);
                 ps.executeUpdate();
             }
         }
