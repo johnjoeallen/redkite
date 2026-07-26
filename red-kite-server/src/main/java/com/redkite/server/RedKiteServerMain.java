@@ -14,6 +14,7 @@ import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
 import com.redkite.core.service.CandidateUpdateResolver;
+import com.redkite.core.service.LicenseNormalizer;
 import com.redkite.core.service.RemediationClassifier;
 import com.redkite.core.service.UpdatePlanBuilder;
 import com.redkite.core.service.VersionControllerResolver;
@@ -2971,9 +2972,13 @@ public class RedKiteServerMain {
     /** Every distinct license declared across all components, most common first, plus a
      *  "No License" bucket for components with nothing declared anywhere in their POM's own
      *  chain. A dual-licensed component counts toward every license it declares, so these can sum
-     *  to more than the total component count. */
+     *  to more than the total component count. Raw declared strings are normalised via
+     *  {@link LicenseNormalizer} before counting — "Apache-2.0" and "The Apache Software License,
+     *  Version 2.0" are the same license and share one bucket — with the distinct raw variants
+     *  that rolled into each bucket shown in its tooltip, so nothing is silently hidden. */
     private String licenseBreakdownHtml(ScanReport report) {
         Map<String, Long> licenseCounts = new LinkedHashMap<>();
+        Map<String, Set<String>> rawVariantsByCanonical = new LinkedHashMap<>();
         long noLicenseCount = 0;
         for (MetadataResult m : report.metadataResults()) {
             if (m.metadataType() != MetadataType.LICENSE) continue;
@@ -2983,7 +2988,9 @@ public class RedKiteServerMain {
                 continue;
             }
             for (String license : licenses) {
-                licenseCounts.merge(license, 1L, Long::sum);
+                String canonical = LicenseNormalizer.canonicalize(license);
+                licenseCounts.merge(canonical, 1L, Long::sum);
+                rawVariantsByCanonical.computeIfAbsent(canonical, k -> new java.util.TreeSet<>()).add(license);
             }
         }
         if (licenseCounts.isEmpty() && noLicenseCount == 0) return "";
@@ -2991,7 +2998,12 @@ public class RedKiteServerMain {
         html.append("<div class=\"rem-banner-row\" style=\"margin-bottom:14px\">");
         licenseCounts.entrySet().stream()
                 .sorted(Map.Entry.<String, Long>comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
-                .forEach(e -> html.append("<span class=\"sev-chip sev-license\">&#128220; ").append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>"));
+                .forEach(e -> {
+                    Set<String> variants = rawVariantsByCanonical.getOrDefault(e.getKey(), Set.of());
+                    String title = variants.size() > 1 ? " title=\"" + escape(String.join("\n", variants)) + "\"" : "";
+                    html.append("<span class=\"sev-chip sev-license\"").append(title).append(">&#128220; ")
+                            .append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>");
+                });
         if (noLicenseCount > 0) {
             html.append("<span class=\"sev-chip sev-license-none\">&#128220; ").append(noLicenseCount).append(" No License</span>");
         }
@@ -3753,6 +3765,8 @@ public class RedKiteServerMain {
         if (view.licenses().isEmpty()) {
             html.append("<span class=\"badge license-badge license-none\">No License</span>");
         } else {
+            // Shown exactly as declared (not canonicalized) — full fidelity on the per-dependency
+            // view; normalization only groups the top-panel breakdown's counts.
             for (String license : view.licenses()) {
                 html.append("<span class=\"badge license-badge\">").append(escape(license)).append("</span>");
             }
