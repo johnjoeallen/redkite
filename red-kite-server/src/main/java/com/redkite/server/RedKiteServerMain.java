@@ -3001,11 +3001,13 @@ public class RedKiteServerMain {
                 .forEach(e -> {
                     Set<String> variants = rawVariantsByCanonical.getOrDefault(e.getKey(), Set.of());
                     String title = variants.size() > 1 ? " title=\"" + escape(String.join("\n", variants)) + "\"" : "";
-                    html.append("<span class=\"sev-chip sev-license\"").append(title).append(">&#128220; ")
+                    html.append("<span class=\"sev-chip sev-license\" data-license-value=\"").append(escape(e.getKey()))
+                            .append("\" onclick=\"toggleLicenseFilter(this)\"").append(title).append(">&#128220; ")
                             .append(e.getValue()).append(" ").append(escape(e.getKey())).append("</span>");
                 });
         if (noLicenseCount > 0) {
-            html.append("<span class=\"sev-chip sev-license-none\">&#128220; ").append(noLicenseCount).append(" No License</span>");
+            html.append("<span class=\"sev-chip sev-license-none\" data-license-value=\"__no_license__\" onclick=\"toggleLicenseFilter(this)\">&#128220; ")
+                    .append(noLicenseCount).append(" No License</span>");
         }
         html.append("</div>");
         return html.toString();
@@ -3734,6 +3736,11 @@ public class RedKiteServerMain {
         // direct or transitive for filtering purposes; "kind" stays as-is since badge/label text
         // elsewhere still wants snapshot called out as its own thing.
         String origin = comp.direct() ? "direct" : "transitive";
+        String licensesJson = "[" + view.licenses().stream()
+                .map(LicenseNormalizer::canonicalize)
+                .distinct()
+                .map(RedKiteServerMain::jsonStr)
+                .collect(java.util.stream.Collectors.joining(",")) + "]";
         html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
@@ -3746,7 +3753,8 @@ public class RedKiteServerMain {
                 .append("\" data-coord=\"").append(escape(coordStr))
                 .append("\" data-pinned=\"").append(pinned)
                 .append("\" data-pinned-initial=\"").append(pinned)
-                .append("\" data-comp-id=\"").append(comp.id());
+                .append("\" data-licenses='").append(licensesJson).append("'")
+                .append(" data-comp-id=\"").append(comp.id());
         if (actionableConvergence) {
             html.append("\" data-conflict='").append(conflictJson).append("'>");
         } else {
