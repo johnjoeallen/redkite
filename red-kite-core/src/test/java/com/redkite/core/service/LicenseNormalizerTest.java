@@ -24,6 +24,18 @@ class LicenseNormalizerTest {
     }
 
     @Test
+    void apacheLicenseWithAnyVersionNumberIsRecognisedAndPreserved() {
+        // Not hardcoded to 2.0 — an actually-different Apache version (e.g. the old 1.1) must
+        // canonicalize to its OWN label, not silently get merged into ASL-2.0.
+        assertEquals("ASL-1.1", LicenseNormalizer.canonicalize("Apache Software License, version 1.1"));
+        assertEquals("ASL-1.1", LicenseNormalizer.canonicalize("The Apache Software License, Version 1.1"));
+        assertEquals("ASL-1.1", LicenseNormalizer.canonicalize("Apache License, Version 1.1"));
+        // The well-known 2.0 case still works via this same fallback pattern, independent of the
+        // exact-match alias entries above.
+        assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache Software License, Version 2.0"));
+    }
+
+    @Test
     void eplVersionsAreNotConflated() {
         assertEquals("EPL-2.0", LicenseNormalizer.canonicalize("EPL 2.0"));
         assertEquals("EPL-2.0", LicenseNormalizer.canonicalize("EPL-2.0"));

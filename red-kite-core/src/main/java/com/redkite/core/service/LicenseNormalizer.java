@@ -2,6 +2,8 @@ package com.redkite.core.service;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Maps common declared-license name variants seen across dependency POMs — identical license,
@@ -85,12 +87,23 @@ public final class LicenseNormalizer {
             Map.entry("cddl 1.1", "CDDL-1.1")
     );
 
+    /** Catches "Apache (Software) License, Version N" for any N — not just 2.0 — preserving
+     *  whatever version is actually declared instead of assuming every Apache license is 2.0. The
+     *  exact "...version 2.0" strings above are still matched by ALIASES first (a plain map
+     *  lookup), so this only ever fires for a version this table hasn't already named. */
+    private static final Pattern APACHE_VERSIONED = Pattern.compile(
+            "^(?:the\\s+)?apache(?:\\s+software)?\\s+license,?\\s+version\\s+([0-9]+(?:\\.[0-9]+)*)$",
+            Pattern.CASE_INSENSITIVE);
+
     /** The canonical label for {@code rawLicenseName}, or the trimmed original string unchanged
      *  if it isn't a recognised variant of anything in the table. */
     public static String canonicalize(String rawLicenseName) {
         if (rawLicenseName == null) return null;
         String trimmed = rawLicenseName.trim();
         String canonical = ALIASES.get(trimmed.toLowerCase(Locale.ROOT));
-        return canonical != null ? canonical : trimmed;
+        if (canonical != null) return canonical;
+        Matcher m = APACHE_VERSIONED.matcher(trimmed);
+        if (m.matches()) return "ASL-" + m.group(1);
+        return trimmed;
     }
 }
