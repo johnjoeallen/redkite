@@ -3358,6 +3358,7 @@ public class RedKiteServerMain {
                             .orElse(moduleOrder.get(0)));
             html.append("<script>remModule=").append(jsString(firstModule)).append(";</script>");
             html.append("<select class=\"rem-module-select\" onchange=\"filterRemediationModule(this.value)\">");
+            html.append("<option value=\"all\">All modules</option>");
             for (String mod : moduleOrder) {
                 String label = moduleArtifactIds.getOrDefault(mod, modulePathLabel(mod));
                 html.append("<option value=\"").append(escape(mod)).append("\"")
