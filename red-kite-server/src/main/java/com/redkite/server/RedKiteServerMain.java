@@ -530,9 +530,14 @@ public class RedKiteServerMain {
             body.append("</section>");
             if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
                 body.append("<section class=\"card span-2\">");
-                body.append(renderEnforcerSection(report, scanId, enforcerResult));
+                body.append(renderEnforcerSection(scanId, enforcerResult));
                 body.append("</section>");
             }
+            body.append("<section class=\"card span-2\">");
+            body.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">License information</h2>");
+            String licenseBreakdown = licenseBreakdownHtml(report);
+            body.append(licenseBreakdown.isEmpty() ? "<p class=\"muted\">No license data available.</p>" : licenseBreakdown);
+            body.append("</section>");
             Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
             if (enforcerResult != null) {
                 for (TransitiveConflictFinding f : enforcerResult.findings()) {
@@ -2994,10 +2999,9 @@ public class RedKiteServerMain {
         return html.toString();
     }
 
-    private String renderEnforcerSection(ScanReport report, String scanId, Store.EnforcerResultEntry entry) {
+    private String renderEnforcerSection(String scanId, Store.EnforcerResultEntry entry) {
         StringBuilder html = new StringBuilder();
         html.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">Dependency management</h2>");
-        html.append(licenseBreakdownHtml(report));
 
         EnforcerStatus status = entry.status();
         if (status == EnforcerStatus.ENFORCER_CONFIGURED_NO_CONVERGENCE_RULES) {
