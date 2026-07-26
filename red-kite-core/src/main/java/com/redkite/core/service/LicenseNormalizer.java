@@ -29,8 +29,10 @@ public final class LicenseNormalizer {
             Map.entry("apache-2.0", "ASL-2.0"),
             Map.entry("apache license 2.0", "ASL-2.0"),
             Map.entry("al 2.0", "ASL-2.0"),
+            Map.entry("al", "ASL-2.0"),
             Map.entry("apache 2.0", "ASL-2.0"),
             Map.entry("apache license version 2.0", "ASL-2.0"),
+            Map.entry("apache software license", "ASL-2.0"),
 
             // Eclipse Public License 2.0
             Map.entry("epl 2.0", "EPL-2.0"),

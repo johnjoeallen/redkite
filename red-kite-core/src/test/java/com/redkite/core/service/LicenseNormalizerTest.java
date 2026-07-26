@@ -15,8 +15,10 @@ class LicenseNormalizerTest {
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache-2.0"));
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache License 2.0"));
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("AL 2.0"));
+        assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("AL"));
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache 2.0"));
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache License Version 2.0"));
+        assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache Software License"));
         // Case-insensitive: differs only by capitalization from an already-listed variant.
         assertEquals("ASL-2.0", LicenseNormalizer.canonicalize("Apache License, version 2.0"));
     }
