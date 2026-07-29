@@ -6,6 +6,8 @@ It analyses a Maven project, builds a dependency inventory, checks Maven Central
 
 ![RedKite analysis](images/screenshot.png)
 
+📖 [Documentation](https://johnjoeallen.github.io/redkite/) — start with the [Quick Start guide](https://johnjoeallen.github.io/redkite/quick-start).
+
 ## What It Does
 
 - analyses Maven multi-module projects (dependencies, dependency management, and build plugins)
