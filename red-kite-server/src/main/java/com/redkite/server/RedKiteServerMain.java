@@ -3267,16 +3267,35 @@ public class RedKiteServerMain {
         // reason to move (see transitiveRecommendedVersion) is excluded from both, not just one.
         long outdatedCount = views.stream().filter(v -> isEffectivelyOutdatedOnly(v, rootPomContent)).count();
 
+        // Deduped by dependency (coordinate + version), not by card — the same dependency can
+        // produce a card per module it's declared/resolved in (see `unique` above). A card in ANY
+        // of its modules with a finding counts the whole dependency as a finding, mirroring
+        // RemediationClassifier's own per-dependency OR-combine. This is also the single source of
+        // truth for the banner's "components"/"need remediation"/"clean" numbers below — they used
+        // to come from RemediationClassifier.summarize() instead, which has no visibility into
+        // isCardClean's transitive-noise exception (a plain, non-CVE update recommendation on a
+        // transitive dependency with no concrete reason to move), so the banner and the
+        // Findings/Clean/All tabs could disagree about a component the tabs deliberately don't
+        // treat as a finding.
+        Map<String, Boolean> hasFindingByDependency = new LinkedHashMap<>();
+        for (ComponentView v : views) {
+            String depKey = v.component().coordinate().groupId() + ":" + v.component().coordinate().artifactId()
+                    + "@" + v.component().version();
+            hasFindingByDependency.merge(depKey, !isCardClean(v), Boolean::logicalOr);
+        }
+        long findingsCount = hasFindingByDependency.values().stream().filter(Boolean::booleanValue).count();
+        long cleanCount = hasFindingByDependency.size() - findingsCount;
+
         StringBuilder html = new StringBuilder();
 
         // Summary banner
         html.append("<div class=\"rem-banner\">");
         html.append("<div class=\"rem-banner-row\">");
-        html.append("<span class=\"rem-stat\"><strong>").append(summary.totalComponents()).append("</strong> components</span>");
-        if (summary.needsRemediation() > 0) {
-            html.append("<span class=\"rem-stat\"><strong>").append(summary.needsRemediation()).append("</strong> need remediation</span>");
+        html.append("<span class=\"rem-stat\"><strong>").append(hasFindingByDependency.size()).append("</strong> components</span>");
+        if (findingsCount > 0) {
+            html.append("<span class=\"rem-stat\"><strong>").append(findingsCount).append("</strong> need remediation</span>");
         }
-        html.append("<span class=\"rem-stat muted\">").append(summary.clean()).append(" clean</span>");
+        html.append("<span class=\"rem-stat muted\">").append(cleanCount).append(" clean</span>");
         html.append("</div>");
         html.append("<div class=\"rem-banner-row\">");
         if (summary.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\"").append(sevChipTitle(summary, AdvisorySeverity.CRITICAL)).append(">&#9762; ").append(summary.criticalCount()).append(" Critical</span>");
@@ -3349,22 +3368,6 @@ public class RedKiteServerMain {
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
         long directCount = views.stream().filter(v -> v.component().direct()).count();
         long transitiveOriginCount = views.stream().filter(v -> !v.component().direct()).count();
-
-        // Findings/Clean/All are deduped by dependency (coordinate + version) to match the
-        // banner's unit — the same dependency can produce a card per module it's declared/resolved
-        // in (see `unique` above), but a project-wide "N need remediation" promise that leads to an
-        // empty Findings tab (because that count was per-card, not per-dependency) is worse than
-        // Findings showing fewer distinct cards than "All". A card in ANY of its modules with a
-        // finding counts the whole dependency as a finding, mirroring RemediationClassifier's own
-        // per-dependency OR-combine.
-        Map<String, Boolean> hasFindingByDependency = new LinkedHashMap<>();
-        for (ComponentView v : views) {
-            String depKey = v.component().coordinate().groupId() + ":" + v.component().coordinate().artifactId()
-                    + "@" + v.component().version();
-            hasFindingByDependency.merge(depKey, !isCardClean(v), Boolean::logicalOr);
-        }
-        long findingsCount = hasFindingByDependency.values().stream().filter(Boolean::booleanValue).count();
-        long cleanCount = hasFindingByDependency.size() - findingsCount;
 
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-view=\"findings\" onclick=\"setRemView('findings')\">Findings <span class=\"tab-count\">").append(findingsCount).append("</span></button>");
