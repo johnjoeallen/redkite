@@ -14,7 +14,7 @@ Everything runs on your own machine — no source code or dependency data leaves
 
 ## What it does
 
-- Analyses Maven multi-module projects (dependencies, dependency management, and build plugins)
+- Analyses Maven projects, including multi-module builds (dependencies, dependency management, and build plugins)
 - Shows declared (direct) and transitive dependencies with scope and version source
 - Highlights SNAPSHOT dependencies as unverified risks
 - Fetches and caches version metadata from Maven Central
@@ -24,4 +24,4 @@ Everything runs on your own machine — no source code or dependency data leaves
 - Applies selected upgrades directly to the POMs on disk, validating the build before and after
 - Keeps all data on the developer machine
 
-This site is a work in progress — the [Quick Start](quick-start) guide is the first page up; more of the manual will follow.
+This site is a work in progress — [Quick Start](quick-start) and [Evolution](evolution) (the project's history, traced through its own git log) are the first two pages up; more of the manual will follow.

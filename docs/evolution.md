@@ -1,4 +1,21 @@
-# RedKite — Evolution
+---
+title: Evolution
+nav_order: 3
+---
+
+# Evolution
+{: .no_toc }
+
+How RedKite got here, traced through its own git log.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 This traces RedKite's history through its git log, from the first commit (`493ca92`,
 2026-06-18) to the present (164 commits, ~5 weeks). It's the story of how "tell me if a

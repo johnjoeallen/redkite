@@ -10,7 +10,7 @@ It analyses Maven projects, including multi-module builds, builds a dependency i
 
 ## What It Does
 
-- analyses Maven multi-module projects (dependencies, dependency management, and build plugins)
+- analyses Maven projects, including multi-module builds (dependencies, dependency management, and build plugins)
 - shows declared (direct) and transitive dependencies with scope and version source
 - highlights SNAPSHOT dependencies as unverified risks
 - fetches and caches version metadata from Maven Central
