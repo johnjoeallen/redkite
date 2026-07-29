@@ -4067,15 +4067,24 @@ public class RedKiteServerMain {
     private String childVulnerabilitiesHtml(ChildVulnerabilityCounts counts) {
         if (counts == null || counts.total() == 0) return "";
         StringBuilder html = new StringBuilder();
-        html.append("<div class=\"rem-child-vulns\" title=\"CVEs found among this dependency's own transitive dependencies\">");
+        html.append("<div class=\"rem-child-vulns\">");
         html.append("<span class=\"muted\" style=\"font-size:.78rem\">In dependencies:</span>");
-        if (counts.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\">&#9762; ").append(counts.criticalCount()).append("</span>");
-        if (counts.highCount() > 0) html.append("<span class=\"sev-chip sev-high\">&#9760; ").append(counts.highCount()).append("</span>");
-        if (counts.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\">&#9888; ").append(counts.mediumCount()).append("</span>");
-        if (counts.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\">&#x2139; ").append(counts.lowCount()).append("</span>");
-        if (counts.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\">? ").append(counts.unknownCount()).append("</span>");
+        if (counts.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\"").append(childSevChipTitle(counts, AdvisorySeverity.CRITICAL)).append(">&#9762; ").append(counts.criticalCount()).append("</span>");
+        if (counts.highCount() > 0) html.append("<span class=\"sev-chip sev-high\"").append(childSevChipTitle(counts, AdvisorySeverity.HIGH)).append(">&#9760; ").append(counts.highCount()).append("</span>");
+        if (counts.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\"").append(childSevChipTitle(counts, AdvisorySeverity.MEDIUM)).append(">&#9888; ").append(counts.mediumCount()).append("</span>");
+        if (counts.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\"").append(childSevChipTitle(counts, AdvisorySeverity.LOW)).append(">&#x2139; ").append(counts.lowCount()).append("</span>");
+        if (counts.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\"").append(childSevChipTitle(counts, AdvisorySeverity.UNKNOWN)).append(">? ").append(counts.unknownCount()).append("</span>");
         html.append("</div>");
         return html.toString();
+    }
+
+    /** Mirrors {@link #sevChipTitle(ReportSummary, AdvisorySeverity)}: the chip itself only shows
+     *  a count, so the tooltip is what actually says which child dependency (and advisory) that
+     *  severity's count refers to. */
+    private static String childSevChipTitle(ChildVulnerabilityCounts counts, AdvisorySeverity severity) {
+        List<String> children = counts.childrenBySeverity().getOrDefault(severity, List.of());
+        if (children.isEmpty()) return "";
+        return " title=\"" + escape(severity.label() + " in:\n" + String.join("\n", children)) + "\"";
     }
 
     private int remediationSortKey(ComponentView view) {
