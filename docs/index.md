@@ -6,7 +6,7 @@ nav_order: 1
 
 # RedKite
 
-RedKite is a local Maven dependency analyser and upgrade assistant. It analyses a Maven project, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
+RedKite is a local Maven dependency analyser and upgrade assistant. It analyses Maven projects, including multi-module builds, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
 
 Everything runs on your own machine — no source code or dependency data leaves it except the version/vulnerability lookups RedKite makes on your behalf.
 

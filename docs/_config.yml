@@ -1,5 +1,5 @@
 title: RedKite
-description: Local Maven dependency analyser and upgrade assistant — documentation
+description: Local Maven dependency analyser and upgrade assistant for multi-module projects — documentation
 remote_theme: just-the-docs/just-the-docs
 
 plugins:
