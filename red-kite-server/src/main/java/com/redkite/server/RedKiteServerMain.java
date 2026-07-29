@@ -14,6 +14,7 @@ import com.redkite.metadata.HttpVersionMetadataProvider;
 import com.redkite.metadata.HttpVulnerabilityProvider;
 import com.redkite.core.service.AdvisoryClassifier;
 import com.redkite.core.service.CandidateUpdateResolver;
+import com.redkite.core.service.ChildVulnerabilityAggregator;
 import com.redkite.core.service.LicenseNormalizer;
 import com.redkite.core.service.LicensePermissiveness;
 import com.redkite.core.service.LicensePermissivenessDefaults;
@@ -2979,7 +2980,8 @@ public class RedKiteServerMain {
             List<VulnerabilityFinding> findings,
             boolean canUpgradeViaDirect,
             TransitiveConflictFinding convergenceFinding,
-            List<String> licenses) {}
+            List<String> licenses,
+            ChildVulnerabilityCounts childVulnerabilities) {}
 
     private static String enforcerBadge(Store.EnforcerResultEntry e) {
         if (e == null) return "";
@@ -3337,6 +3339,8 @@ public class RedKiteServerMain {
 
         String rootPomContent = rootPomXml(sourcePoms);
 
+        Map<Long, ChildVulnerabilityCounts> childVulnCounts = ChildVulnerabilityAggregator.computeByComponentId(report);
+
         List<ComponentView> views = new ArrayList<>();
         for (ScanComponent c : unique.values()) {
             RemediationStatus status = RemediationClassifier.classify(
@@ -3360,7 +3364,8 @@ public class RedKiteServerMain {
                 }
             }
             List<String> licenses = licensesByComponent.getOrDefault(c.id(), List.of());
-            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect, conflict, licenses));
+            ChildVulnerabilityCounts childVulns = childVulnCounts.getOrDefault(c.id(), ChildVulnerabilityCounts.EMPTY);
+            views.add(new ComponentView(c, status, versionMeta, rec, vulns, canUpgradeViaDirect, conflict, licenses, childVulns));
         }
 
         // Sort: CRITICAL → HIGH → MEDIUM → LOW → UNKNOWN advisory → SNAPSHOT → STALE → VERSION_MGMT → UPGRADE → CLEAN
@@ -3915,6 +3920,10 @@ public class RedKiteServerMain {
             }
         }
 
+        // CVEs found among this dependency's own transitive dependencies, not its own findings —
+        // lets a clean direct dependency still surface that something it pulls in is vulnerable.
+        html.append(childVulnerabilitiesHtml(view.childVulnerabilities()));
+
         // Remediation reason chips
         List<String> otherReasons = status.reasons().stream()
                 .filter(r -> !"Update recommended".equals(r)).toList();
@@ -4050,6 +4059,23 @@ public class RedKiteServerMain {
         }
         String cls = "sev-" + severity.name().toLowerCase();
         return "<span class=\"sev-badge " + cls + "\">" + escape(severity.icon()) + " " + escape(severity.label()) + "</span>";
+    }
+
+    /** One chip per non-zero severity found among this dependency's own transitive children —
+     *  deduped per {@link ChildVulnerabilityAggregator}, so a diamond-shaped child only counts
+     *  once even though it's rendered here from the parent's point of view. */
+    private String childVulnerabilitiesHtml(ChildVulnerabilityCounts counts) {
+        if (counts == null || counts.total() == 0) return "";
+        StringBuilder html = new StringBuilder();
+        html.append("<div class=\"rem-child-vulns\" title=\"CVEs found among this dependency's own transitive dependencies\">");
+        html.append("<span class=\"muted\" style=\"font-size:.78rem\">In dependencies:</span>");
+        if (counts.criticalCount() > 0) html.append("<span class=\"sev-chip sev-critical\">&#9762; ").append(counts.criticalCount()).append("</span>");
+        if (counts.highCount() > 0) html.append("<span class=\"sev-chip sev-high\">&#9760; ").append(counts.highCount()).append("</span>");
+        if (counts.mediumCount() > 0) html.append("<span class=\"sev-chip sev-medium\">&#9888; ").append(counts.mediumCount()).append("</span>");
+        if (counts.lowCount() > 0) html.append("<span class=\"sev-chip sev-low\">&#x2139; ").append(counts.lowCount()).append("</span>");
+        if (counts.unknownCount() > 0) html.append("<span class=\"sev-chip sev-unknown\">? ").append(counts.unknownCount()).append("</span>");
+        html.append("</div>");
+        return html.toString();
     }
 
     private int remediationSortKey(ComponentView view) {

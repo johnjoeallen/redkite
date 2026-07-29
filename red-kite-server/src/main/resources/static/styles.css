@@ -161,6 +161,7 @@ a { color:inherit; text-decoration:none; }
 .sub-card { padding:10px 14px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.015); }
 .card-highlight { outline:2px solid var(--accent) !important; outline-offset:3px; }
 .rem-cves { font-size:.85rem; color:var(--muted); font-family:ui-monospace,monospace; word-break:break-all; }
+.rem-child-vulns { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
 .rem-reasons { display:flex; flex-wrap:wrap; gap:6px; }
 .reason-chip { padding:3px 9px; border-radius:999px; border:1px solid rgba(167,139,250,.3); background:rgba(167,139,250,.1); color:#d8c8ff; font-size:.78rem; }
 .reason-chip-btn { cursor:pointer; transition:border-color .15s,background .15s; }
