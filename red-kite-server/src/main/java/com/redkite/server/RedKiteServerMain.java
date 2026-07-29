@@ -2,12 +2,16 @@ package com.redkite.server;
 
 import com.redkite.core.domain.*;
 import com.redkite.core.service.SerializationSupport;
+import com.redkite.maven.BomVersionResolver;
 import com.redkite.maven.ConflictOutputParser;
 import com.redkite.maven.EnforcerDetector;
 import com.redkite.maven.EnforcerRunner;
+import com.redkite.maven.FamilyVersionAligner;
 import com.redkite.maven.LicenseResolver;
+import com.redkite.maven.ManagedVersionResolver;
 import com.redkite.maven.MavenProjectScanner;
 import com.redkite.maven.MavenSettingsReader;
+import com.redkite.maven.PomAvailabilityChecker;
 import com.redkite.maven.PomFetcher;
 import com.redkite.maven.RemediationApplier;
 import com.redkite.metadata.HttpVersionMetadataProvider;
@@ -131,6 +135,7 @@ public class RedKiteServerMain {
     private final Store store;
     private final HttpServer server;
     private final ConcurrentHashMap<String, ScanJob> scanJobs = new ConcurrentHashMap<>();
+    private final PomAvailabilityChecker pomAvailabilityChecker = new PomAvailabilityChecker();
 
     private static final class ApplyJob {
         enum Status { RUNNING, DONE, FAILED, ERROR }
@@ -744,16 +749,36 @@ public class RedKiteServerMain {
             // resolved. Respect the project's version for those artifacts instead of re-deriving
             // a winner from the stripped tree (which max-picks and can cross a release line the
             // project deliberately avoided, e.g. Netty 4.1 -> 4.2).
-            Map<String, String> declared = projectDeclaredDepMgmt(readFileQuietly(pomPath));
-            Map<String, String> pins = new LinkedHashMap<>();
+            Map<String, ManagedVersionResolver.ManagedVersion> declared =
+                    resolveProjectManagedVersions(projectRoot, pomPath, readFileQuietly(pomPath));
+            Map<String, String> rawPins = new LinkedHashMap<>();
             for (TransitiveConflictFinding f : findings) {
                 String key = f.groupId() + ":" + f.artifactId();
-                String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), declared.get(key));
+                ManagedVersionResolver.ManagedVersion managed = declared.get(key);
+                String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), managed != null ? managed.version() : null);
                 if (winner != null && !winner.isBlank()) {
-                    pins.put(key, winner);
+                    rawPins.put(key, winner);
                 }
             }
-            alignFamilyVersions(pins, components, declared);
+            Map<String, String> aligned = alignFamilies(rawPins, components, declared, projectRoot);
+
+            // Never recommend/apply a candidate coordinate that doesn't actually exist — a pin
+            // that only comes from a broadcast/probe fallback (not directly observed anywhere in
+            // the tree) is exactly the case that needs verifying.
+            PomFetcher pomFetcher = new PomFetcher(projectRoot);
+            Map<String, String> pins = new LinkedHashMap<>();
+            for (Map.Entry<String, String> e : aligned.entrySet()) {
+                String[] ga = e.getKey().split(":", 2);
+                if (ga.length != 2) continue;
+                PomAvailabilityChecker.CheckResult check = pomAvailabilityChecker.check(pomFetcher, ga[0], ga[1], e.getValue());
+                if (check.status() == PomAvailabilityChecker.Availability.AVAILABLE) {
+                    pins.put(e.getKey(), e.getValue());
+                } else {
+                    String detail = check.detail();
+                    LOGGER.warning(() -> "Phase 2: dropping unavailable candidate pin " + e.getKey() + ":" + e.getValue() + " — " + detail);
+                }
+            }
+
             List<String> pinsList = pins.entrySet().stream()
                     .map(e -> e.getKey() + ":" + e.getValue())
                     .toList();
@@ -775,50 +800,21 @@ public class RedKiteServerMain {
     }
 
     /**
-     * A group of artifacts released together on one version (a "release train"), where pinning
-     * members independently — as {@link #computeWinnerVersion} does per groupId:artifactId — can
-     * split the family across incompatible versions (e.g. forcing {@code cucumber-core} lower than
-     * the {@code cucumber.version} the rest of the Cucumber stack is declared at, which breaks
-     * {@code cucumber-junit-platform-engine}'s test discovery).
-     *
-     * @param artifactAllowlist restricts matching to these artifactIds within the group, for
-     *                          families that publish independently-versioned siblings under the
-     *                          same groupId (e.g. Cucumber's formatter/reporting plugins and the
-     *                          standalone {@code io.cucumber:gherkin} parser, which do NOT share
-     *                          {@code cucumber.version}). {@code null} matches every artifact under
-     *                          {@code groupIdPrefix}.
+     * Resolves the project's root POM's own dependency management — including everything reachable
+     * through its parent chain and imported BOMs, per member artifact — via
+     * {@link BomVersionResolver}. Replaces the old flat, BOM-import-blind parsing: that version
+     * folded a BOM import's own coordinate in as if it were a real managed artifact, which is part
+     * of how family alignment used to corrupt BOM-governed members (see {@link FamilyVersionAligner}).
      */
-    private record FamilyGroup(String id, String groupIdPrefix, Set<String> artifactAllowlist) {
-        boolean matches(String groupId, String artifactId) {
-            boolean groupMatches = groupId.equals(groupIdPrefix) || groupId.startsWith(groupIdPrefix + ".");
-            if (!groupMatches) return false;
-            return artifactAllowlist == null || artifactAllowlist.contains(artifactId);
+    private Map<String, ManagedVersionResolver.ManagedVersion> resolveProjectManagedVersions(
+            Path projectRoot, Path pomPath, String rootPomXml) {
+        try {
+            return new BomVersionResolver(new PomFetcher(projectRoot)).resolveProjectDeclared(pomPath, rootPomXml);
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Could not resolve project dependency management: " + e.getMessage());
+            return Map.of();
         }
     }
-
-    private static final List<FamilyGroup> COORDINATED_FAMILIES = List.of(
-            new FamilyGroup("cucumber", "io.cucumber", Set.of(
-                    "cucumber-core", "cucumber-gherkin", "cucumber-gherkin-messages", "cucumber-plugin",
-                    "datatable", "docstring", "cucumber-java", "cucumber-spring", "cucumber-junit-platform-engine")),
-            new FamilyGroup("netty", "io.netty", null),
-            new FamilyGroup("aws-sdk", "software.amazon.awssdk", null),
-            new FamilyGroup("brave", "io.zipkin.brave", null),
-            new FamilyGroup("jetty", "org.eclipse.jetty", null),
-            new FamilyGroup("bytebuddy", "net.bytebuddy", null),
-            new FamilyGroup("opentelemetry", "io.opentelemetry", null),
-            new FamilyGroup("logback", "ch.qos.logback", null),
-            // JUnit Jupiter (5.x) and Platform (1.x) are released together but on different
-            // version schemes — they must be aligned within themselves, never with each other.
-            new FamilyGroup("junit-jupiter", "org.junit.jupiter", null),
-            new FamilyGroup("junit-platform", "org.junit.platform", null),
-            // Micrometer core (1.1x.y) and tracing (1.x.y) version independently despite the
-            // shared groupId, and context-propagation is independent of both.
-            new FamilyGroup("micrometer-core", "io.micrometer", Set.of(
-                    "micrometer-commons", "micrometer-core", "micrometer-jakarta9", "micrometer-observation",
-                    "micrometer-registry-prometheus")),
-            new FamilyGroup("micrometer-tracing", "io.micrometer", Set.of(
-                    "micrometer-tracing", "micrometer-tracing-bridge-brave", "micrometer-tracing-bridge-otel")),
-            new FamilyGroup("jackson", "com.fasterxml.jackson", null));
 
     /**
      * Computes planned dep-management pins for a set of findings, family-aligned. Used both by
@@ -826,17 +822,18 @@ public class RedKiteServerMain {
      * when a scan's stored {@code phase2Pins} is empty (e.g. cached data from before Phase 2 ran).
      */
     private List<String> computePlannedPins(List<TransitiveConflictFinding> findings, List<ScanComponent> components,
-                                            Map<String, String> projectDeclared) {
+                                            Path projectRoot, Map<String, ManagedVersionResolver.ManagedVersion> projectManaged) {
         Map<String, String> pins = new LinkedHashMap<>();
         for (TransitiveConflictFinding f : findings) {
             String key = f.groupId() + ":" + f.artifactId();
-            String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), projectDeclared.get(key));
+            ManagedVersionResolver.ManagedVersion managed = projectManaged.get(key);
+            String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), managed != null ? managed.version() : null);
             if (winner != null && !winner.isBlank()) {
                 pins.put(key, winner);
             }
         }
-        alignFamilyVersions(pins, components, projectDeclared);
-        return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
+        Map<String, String> aligned = alignFamilies(pins, components, projectManaged, projectRoot);
+        return aligned.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
     }
 
     /**
@@ -846,7 +843,7 @@ public class RedKiteServerMain {
      * would give, and is a no-op on already-aligned pins.
      */
     private List<String> realignStoredPins(List<String> storedPins, List<ScanComponent> components,
-                                           Map<String, String> projectDeclared) {
+                                           Path projectRoot, Map<String, ManagedVersionResolver.ManagedVersion> projectManaged) {
         Map<String, String> pins = new LinkedHashMap<>();
         for (String gav : storedPins) {
             int last = gav.lastIndexOf(':');
@@ -856,133 +853,21 @@ public class RedKiteServerMain {
         // A stored pin for an artifact the project itself manages must be reconciled with the
         // project's declared version, same as a fresh computation would be.
         for (Map.Entry<String, String> e : pins.entrySet()) {
-            e.setValue(reconcileWithDeclared(e.getValue(), projectDeclared.get(e.getKey())));
+            ManagedVersionResolver.ManagedVersion managed = projectManaged.get(e.getKey());
+            e.setValue(reconcileWithDeclared(e.getValue(), managed != null ? managed.version() : null));
         }
-        alignFamilyVersions(pins, components, projectDeclared);
-        return pins.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
+        Map<String, String> aligned = alignFamilies(pins, components, projectManaged, projectRoot);
+        return aligned.entrySet().stream().map(e -> e.getKey() + ":" + e.getValue()).toList();
     }
 
-    /**
-     * Aligns every computed pin belonging to a {@link #COORDINATED_FAMILIES} entry onto one
-     * version per family. The target is the version the PROJECT itself declares for the family —
-     * its own dependencyManagement entries and its direct dependencies — and that target wins
-     * outright, raising or LOWERING pins to match: a transitively-observed higher version must
-     * not drag the family across a release line the project deliberately avoided (e.g. a project
-     * on Netty 4.1.135.Final must not have its Netty modules force-pinned to a 4.2.x observed on
-     * some unrelated transitive path). Only when the project declares nothing for the family does
-     * alignment fall back to raising every member to the highest version required anywhere for
-     * that family (other members' pins, or any resolved component in the tree).
-     */
-    private void alignFamilyVersions(Map<String, String> pins, List<ScanComponent> components,
-                                     Map<String, String> projectDeclared) {
-        for (FamilyGroup family : COORDINATED_FAMILIES) {
-            // 1) Project-declared target: own dep-management entries + direct dependencies.
-            String declaredTarget = null;
-            for (Map.Entry<String, String> e : projectDeclared.entrySet()) {
-                String[] ga = e.getKey().split(":", 2);
-                if (ga.length == 2 && family.matches(ga[0], ga[1])
-                        && (declaredTarget == null || compareVersionsSemantic(e.getValue(), declaredTarget) > 0)) {
-                    declaredTarget = e.getValue();
-                }
-            }
-            for (ScanComponent c : components) {
-                String g = c.coordinate().groupId(), a = c.coordinate().artifactId();
-                if (c.direct() && family.matches(g, a)
-                        && c.version() != null && !c.version().isBlank()
-                        && !c.version().contains("${") && !c.snapshot()
-                        && (declaredTarget == null || compareVersionsSemantic(c.version(), declaredTarget) > 0)) {
-                    declaredTarget = c.version();
-                }
-            }
-            if (declaredTarget != null) {
-                // Computed winners may raise the family WITHIN the declared release line (e.g.
-                // logback declared 1.5.25, findings require 1.5.38 → whole family to 1.5.38).
-                // Winners on a different line never drag the family across it (Netty declared
-                // 4.1.135 stays 4.1.135 even when 4.2.x is observed transitively).
-                String target = declaredTarget;
-                for (Map.Entry<String, String> e : pins.entrySet()) {
-                    String[] ga = e.getKey().split(":", 2);
-                    if (ga.length == 2 && family.matches(ga[0], ga[1])
-                            && sameReleaseLine(e.getValue(), declaredTarget)
-                            && compareVersionsSemantic(e.getValue(), target) > 0) {
-                        target = e.getValue();
-                    }
-                }
-                for (Map.Entry<String, String> e : pins.entrySet()) {
-                    String[] ga = e.getKey().split(":", 2);
-                    if (ga.length == 2 && family.matches(ga[0], ga[1])) {
-                        e.setValue(target);
-                    }
-                }
-                continue;
-            }
-
-            // 2) Nothing declared: raise-only alignment to the family's highest required version.
-            String floor = null;
-            for (Map.Entry<String, String> e : pins.entrySet()) {
-                String[] ga = e.getKey().split(":", 2);
-                if (ga.length == 2 && family.matches(ga[0], ga[1])
-                        && (floor == null || compareVersionsSemantic(e.getValue(), floor) > 0)) {
-                    floor = e.getValue();
-                }
-            }
-            for (ScanComponent c : components) {
-                String g = c.coordinate().groupId(), a = c.coordinate().artifactId();
-                if (family.matches(g, a) && c.version() != null && !c.snapshot()
-                        && (floor == null || compareVersionsSemantic(c.version(), floor) > 0)) {
-                    floor = c.version();
-                }
-            }
-            if (floor == null) continue;
-            for (Map.Entry<String, String> e : pins.entrySet()) {
-                String[] ga = e.getKey().split(":", 2);
-                if (ga.length == 2 && family.matches(ga[0], ga[1]) && compareVersionsSemantic(floor, e.getValue()) > 0) {
-                    e.setValue(floor);
-                }
-            }
-        }
-    }
-
-    /**
-     * Extracts the project's OWN (non-RedKite) dependencyManagement entries from the root POM as
-     * a "groupId:artifactId" → version map, resolving single-level {@code ${property}} references
-     * against the POM's {@code <properties>}. RedKite-tagged pins are excluded — they're RedKite's
-     * previous output, not project intent. Returns an empty map if the POM can't be parsed.
-     */
-    private Map<String, String> projectDeclaredDepMgmt(String rootPomXml) {
-        Map<String, String> declared = new LinkedHashMap<>();
-        if (rootPomXml == null || rootPomXml.isBlank()) return declared;
-        try {
-            Document doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-                    .parse(new InputSource(new StringReader(rootPomXml)));
-            Map<String, String> props = new LinkedHashMap<>();
-            NodeList propsBlocks = doc.getElementsByTagName("properties");
-            for (int i = 0; i < propsBlocks.getLength(); i++) {
-                NodeList kids = propsBlocks.item(i).getChildNodes();
-                for (int j = 0; j < kids.getLength(); j++) {
-                    if (kids.item(j) instanceof Element p) props.put(p.getNodeName(), p.getTextContent().trim());
-                }
-            }
-            NodeList depMgmts = doc.getElementsByTagName("dependencyManagement");
-            for (int i = 0; i < depMgmts.getLength(); i++) {
-                NodeList deps = ((Element) depMgmts.item(i)).getElementsByTagName("dependency");
-                for (int j = 0; j < deps.getLength(); j++) {
-                    Element dep = (Element) deps.item(j);
-                    if (isRedkiteDepMgmtPin(dep)) continue;
-                    String g = childText(dep, "groupId"), a = childText(dep, "artifactId"), v = childText(dep, "version");
-                    if (g == null || a == null || v == null) continue;
-                    v = v.trim();
-                    if (v.startsWith("${") && v.endsWith("}")) {
-                        v = props.get(v.substring(2, v.length() - 1));
-                    }
-                    if (v == null || v.isBlank() || v.contains("${")) continue;
-                    declared.put(g.trim() + ":" + a.trim(), v);
-                }
-            }
-        } catch (Exception e) {
-            LOGGER.warning(() -> "Could not parse root POM for declared dep-management: " + e.getMessage());
-        }
-        return declared;
+    /** Wires {@link FamilyVersionAligner} up with a live {@link BomVersionResolver} (backed by a
+     *  {@link PomFetcher} rooted at this project) so it can probe a coordinated family's known BOM
+     *  before ever broadcasting one version to every member — see {@link FamilyVersionAligner} for
+     *  the actual alignment logic and rationale; nothing family-specific lives here anymore. */
+    private Map<String, String> alignFamilies(Map<String, String> pins, List<ScanComponent> components,
+            Map<String, ManagedVersionResolver.ManagedVersion> projectManaged, Path projectRoot) {
+        BomVersionResolver bomResolver = new BomVersionResolver(new PomFetcher(projectRoot));
+        return new FamilyVersionAligner(bomResolver::resolveBomMembers).align(pins, components, projectManaged);
     }
 
     /**
@@ -3165,14 +3050,17 @@ public class RedKiteServerMain {
         // Auto-fix pin list — from stored Phase 2 computed pins, or derived from Phase 1 findings
         List<String> phase2Pins = entry.phase2Pins();
         if (!phase2Pins.isEmpty() || !findings.isEmpty()) {
-            List<ScanComponent> scanComponents = store.getScan(scanId).report().components();
-            Map<String, String> declared = projectDeclaredDepMgmt(rootPomXml(store.loadSourcePoms(scanId)));
+            ScanEntry scanEntry = store.getScan(scanId);
+            List<ScanComponent> scanComponents = scanEntry.report().components();
+            Path projectRoot = Path.of(scanEntry.input().workingTreePath());
+            Map<String, ManagedVersionResolver.ManagedVersion> declared =
+                    resolveProjectManagedVersions(projectRoot, projectRoot.resolve("pom.xml"), rootPomXml(store.loadSourcePoms(scanId)));
             if (phase2Pins.isEmpty() && !findings.isEmpty()) {
                 // Phase 2 hasn't run or data predates this feature — compute planned pins for display
-                phase2Pins = computePlannedPins(findings, scanComponents, declared);
+                phase2Pins = computePlannedPins(findings, scanComponents, projectRoot, declared);
             } else {
                 // Stored pins may predate family alignment or its fixes — never trust them verbatim
-                phase2Pins = realignStoredPins(phase2Pins, scanComponents, declared);
+                phase2Pins = realignStoredPins(phase2Pins, scanComponents, projectRoot, declared);
             }
         }
         if (!phase2Pins.isEmpty()) {
@@ -4699,12 +4587,14 @@ public class RedKiteServerMain {
             List<TransitiveConflictFinding> phase2 = enforcerResult.phase2Findings();
             List<String> phase2Pins = enforcerResult.phase2Pins();
             if (!phase2Pins.isEmpty() || !enforcerResult.findings().isEmpty()) {
-                Map<String, String> declared = projectDeclaredDepMgmt(rootPomXml(store.loadSourcePoms(scanId)));
+                Path projectRoot = Path.of(store.getScan(scanId).input().workingTreePath());
+                Map<String, ManagedVersionResolver.ManagedVersion> declared =
+                        resolveProjectManagedVersions(projectRoot, projectRoot.resolve("pom.xml"), rootPomXml(store.loadSourcePoms(scanId)));
                 if (phase2Pins.isEmpty() && !enforcerResult.findings().isEmpty()) {
-                    phase2Pins = computePlannedPins(enforcerResult.findings(), report.components(), declared);
+                    phase2Pins = computePlannedPins(enforcerResult.findings(), report.components(), projectRoot, declared);
                 } else {
                     // Stored pins may predate family alignment or its fixes — never trust them verbatim
-                    phase2Pins = realignStoredPins(phase2Pins, report.components(), declared);
+                    phase2Pins = realignStoredPins(phase2Pins, report.components(), projectRoot, declared);
                 }
             }
             if (!phase2Pins.isEmpty()) {
