@@ -1,19 +1,6 @@
----
-title: Evolution
-nav_order: 3
----
-
 # Evolution
-{: .no_toc }
 
 How RedKite got here, traced through its own git log.
-{: .fs-6 .fw-300 }
-
-## Table of contents
-{: .no_toc .text-delta }
-
-1. TOC
-{:toc}
 
 ---
 

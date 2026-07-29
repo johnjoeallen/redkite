@@ -46,7 +46,7 @@ On Windows:
 red-kite.bat
 ```
 
-The server starts on port `6502` and stores its database in a `data/` subdirectory next to the JAR. Open the UI at:
+The server starts on port `6502` and stores its database in `~/.redkite/`. Open the UI at:
 
 ```
 http://localhost:6502
@@ -128,4 +128,4 @@ The fat JAR is produced at `red-kite-server/target/red-kite-<version>.jar`.
 
 - Maven projects only.
 - Local repositories only.
-- No Gradle, npm, Docker, or license scanning.
+- No Gradle, npm, or Docker support.

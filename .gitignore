@@ -31,3 +31,6 @@ dist/
 target/
 **/target/
 dependency-reduced-pom.xml
+
+# MkDocs build output
+/site/

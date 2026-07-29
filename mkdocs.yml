@@ -1,0 +1,151 @@
+site_name: RedKite
+site_description: Local Maven dependency analyser and update assistant for multi-module projects
+site_url: https://johnjoeallen.github.io/redkite/
+repo_url: https://github.com/johnjoeallen/redkite
+repo_name: johnjoeallen/redkite
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: red
+      accent: red
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: red
+      accent: red
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.tracking
+    - navigation.footer
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+
+  - Getting Started:
+      - Overview: getting-started/index.md
+      - Requirements: getting-started/requirements.md
+      - Installation: getting-started/installation.md
+      - First Analysis: getting-started/first-analysis.md
+      - Spring Boot Projects: getting-started/spring-boot-projects.md
+
+  - Projects:
+      - Overview: projects/index.md
+      - Adding a Project: projects/adding-a-project.md
+      - Project Dashboard: projects/project-dashboard.md
+      - Build Validation: projects/build-validation.md
+      - Maven Arguments: projects/maven-arguments.md
+      - Environment Variables: projects/environment-variables.md
+
+  - Analysis:
+      - Overview: analysis/index.md
+      - Dependency Inventory: analysis/dependency-inventory.md
+      - Direct Dependencies: analysis/direct-dependencies.md
+      - Transitive Dependencies: analysis/transitive-dependencies.md
+      - Plugins: analysis/plugins.md
+      - Snapshots: analysis/snapshots.md
+      - Analysis History: analysis/analysis-history.md
+
+  - Recommendations:
+      - Overview: recommendations/index.md
+      - Version Updates: recommendations/version-updates.md
+      - Vulnerability Fixes: recommendations/vulnerability-fixes.md
+      - Transitive CVE Fixes: recommendations/transitive-cve-fixes.md
+      - Parent and Ancestor Updates: recommendations/parent-and-ancestor-updates.md
+      - Dependency Conflicts: recommendations/dependency-conflicts.md
+      - Duplicate Dependencies: recommendations/duplicate-dependencies.md
+      - Minimum Upgrade Policy: recommendations/minimum-upgrade-policy.md
+
+  - Applying Changes:
+      - Overview: applying-changes/index.md
+      - Apply Selected: applying-changes/apply-selected.md
+      - Validation Process: applying-changes/validation-process.md
+      - Rollback: applying-changes/rollback.md
+      - Failed POMs: applying-changes/failed-poms.md
+      - Applying Conflicts First: applying-changes/applying-conflicts-first.md
+
+  - Vulnerabilities:
+      - Overview: vulnerabilities/index.md
+      - OSV Data: vulnerabilities/osv-data.md
+      - Severity Levels: vulnerabilities/severity-levels.md
+      - CVE Ranking: vulnerabilities/cve-ranking.md
+      - Candidate Comparison: vulnerabilities/candidate-comparison.md
+      - Limitations: vulnerabilities/limitations.md
+
+  - Configuration:
+      - Overview: configuration/index.md
+      - Application Settings: configuration/application-settings.md
+      - Project Settings: configuration/project-settings.md
+      - Cache Settings: configuration/cache-settings.md
+      - Maven Settings: configuration/maven-settings.md
+      - Future config.rk: configuration/future-config-file.md
+
+  - Troubleshooting:
+      - Overview: troubleshooting/index.md
+      - Project Will Not Build: troubleshooting/project-will-not-build.md
+      - Spring Boot Will Not Start: troubleshooting/spring-boot-will-not-start.md
+      - Maven Not Found: troubleshooting/maven-not-found.md
+      - Repository Resolution: troubleshooting/repository-resolution.md
+      - Validation Failures: troubleshooting/validation-failures.md
+      - Clearing the Cache: troubleshooting/clearing-the-cache.md
+
+  - Concepts:
+      - Overview: concepts/index.md
+      - How RedKite Works: concepts/how-redkite-works.md
+      - Dependency Resolution: concepts/dependency-resolution.md
+      - Version Management: concepts/version-management.md
+      - Parent, BOM, and Ancestor: concepts/parent-bom-and-ancestor.md
+      - Validation Model: concepts/validation-model.md
+      - Local-First Design: concepts/local-first-design.md
+
+  - Reference:
+      - Overview: reference/index.md
+      - Command Line: reference/command-line.md
+      - System Properties: reference/system-properties.md
+      - Environment Variables: reference/environment-variables.md
+      - Ports and Files: reference/ports-and-files.md
+      - Database: reference/database.md
+      - Release Layout: reference/release-layout.md
+
+  - Development:
+      - Overview: development/index.md
+      - Building from Source: development/building-from-source.md
+      - Architecture: development/architecture.md
+      - Modules: development/modules.md
+      - Testing: development/testing.md
+      - Contributing: development/contributing.md
+      - Evolution: development/evolution.md
+
+  - Roadmap:
+      - Overview: roadmap/index.md
+      - Planned Features: roadmap/planned-features.md
+      - Advanced CVE Resolution: roadmap/advanced-cve-resolution.md
