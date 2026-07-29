@@ -3667,18 +3667,24 @@ public class RedKiteServerMain {
      *  source of truth shared by the banner counts and the per-card rendering, so the CVE and
      *  Clean tabs can never double-count the same card.
      *
-     *  <p>Matches {@link RemediationStatus#needsRemediation()} (the same definition
+     *  <p>Mostly matches {@link RemediationStatus#needsRemediation()} (the same definition
      *  {@link RemediationClassifier#summarize} uses for the banner's "need remediation"/"clean"
-     *  counts) plus an active convergence finding. Previously this also force-marked a transitive
-     *  dependency "clean" whenever it had no *fixable* CVE — which silently hid transitive
-     *  dependencies with a real, unfixable CVE (and plain non-CVE update recommendations) from the
-     *  Findings tab while the banner still counted them as needing remediation, producing exactly
-     *  the "banner says N, Findings shows 0" contradiction that suppression was supposed to avoid.
-     *  An unfixable CVE or plain recommendation still needs to be visible to the user — it just has
-     *  no version-selector action; the "No fix available"/"No upgrade available" reason chip is
-     *  what represents that on the card itself. */
+     *  counts) plus an active convergence finding — with one deliberate exception: a transitive
+     *  dependency whose ONLY reason is a plain, non-CVE update recommendation is still treated as
+     *  clean. {@link #transitiveRecommendedVersion} never offers a target for that case (no pin, no
+     *  conflict, no CVE — nothing forcing the move), so it isn't something RedKite actually acts
+     *  on; counting it as a finding is pure noise a user can't do anything about from this list. A
+     *  real vulnerability on a transitive dependency — fixable or not — a snapshot, or stale
+     *  metadata still counts as a finding regardless of direct/transitive; only "a newer version
+     *  happens to exist, unprompted by anything else" is suppressed. */
     private boolean isCardClean(ComponentView view) {
-        return !view.status().needsRemediation() && view.convergenceFinding() == null;
+        ScanComponent comp = view.component();
+        RemediationStatus status = view.status();
+        if (view.convergenceFinding() != null) return false;
+        if (!status.needsRemediation()) return true;
+        boolean onlyPlainRecommendation = !comp.direct() && !status.hasVulnerability()
+                && !status.isSnapshot() && !status.hasStaleMetadata();
+        return onlyPlainRecommendation;
     }
 
     private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent, Map<String, Integer> licenseRanks) {
