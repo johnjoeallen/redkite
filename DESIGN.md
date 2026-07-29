@@ -436,7 +436,7 @@ After all per-finding winners are computed, `alignFamilyVersions` aligns every p
 
 This does not reduce the number of pins generated — Phase 2 still pins one entry per conflicting artifact; it only ensures family members agree on a compatible version. A project with a very large, sprawling dependency graph can still legitimately produce a long pin list; that reflects the number of real convergence violations Maven found, not an inefficiency in the pin format itself.
 
-The pins are displayed in the UI under "Auto-fix — computed dep-management pins" with an Apply button. Clicking Apply writes all pins via `POST /api/scans/remediation/apply` and triggers a re-scan.
+The pins are displayed in the UI under "Auto-fix — computed dep-management pins" with an Apply button. Clicking Apply submits all pins as one `remediationActions` batch to `POST /api/scans/remediation/apply-batch` (same validate→apply→validate→revert-on-failure job as "Apply selected", see below) and triggers a re-scan once it succeeds. This batch is what actually rolls a multi-module project's POMs back on a broken result — the older single `POST /api/scans/remediation/apply` endpoint below writes straight to disk with no validation and must not be used for anything that needs a rollback guarantee.
 
 ### Stale Exclusion Detection
 
@@ -569,7 +569,7 @@ rk_schema_version                  ← migration gate (current: v2)
 | `POST` | `/api/scans/pom?scanId=` | Generate POM patch → `{filePath: patchedXml}` (called internally by **Apply selected** to compute patches before submitting the apply-batch job; the result is not shown to the user) |
 | `GET` | `/api/scans/pom?scanId=` | Download patched POM(s) — handler still present but no longer linked from the UI (see note below) |
 | `POST` | `/api/scans/pom/write?scanId=` | Write patched POMs to disk — handler still present but no longer linked from the UI (see note below) |
-| `POST` | `/api/scans/remediation/apply` | Apply one dep-management pin or exclusion to disk (no validation) |
+| `POST` | `/api/scans/remediation/apply` | Apply one dep-management pin or exclusion to disk (no validation, no rollback) — handler still present but no longer linked from the UI; use apply-batch for anything that needs a rollback guarantee, especially multi-module projects |
 | `POST` | `/api/scans/remediation/apply-batch` | Start bracketed validate→apply→validate job → `{"jobId":"..."}` |
 | `GET` | `/api/scans/remediation/apply-status?jobId=` | Poll apply job → `{status, phase}` or `{status:"done"}` or `{status:"failed",...}` |
 | `GET` | `/api/scans/enforcer?scanId=` | Get enforcer findings as JSON |
