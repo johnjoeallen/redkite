@@ -118,7 +118,7 @@ a { color:inherit; text-decoration:none; }
 .sev-chip.sev-snap { background:rgba(139,92,246,.18); border:1px solid rgba(139,92,246,.4); color:#c4b5fd; }
 .sev-chip.sev-stale { background:rgba(75,85,99,.18); border:1px solid rgba(75,85,99,.4); color:#9ca3af; }
 .sev-chip.sev-declared { background:rgba(20,184,166,.18); border:1px solid rgba(20,184,166,.4); color:#5eead4; }
-.sev-chip.sev-recommended { background:rgba(52,211,153,.16); border:1px solid rgba(52,211,153,.35); color:#6ee7b7; }
+.sev-chip.sev-recommended,.sev-badge.sev-recommended { background:rgba(52,211,153,.16); border:1px solid rgba(52,211,153,.35); color:#6ee7b7; }
 .sev-chip.sev-license { background:rgba(56,189,248,.16); border:1px solid rgba(56,189,248,.4); color:#7dd3fc; cursor:pointer; transition:transform .12s,box-shadow .12s; }
 .sev-chip.sev-license-none { background:rgba(251,191,36,.16); border:1px solid rgba(251,191,36,.4); color:#fde68a; cursor:pointer; transition:transform .12s,box-shadow .12s; }
 .sev-chip.sev-license:hover,.sev-chip.sev-license-none:hover { transform:translateY(-1px); }

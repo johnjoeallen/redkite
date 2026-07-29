@@ -3858,7 +3858,24 @@ public class RedKiteServerMain {
                     html.append("<span class=\"reason-chip\">").append(transitiveChip).append("</span>");
                 }
             } else if (showNoUpgradeChip) {
-                String noFixChip = status.hasVulnerability() ? "No fix available" : "No upgrade available";
+                // A newer version can genuinely exist even when RedKite isn't offering to apply
+                // it — a transitive dependency only gets an actionable recommendation for a
+                // concrete reason (a pin, a conflict, a fixable CVE; see
+                // transitiveRecommendedVersion), never merely because something newer was
+                // published. "No upgrade available" must be reserved for when that's actually
+                // true, not used as a catch-all for "not offering one."
+                String latestVersion = view.versionMetadata() != null ? view.versionMetadata().latestVersion() : null;
+                boolean newerVersionExists = latestVersion != null && !latestVersion.isBlank()
+                        && !"unknown".equalsIgnoreCase(latestVersion)
+                        && compareVersionsSemantic(latestVersion, comp.version()) > 0;
+                String noFixChip;
+                if (status.hasVulnerability()) {
+                    noFixChip = "No fix available";
+                } else if (newerVersionExists) {
+                    noFixChip = sameMajor(comp.version(), latestVersion) ? "Update available" : "Major update available";
+                } else {
+                    noFixChip = "No upgrade available";
+                }
                 html.append("<span class=\"reason-chip\">").append(noFixChip).append("</span>");
             }
             html.append("</div>");
@@ -3957,8 +3974,14 @@ public class RedKiteServerMain {
     }
 
     private String severityBadgeHtml(AdvisorySeverity severity, boolean clean) {
-        if (clean || severity == AdvisorySeverity.NONE) {
+        if (clean) {
             return "<span class=\"sev-badge sev-none\">&#10003; Clean</span>";
+        }
+        // A component with no CVE (severity NONE) can still need remediation for a non-CVE reason
+        // (a plain update recommendation, stale metadata, a declared inline version, ...) — showing
+        // "Clean" here regardless used to hide that from the badge entirely.
+        if (severity == AdvisorySeverity.NONE) {
+            return "<span class=\"sev-badge sev-recommended\">&#8593; Update</span>";
         }
         String cls = "sev-" + severity.name().toLowerCase();
         return "<span class=\"sev-badge " + cls + "\">" + escape(severity.icon()) + " " + escape(severity.label()) + "</span>";
