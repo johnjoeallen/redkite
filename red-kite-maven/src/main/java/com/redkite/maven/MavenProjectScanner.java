@@ -4,7 +4,6 @@ import com.redkite.core.domain.*;
 
 import org.w3c.dom.*;
 import javax.xml.parsers.DocumentBuilderFactory;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
@@ -557,12 +556,19 @@ public class MavenProjectScanner {
     }
 
     private PomModel parsePom(Path pom) throws Exception {
+        return parsePomXml(Files.readString(pom, StandardCharsets.UTF_8), pom);
+    }
+
+    /** Same parsing as {@link #parsePom(Path)}, but from already-in-memory XML rather than a file
+     *  on disk — {@code sourcePath} is only carried through onto the resulting {@link PomModel},
+     *  never read from. Lets a caller build a {@code PomModel} for POM content it already has (a
+     *  stored scan's source POM, a POM fetched over HTTP) without a round-trip through the
+     *  filesystem. */
+    public PomModel parsePomXml(String xml, Path sourcePath) throws Exception {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setNamespaceAware(false);
-        Document document;
-        try (InputStream in = Files.newInputStream(pom)) {
-            document = factory.newDocumentBuilder().parse(in);
-        }
+        Document document = factory.newDocumentBuilder().parse(new org.xml.sax.InputSource(new java.io.StringReader(xml)));
+        Path pom = sourcePath;
         Element project = document.getDocumentElement();
         String groupId = firstText(project, "groupId");
         String artifactId = firstText(project, "artifactId");
