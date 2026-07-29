@@ -3349,13 +3349,27 @@ public class RedKiteServerMain {
         long snapshotCount = views.stream().filter(v -> v.status().isSnapshot()).count();
         long directCount = views.stream().filter(v -> v.component().direct()).count();
         long transitiveOriginCount = views.stream().filter(v -> !v.component().direct()).count();
-        long cleanCount = views.stream().filter(this::isCardClean).count();
-        long findingsCount = views.size() - cleanCount;
+
+        // Findings/Clean/All are deduped by dependency (coordinate + version) to match the
+        // banner's unit — the same dependency can produce a card per module it's declared/resolved
+        // in (see `unique` above), but a project-wide "N need remediation" promise that leads to an
+        // empty Findings tab (because that count was per-card, not per-dependency) is worse than
+        // Findings showing fewer distinct cards than "All". A card in ANY of its modules with a
+        // finding counts the whole dependency as a finding, mirroring RemediationClassifier's own
+        // per-dependency OR-combine.
+        Map<String, Boolean> hasFindingByDependency = new LinkedHashMap<>();
+        for (ComponentView v : views) {
+            String depKey = v.component().coordinate().groupId() + ":" + v.component().coordinate().artifactId()
+                    + "@" + v.component().version();
+            hasFindingByDependency.merge(depKey, !isCardClean(v), Boolean::logicalOr);
+        }
+        long findingsCount = hasFindingByDependency.values().stream().filter(Boolean::booleanValue).count();
+        long cleanCount = hasFindingByDependency.size() - findingsCount;
 
         html.append("<div class=\"rem-toggle\">");
         html.append("<button class=\"button primary rem-toggle-btn\" type=\"button\" data-view=\"findings\" onclick=\"setRemView('findings')\">Findings <span class=\"tab-count\">").append(findingsCount).append("</span></button>");
         html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-view=\"clean\" onclick=\"setRemView('clean')\">Clean <span class=\"tab-count\">").append(cleanCount).append("</span></button>");
-        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-view=\"all\" onclick=\"setRemView('all')\">All <span class=\"tab-count\">").append(views.size()).append("</span></button>");
+        html.append("<button class=\"button rem-toggle-btn\" type=\"button\" data-view=\"all\" onclick=\"setRemView('all')\">All <span class=\"tab-count\">").append(hasFindingByDependency.size()).append("</span></button>");
         html.append("</div>");
 
         html.append("<div class=\"rem-filters\" id=\"rem-filters\">");
@@ -3651,18 +3665,20 @@ public class RedKiteServerMain {
 
     /** Whether a card is treated as "clean" for tab-filtering/counting purposes — the single
      *  source of truth shared by the banner counts and the per-card rendering, so the CVE and
-     *  Clean tabs can never double-count the same card. */
+     *  Clean tabs can never double-count the same card.
+     *
+     *  <p>Matches {@link RemediationStatus#needsRemediation()} (the same definition
+     *  {@link RemediationClassifier#summarize} uses for the banner's "need remediation"/"clean"
+     *  counts) plus an active convergence finding. Previously this also force-marked a transitive
+     *  dependency "clean" whenever it had no *fixable* CVE — which silently hid transitive
+     *  dependencies with a real, unfixable CVE (and plain non-CVE update recommendations) from the
+     *  Findings tab while the banner still counted them as needing remediation, producing exactly
+     *  the "banner says N, Findings shows 0" contradiction that suppression was supposed to avoid.
+     *  An unfixable CVE or plain recommendation still needs to be visible to the user — it just has
+     *  no version-selector action; the "No fix available"/"No upgrade available" reason chip is
+     *  what represents that on the card itself. */
     private boolean isCardClean(ComponentView view) {
-        ScanComponent comp = view.component();
-        RemediationStatus status = view.status();
-        boolean clean = !status.needsRemediation();
-        // Non-conflict transitive deps are only actionable when their CVE has a fix available —
-        // suppress upgrade-only recommendations and unfixable CVEs to avoid noise.
-        if (!comp.direct() && view.convergenceFinding() == null
-                && !hasFixableCve(view) && !status.isSnapshot()) {
-            clean = true;
-        }
-        return clean && view.convergenceFinding() == null;
+        return !view.status().needsRemediation() && view.convergenceFinding() == null;
     }
 
     private String renderComponentCard(ComponentView view, String module, boolean hasChildren, Map<String, List<VulnerabilityFinding>> vulnsByKey, Set<String> pinnedCoords, String rootPomContent, Map<String, Integer> licenseRanks) {
@@ -3714,6 +3730,11 @@ public class RedKiteServerMain {
         // dependencies than the chip's own displayed count.
         String licensesJson = view.licenses().isEmpty() ? "[]"
                 : "[" + jsonStr(LicenseNormalizer.canonicalize(representativeLicense(view.licenses(), licenseRanks))) + "]";
+        // Identifies the underlying dependency (not the module occurrence) — the same dependency
+        // can produce a card per module it's declared/resolved in, but the Findings/Clean/All tab
+        // counts dedupe by this key (see updateRemChipCounts in scripts.js) so they stay consistent
+        // with the banner's per-dependency counts instead of counting one card per module.
+        String depKey = coordStr + "@" + comp.version();
         html.append("<div class=\"rem-card").append(dataClean ? " clean" : "").append("\" data-clean=\"").append(dataClean)
                 .append("\" data-module=\"").append(escape(module))
                 .append("\" data-kind=\"").append(kind)
@@ -3724,6 +3745,7 @@ public class RedKiteServerMain {
                 .append("\" data-upgradeonly=\"").append(upgradeOnly)
                 .append("\" data-hasconflict=\"").append(actionableConvergence)
                 .append("\" data-coord=\"").append(escape(coordStr))
+                .append("\" data-dep-key=\"").append(escape(depKey))
                 .append("\" data-pinned=\"").append(pinned)
                 .append("\" data-pinned-initial=\"").append(pinned)
                 .append("\" data-licenses='").append(licensesJson).append("'")
