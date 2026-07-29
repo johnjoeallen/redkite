@@ -58,5 +58,26 @@
       <artifactId>spring-security-crypto</artifactId>
       <version>6.5.5</version>
     </dependency>
+    <!-- Independently-versioned BOM family members: the real Jackson 2.2x BOM manages
+         jackson-core/jackson-databind on one patch-versioned line and jackson-annotations on its
+         own, unnumbered-patch line (2.22.1's BOM manages jackson-annotations at "2.22", not
+         "2.22.1" — that coordinate does not exist on Maven Central). No dependencyManagement/BOM
+         import here on purpose: this reproduces the family-alignment fix without needing a live
+         BOM-POM fetch during the reactor build. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+      <version>2.21.5</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.21.5</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+      <version>2.21</version>
+    </dependency>
   </dependencies>
 </project>
