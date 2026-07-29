@@ -7,6 +7,7 @@ import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.StringReader;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -46,6 +47,16 @@ public final class ManagedVersionResolver {
     public record ManagedVersion(String version, String controllerCoordinate, String propertyName, boolean bomImport) {
     }
 
+    /** A coordinate this resolution needed but couldn't confirm — either the fetch came back
+     *  confirmed-absent, or every reachable repository errored trying to serve it. Lets a caller
+     *  distinguish "this branch legitimately has nothing more to contribute" from "this resolution
+     *  is incomplete and its output shouldn't be trusted at face value." */
+    public record UnresolvedReference(String groupId, String artifactId, String version, String detail) {
+    }
+
+    public record ResolutionOutcome(Map<String, ManagedVersion> managed, List<UnresolvedReference> unresolved) {
+    }
+
     private record RawManagedEntry(String groupId, String artifactId, String rawVersion, String propertyName, boolean bomImport) {
     }
 
@@ -66,56 +77,95 @@ public final class ManagedVersionResolver {
      *  the scanner only consults this for components its own local pass left as
      *  {@code VersionSource.UNKNOWN}. */
     public Map<String, ManagedVersion> resolve(PomModel module) {
+        return resolveWithDiagnostics(module).managed();
+    }
+
+    /** Same resolution as {@link #resolve(PomModel)}, but also reports every coordinate the walk
+     *  needed and couldn't confirm — see {@link UnresolvedReference}. */
+    public ResolutionOutcome resolveWithDiagnostics(PomModel module) {
         Map<String, String> properties = new LinkedHashMap<>(module.properties());
         Map<String, ManagedVersion> managed = new LinkedHashMap<>();
+        List<UnresolvedReference> unresolved = new ArrayList<>();
         Set<String> visited = new LinkedHashSet<>();
         ExternalPom asExternal = new ExternalPom(module.parentGroupId(), module.parentArtifactId(), module.parentVersion(),
                 Map.of(), toRawEntries(module.dependencyManagement()));
-        contribute(asExternal, properties, managed, visited, 0, null, false);
-        return managed;
+        contribute(asExternal, properties, managed, unresolved, visited, 0, null, false);
+        return new ResolutionOutcome(managed, unresolved);
     }
 
     private void contribute(ExternalPom pom, Map<String, String> properties, Map<String, ManagedVersion> managed,
-                             Set<String> visited, int depth, String selfCoordinate, boolean viaBomImport) {
+                             List<UnresolvedReference> unresolved, Set<String> visited, int depth,
+                             String selfCoordinate, boolean viaBomImport) {
         if (pom == null || depth > MAX_DEPTH) return;
         for (Map.Entry<String, String> e : pom.properties().entrySet()) {
             properties.putIfAbsent(e.getKey(), e.getValue());
         }
         for (RawManagedEntry dep : pom.managedDependencies()) {
-            String resolvedVersion = dep.propertyName() == null ? dep.rawVersion() : properties.get(dep.propertyName());
+            // rawVersion already holds the raw "${...}" text when the entry is property-versioned
+            // (see parseExternalPom/toRawEntries) — resolvePropertyChain handles both a literal and
+            // a (possibly chained) property reference uniformly.
+            String resolvedVersion = resolvePropertyChain(dep.rawVersion(), properties);
             if (resolvedVersion == null) continue; // undefined anywhere reachable — nothing to contribute
             if (dep.bomImport()) {
-                recurse(dep.groupId(), dep.artifactId(), resolvedVersion, properties, managed, visited, depth + 1, true);
+                recurse(dep.groupId(), dep.artifactId(), resolvedVersion, properties, managed, unresolved, visited, depth + 1, true);
             } else {
                 String key = dep.groupId() + ":" + dep.artifactId();
                 managed.putIfAbsent(key, new ManagedVersion(resolvedVersion, selfCoordinate, dep.propertyName(), viaBomImport));
             }
         }
         if (pom.parentGroupId() != null && pom.parentArtifactId() != null && pom.parentVersion() != null) {
-            recurse(pom.parentGroupId(), pom.parentArtifactId(), pom.parentVersion(), properties, managed, visited, depth + 1, false);
+            recurse(pom.parentGroupId(), pom.parentArtifactId(), pom.parentVersion(), properties, managed, unresolved, visited, depth + 1, false);
         }
+    }
+
+    /** A property's own value can itself be another {@code ${...}} reference (real-world example:
+     *  the Jackson BOM's {@code jackson.version.core} is defined as {@code ${jackson.version}}) —
+     *  follow the chain to a literal, guarding against a self-referential/cyclic definition and
+     *  bounding the walk so a pathological POM can't loop forever. Returns {@code null} if the
+     *  chain never bottoms out in a literal (undefined property, or a cycle). */
+    private static String resolvePropertyChain(String raw, Map<String, String> properties) {
+        String current = raw;
+        Set<String> seen = new LinkedHashSet<>();
+        for (int i = 0; i < MAX_DEPTH; i++) {
+            if (current == null) return null;
+            if (!(current.startsWith("${") && current.endsWith("}"))) return current;
+            String propertyName = current.substring(2, current.length() - 1);
+            if (!seen.add(propertyName)) return null; // cyclic property reference
+            current = properties.get(propertyName);
+        }
+        return null;
     }
 
     private void recurse(String groupId, String artifactId, String version, Map<String, String> properties,
-                          Map<String, ManagedVersion> managed, Set<String> visited, int depth, boolean viaBomImport) {
+                          Map<String, ManagedVersion> managed, List<UnresolvedReference> unresolved,
+                          Set<String> visited, int depth, boolean viaBomImport) {
         String coordKey = groupId + ":" + artifactId + ":" + version;
         if (!visited.add(coordKey)) return; // cycle guard
-        ExternalPom fetched = cache.computeIfAbsent(coordKey, k -> fetchAndParse(groupId, artifactId, version)).orElse(null);
-        contribute(fetched, properties, managed, visited, depth, coordKey, viaBomImport);
+        ExternalPom fetched = cache.computeIfAbsent(coordKey, k -> fetchAndParse(groupId, artifactId, version, unresolved)).orElse(null);
+        contribute(fetched, properties, managed, unresolved, visited, depth, coordKey, viaBomImport);
     }
 
-    private Optional<ExternalPom> fetchAndParse(String groupId, String artifactId, String version) {
-        Optional<String> xml = source.fetchPom(groupId, artifactId, version);
-        if (xml.isEmpty()) {
+    private Optional<ExternalPom> fetchAndParse(String groupId, String artifactId, String version,
+                                                 List<UnresolvedReference> unresolved) {
+        PomFetchResult result = source.fetchPom(groupId, artifactId, version);
+        if (result instanceof PomFetchResult.Found found) {
+            try {
+                return Optional.of(parseExternalPom(found.xml()));
+            } catch (Exception e) {
+                LOGGER.warning(() -> "Failed to parse fetched POM for " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
+                unresolved.add(new UnresolvedReference(groupId, artifactId, version, "unparsable POM: " + e.getMessage()));
+                return Optional.empty();
+            }
+        }
+        if (result instanceof PomFetchResult.NotFound) {
             LOGGER.fine(() -> "Could not fetch POM for " + groupId + ":" + artifactId + ":" + version + " — provenance stops here on this branch");
+            unresolved.add(new UnresolvedReference(groupId, artifactId, version, "not found"));
             return Optional.empty();
         }
-        try {
-            return Optional.of(parseExternalPom(xml.get()));
-        } catch (Exception e) {
-            LOGGER.warning(() -> "Failed to parse fetched POM for " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
-            return Optional.empty();
-        }
+        PomFetchResult.FetchError error = (PomFetchResult.FetchError) result;
+        LOGGER.fine(() -> "Could not fetch POM for " + groupId + ":" + artifactId + ":" + version + " — " + error.repositoryUrl() + ": " + error.message());
+        unresolved.add(new UnresolvedReference(groupId, artifactId, version, error.repositoryUrl() + ": " + error.message()));
+        return Optional.empty();
     }
 
     private static List<RawManagedEntry> toRawEntries(List<PomModel.PomDependency> deps) {

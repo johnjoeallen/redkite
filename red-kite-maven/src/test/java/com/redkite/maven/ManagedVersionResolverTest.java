@@ -5,30 +5,12 @@ import com.redkite.core.domain.VersionSource;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ManagedVersionResolverTest {
-
-    /** In-memory fake — no filesystem or network, so the recursion/precedence logic itself is
-     *  what's under test, not PomFetcher's real fetching. */
-    private static class FakePomSource implements PomSource {
-        private final Map<String, String> poms = new LinkedHashMap<>();
-
-        FakePomSource with(String groupId, String artifactId, String version, String xml) {
-            poms.put(groupId + ":" + artifactId + ":" + version, xml);
-            return this;
-        }
-
-        @Override
-        public Optional<String> fetchPom(String groupId, String artifactId, String version) {
-            return Optional.ofNullable(poms.get(groupId + ":" + artifactId + ":" + version));
-        }
-    }
 
     private static PomModel module(String parentGroupId, String parentArtifactId, String parentVersion,
                                     Map<String, String> properties, List<PomModel.PomDependency> dependencyManagement) {
@@ -144,5 +126,79 @@ class ManagedVersionResolverTest {
         Map<String, ManagedVersionResolver.ManagedVersion> result = resolver.resolve(mod);
 
         assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void propertyThatIsItselfAPropertyReferenceIsChased() {
+        // Shaped exactly like the real Jackson 2.22.1 BOM: jackson.version.core is defined as
+        // "${jackson.version}", not a literal — a naive single lookup would resolve jackson-core's
+        // managed version to the literal string "${jackson.version}" instead of "2.22.1".
+        String bomXml = "<project><properties>"
+                + "<jackson.version>2.22.1</jackson.version>"
+                + "<jackson.version.core>${jackson.version}</jackson.version.core>"
+                + "</properties><dependencyManagement><dependencies>"
+                + "<dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-core</artifactId>"
+                + "<version>${jackson.version.core}</version></dependency>"
+                + "</dependencies></dependencyManagement></project>";
+        FakePomSource source = new FakePomSource().with("com.fasterxml.jackson", "jackson-bom", "2.22.1", bomXml);
+        ManagedVersionResolver resolver = new ManagedVersionResolver(source);
+
+        PomModel mod = module(null, null, null, Map.of(),
+                List.of(bomImport("com.fasterxml.jackson", "jackson-bom", "2.22.1")));
+        Map<String, ManagedVersionResolver.ManagedVersion> result = resolver.resolve(mod);
+
+        assertEquals("2.22.1", result.get("com.fasterxml.jackson.core:jackson-core").version());
+    }
+
+    @Test
+    void cyclicPropertyReferenceResolvesToNothingRatherThanLooping() {
+        String bomXml = "<project><properties>"
+                + "<a.version>${b.version}</a.version>"
+                + "<b.version>${a.version}</b.version>"
+                + "</properties><dependencyManagement><dependencies>"
+                + "<dependency><groupId>org.example</groupId><artifactId>lib</artifactId>"
+                + "<version>${a.version}</version></dependency>"
+                + "</dependencies></dependencyManagement></project>";
+        FakePomSource source = new FakePomSource().with("org.example", "some-bom", "1.0.0", bomXml);
+        ManagedVersionResolver resolver = new ManagedVersionResolver(source);
+
+        PomModel mod = module(null, null, null, Map.of(),
+                List.of(bomImport("org.example", "some-bom", "1.0.0")));
+        Map<String, ManagedVersionResolver.ManagedVersion> result = resolver.resolve(mod);
+
+        assertNull(result.get("org.example:lib"));
+    }
+
+    @Test
+    void confirmedAbsentBomIsReportedAsUnresolvedNotSilentlySkipped() {
+        FakePomSource source = new FakePomSource(); // nothing registered — a clean "not found"
+        ManagedVersionResolver resolver = new ManagedVersionResolver(source);
+
+        PomModel mod = module(null, null, null, Map.of(),
+                List.of(bomImport("org.example", "missing-bom", "1.0.0")));
+        ManagedVersionResolver.ResolutionOutcome outcome = resolver.resolveWithDiagnostics(mod);
+
+        assertTrue(outcome.managed().isEmpty());
+        assertEquals(1, outcome.unresolved().size());
+        ManagedVersionResolver.UnresolvedReference ref = outcome.unresolved().get(0);
+        assertEquals("org.example", ref.groupId());
+        assertEquals("missing-bom", ref.artifactId());
+        assertEquals("not found", ref.detail());
+    }
+
+    @Test
+    void transportErrorFetchingABomIsReportedWithRepositoryDetail() {
+        FakePomSource source = new FakePomSource()
+                .withError("org.example", "flaky-bom", "1.0.0", "https://repo.example/maven2", "connection refused");
+        ManagedVersionResolver resolver = new ManagedVersionResolver(source);
+
+        PomModel mod = module(null, null, null, Map.of(),
+                List.of(bomImport("org.example", "flaky-bom", "1.0.0")));
+        ManagedVersionResolver.ResolutionOutcome outcome = resolver.resolveWithDiagnostics(mod);
+
+        assertEquals(1, outcome.unresolved().size());
+        String detail = outcome.unresolved().get(0).detail();
+        assertTrue(detail.contains("https://repo.example/maven2"), detail);
+        assertTrue(detail.contains("connection refused"), detail);
     }
 }

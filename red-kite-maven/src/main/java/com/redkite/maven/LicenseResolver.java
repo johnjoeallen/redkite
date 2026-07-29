@@ -61,13 +61,13 @@ public final class LicenseResolver {
     }
 
     private Optional<ParsedPom> fetchAndParse(String groupId, String artifactId, String version) {
-        Optional<String> xml = source.fetchPom(groupId, artifactId, version);
-        if (xml.isEmpty()) {
+        PomFetchResult result = source.fetchPom(groupId, artifactId, version);
+        if (!(result instanceof PomFetchResult.Found found)) {
             LOGGER.fine(() -> "Could not fetch POM for " + groupId + ":" + artifactId + ":" + version + " — license lookup stops here on this branch");
             return Optional.empty();
         }
         try {
-            return Optional.of(parse(xml.get()));
+            return Optional.of(parse(found.xml()));
         } catch (Exception e) {
             LOGGER.warning(() -> "Failed to parse fetched POM for " + groupId + ":" + artifactId + ":" + version + ": " + e.getMessage());
             return Optional.empty();

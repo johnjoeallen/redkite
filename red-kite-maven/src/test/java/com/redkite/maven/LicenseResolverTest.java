@@ -2,30 +2,11 @@ package com.redkite.maven;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class LicenseResolverTest {
-
-    /** In-memory fake — no filesystem or network, so the resolution/walk logic itself is what's
-     *  under test, not PomFetcher's real fetching. */
-    private static class FakePomSource implements PomSource {
-        private final Map<String, String> poms = new LinkedHashMap<>();
-
-        FakePomSource with(String groupId, String artifactId, String version, String xml) {
-            poms.put(groupId + ":" + artifactId + ":" + version, xml);
-            return this;
-        }
-
-        @Override
-        public Optional<String> fetchPom(String groupId, String artifactId, String version) {
-            return Optional.ofNullable(poms.get(groupId + ":" + artifactId + ":" + version));
-        }
-    }
 
     private static String pomWithLicense(String licenseName) {
         return "<project><licenses><license><name>" + licenseName + "</name></license></licenses></project>";

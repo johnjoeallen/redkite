@@ -1,7 +1,5 @@
 package com.redkite.maven;
 
-import java.util.Optional;
-
 /**
  * Supplies the raw POM XML for a given Maven coordinate — the seam between
  * {@link ManagedVersionResolver} (the recursive parent/BOM-import walking logic) and however that
@@ -10,9 +8,10 @@ import java.util.Optional;
  * tested without any real filesystem or HTTP access.
  */
 public interface PomSource {
-    /** Returns the raw POM XML for {@code groupId:artifactId:version}, or empty if it couldn't be
-     *  found anywhere this source knows to look. Never throws for a not-found artifact — a gap in
-     *  provenance data is expected (private/unreachable repos, network issues) and must not abort
-     *  the rest of the resolution. */
-    Optional<String> fetchPom(String groupId, String artifactId, String version);
+    /** Returns the outcome of trying to fetch {@code groupId:artifactId:version} — see
+     *  {@link PomFetchResult}. Never throws: a gap in provenance data (private/unreachable repos,
+     *  network issues) is expected and must not abort the rest of the resolution, but callers that
+     *  need to know WHY a coordinate resolved to nothing (confirmed absent vs. an inconclusive
+     *  error) can inspect the returned variant instead of losing that distinction. */
+    PomFetchResult fetchPom(String groupId, String artifactId, String version);
 }

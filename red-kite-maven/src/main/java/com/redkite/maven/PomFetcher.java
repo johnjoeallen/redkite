@@ -10,7 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
 import java.util.logging.Logger;
 
 /**
@@ -46,40 +45,50 @@ public class PomFetcher implements PomSource {
     }
 
     @Override
-    public Optional<String> fetchPom(String groupId, String artifactId, String version) {
-        if (groupId == null || artifactId == null || version == null) return Optional.empty();
+    public PomFetchResult fetchPom(String groupId, String artifactId, String version) {
+        if (groupId == null || artifactId == null || version == null) return new PomFetchResult.NotFound();
         String relativePath = relativePomPath(groupId, artifactId, version);
 
         Path local = localRepository.resolve(relativePath);
         if (Files.isRegularFile(local)) {
             try {
                 LOGGER.fine(() -> "Local Maven repo cache hit for " + groupId + ":" + artifactId + ":" + version);
-                return Optional.of(Files.readString(local, StandardCharsets.UTF_8));
+                return new PomFetchResult.Found(Files.readString(local, StandardCharsets.UTF_8));
             } catch (IOException e) {
                 LOGGER.warning(() -> "Failed to read cached POM at " + local + ": " + e.getMessage());
             }
         }
 
+        // A confirmed absence from any one repo outranks an inconclusive transport error from
+        // another — an optional/snapshot mirror being unreachable must never masquerade as "the"
+        // reason the artifact couldn't be resolved when a different, authoritative repo already
+        // gave a clean 404 for it.
+        boolean anyNotFound = false;
+        PomFetchResult.FetchError lastError = null;
         for (MavenSettingsReader.RepoConfig repo : repoConfigs) {
-            Optional<String> result = fetchFromRepo(repo, relativePath, groupId, artifactId, version);
-            if (result.isPresent()) return result;
+            PomFetchResult result = fetchFromRepo(repo, relativePath, groupId, artifactId, version);
+            if (result instanceof PomFetchResult.Found) return result;
+            if (result instanceof PomFetchResult.NotFound) anyNotFound = true;
+            if (result instanceof PomFetchResult.FetchError fe) lastError = fe;
         }
-        return Optional.empty();
+        if (anyNotFound || lastError == null) return new PomFetchResult.NotFound();
+        return lastError;
     }
 
-    private Optional<String> fetchFromRepo(MavenSettingsReader.RepoConfig repo, String relativePath,
-                                            String groupId, String artifactId, String version) {
+    private PomFetchResult fetchFromRepo(MavenSettingsReader.RepoConfig repo, String relativePath,
+                                          String groupId, String artifactId, String version) {
         String base = repo.url().endsWith("/") ? repo.url().substring(0, repo.url().length() - 1) : repo.url();
         if (base.startsWith("file:")) {
             try {
                 Path path = Path.of(URI.create(base)).resolve(relativePath);
                 if (Files.isRegularFile(path)) {
-                    return Optional.of(Files.readString(path, StandardCharsets.UTF_8));
+                    return new PomFetchResult.Found(Files.readString(path, StandardCharsets.UTF_8));
                 }
+                return new PomFetchResult.NotFound();
             } catch (Exception e) {
                 LOGGER.fine(() -> "Failed to read POM from file repo " + base + ": " + e.getMessage());
+                return new PomFetchResult.FetchError(base, e.getMessage());
             }
-            return Optional.empty();
         }
 
         String url = base + "/" + relativePath;
@@ -89,14 +98,18 @@ public class PomFetcher implements PomSource {
                 response = send(url, repo);
             }
             if (response.statusCode() == 200) {
-                return Optional.of(response.body());
+                return new PomFetchResult.Found(response.body());
+            }
+            if (response.statusCode() == 404) {
+                return new PomFetchResult.NotFound();
             }
             int status = response.statusCode();
             LOGGER.fine(() -> "POM fetch " + url + " => HTTP " + status);
+            return new PomFetchResult.FetchError(base, "HTTP " + status);
         } catch (Exception e) {
             LOGGER.fine(() -> "POM fetch failed for " + groupId + ":" + artifactId + ":" + version + " at " + url + ": " + e.getMessage());
+            return new PomFetchResult.FetchError(base, e.getMessage());
         }
-        return Optional.empty();
     }
 
     private HttpResponse<String> send(String url, MavenSettingsReader.RepoConfig credentials) throws Exception {
