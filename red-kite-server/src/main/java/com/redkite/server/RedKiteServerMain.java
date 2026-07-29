@@ -3883,11 +3883,16 @@ public class RedKiteServerMain {
 
         // Show version selector for: direct deps with metadata or conflict, transitive conflict deps,
         // and transitive deps with a fixable CVE (upgrade, downgrade, or best-effort — hasFixableCve
-        // covers all three) or a plain upgrade recommendation — in every case there's a concrete
-        // target version to apply.
+        // covers all three) or a plain upgrade recommendation that transitiveRecommendedVersion
+        // actually offers a target for (transitiveHasTarget) — in every case there's a concrete
+        // target version to apply. isUpgradeRecommendedOnly(status) alone isn't enough: it's true
+        // whenever Pass 4 created ANY plain recommendation, including for a transitive dependency
+        // with no concrete reason to move (no pin, no conflict, no CVE) — transitiveRecommendedVersion
+        // deliberately withholds a target for exactly that case, so a selector gated on
+        // isUpgradeRecommendedOnly alone would render with nothing to select but "No change."
         boolean showVersionSelector = view.convergenceFinding() != null
                 || (comp.direct() && view.versionMetadata() != null)
-                || (!comp.direct() && (hasFixableCve || isUpgradeRecommendedOnly(status))
+                || (!comp.direct() && (hasFixableCve || (isUpgradeRecommendedOnly(status) && transitiveHasTarget))
                     && view.versionMetadata() != null);
         // A pinned component that's since become fully clean (e.g. already at the version it was
         // pinned to, with nothing left to recommend) would otherwise lose its version selector —
