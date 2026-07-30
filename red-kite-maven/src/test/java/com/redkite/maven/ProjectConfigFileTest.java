@@ -14,58 +14,90 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProjectConfigFileTest {
 
     @Test
-    void parsesAllFieldsNestedUnderMaven() {
+    void parsesAllFieldsNestedUnderRedkiteMaven() {
         String yaml = """
-                maven:
-                  mode: verify
-                  profile: dev
-                  args:
-                    -Dfoo=bar
-                  env:
-                    SPRING_PROFILES_ACTIVE: dev
-                    DB_HOST: localhost
-                  spring:
-                    profiles: dev,local
+                redkite:
+                  maven:
+                    mode: verify
+                    profile: redkite-build
+                    args:
+                      - "--batch-mode"
+                      - "--no-transfer-progress"
+                      - "-Dfoo=bar"
+                    env:
+                      DB_HOST: localhost
+                      DB_PASS: pw
+                    spring:
+                      profiles: redkite-local
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
 
-        assertEquals("-Dfoo=bar", config.args());
-        assertEquals("dev", config.profile());
+        assertEquals(List.of("--batch-mode", "--no-transfer-progress", "-Dfoo=bar"), config.args());
+        assertEquals("redkite-build", config.profile());
         assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
-        assertEquals(Map.of("SPRING_PROFILES_ACTIVE", "dev", "DB_HOST", "localhost"), config.env());
-        assertEquals("dev,local", config.springProfiles());
+        assertEquals(Map.of("DB_HOST", "localhost", "DB_PASS", "pw"), config.env());
+        assertEquals("redkite-local", config.springProfiles());
     }
 
     @Test
-    void argsAlsoAcceptsAnInlineValue() {
-        // Real YAML: "args: -Dfoo=bar" (inline) and "args:\n  -Dfoo=bar" (continuation) mean
-        // the same thing — both must work.
+    void argsAsListPreservesAnArgumentContainingASpace() {
+        // The whole reason the list form exists: a single space-separated scalar could never
+        // express an argument whose own value legitimately contains a space.
         String yaml = """
-                maven:
-                  args: -Dfoo=bar -Dbaz=qux
+                redkite:
+                  maven:
+                    args:
+                      - "-Dmessage=hello world"
+                      - "-Dfoo=bar"
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
-        assertEquals("-Dfoo=bar -Dbaz=qux", config.args());
+        assertEquals(List.of("-Dmessage=hello world", "-Dfoo=bar"), config.args());
+    }
+
+    @Test
+    void argsAlsoAcceptsAWhitespaceSeparatedScalarString() {
+        String yaml = """
+                redkite:
+                  maven:
+                    args: -Dfoo=bar -Dbaz=qux
+                """;
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertEquals(List.of("-Dfoo=bar", "-Dbaz=qux"), config.args());
+    }
+
+    @Test
+    void argsAlsoAcceptsAScalarContinuationLine() {
+        // Real YAML: "args: -Dfoo=bar" (inline) and "args:\n  -Dfoo=bar" (continuation) mean the
+        // same thing, since a bare "-Dfoo=bar" has no space after the leading "-" and so never
+        // triggers YAML's block-sequence indicator.
+        String yaml = """
+                redkite:
+                  maven:
+                    args:
+                      -Dfoo=bar
+                """;
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertEquals(List.of("-Dfoo=bar"), config.args());
     }
 
     @Test
     void modeDefaultsToRun() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("maven:\n  profile: dev\n");
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    profile: dev\n");
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
     @Test
     void modeIsCaseInsensitiveAndCoversAllThreeValues() {
-        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("maven:\n  mode: run\n").mode());
-        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("maven:\n  mode: RUN\n").mode());
-        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("maven:\n  mode: verify\n").mode());
-        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("maven:\n  mode: Verify\n").mode());
-        assertEquals(ValidationRunner.Mode.TEST, ProjectConfigFile.parse("maven:\n  mode: test\n").mode());
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("redkite:\n  maven:\n    mode: run\n").mode());
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("redkite:\n  maven:\n    mode: RUN\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("redkite:\n  maven:\n    mode: verify\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("redkite:\n  maven:\n    mode: Verify\n").mode());
+        assertEquals(ValidationRunner.Mode.TEST, ProjectConfigFile.parse("redkite:\n  maven:\n    mode: test\n").mode());
     }
 
     @Test
     void unrecognizedModeDefaultsToRun() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("maven:\n  mode: nonsense\n");
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: nonsense\n");
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
@@ -73,9 +105,10 @@ class ProjectConfigFileTest {
     void blankLinesAndCommentsAreIgnored() {
         String yaml = """
                 # a comment
-                maven:
-                  # another comment
-                  profile: dev
+                redkite:
+                  maven:
+                    # another comment
+                    profile: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals("dev", config.profile());
@@ -84,21 +117,21 @@ class ProjectConfigFileTest {
     @Test
     void quotedValuesAreUnwrapped() {
         String yaml = """
-                maven:
-                  args: "-Dfoo=bar -Dbaz=qux"
-                  profile: 'dev'
+                redkite:
+                  maven:
+                    profile: 'dev'
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
-        assertEquals("-Dfoo=bar -Dbaz=qux", config.args());
         assertEquals("dev", config.profile());
     }
 
     @Test
     void envValueContainingAColonIsKeptIntact() {
         String yaml = """
-                maven:
-                  env:
-                    DB_URL: jdbc:postgresql://localhost:5432/db
+                redkite:
+                  maven:
+                    env:
+                      DB_URL: jdbc:postgresql://localhost:5432/db
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals("jdbc:postgresql://localhost:5432/db", config.env().get("DB_URL"));
@@ -107,11 +140,12 @@ class ProjectConfigFileTest {
     @Test
     void springSectionDoesNotLeakIntoEnv() {
         String yaml = """
-                maven:
-                  env:
-                    DB_HOST: localhost
-                  spring:
-                    profiles: dev
+                redkite:
+                  maven:
+                    env:
+                      DB_HOST: localhost
+                    spring:
+                      profiles: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals(Map.of("DB_HOST", "localhost"), config.env());
@@ -119,10 +153,9 @@ class ProjectConfigFileTest {
     }
 
     @Test
-    void fieldsOutsideTheMavenKeyAreIgnored() {
-        // Everything lives under "maven:" now — a bare top-level "profile:" (the old flat shape)
-        // must not be picked up.
-        String yaml = "profile: dev\n";
+    void fieldsOutsideRedkiteMavenAreIgnored() {
+        // A bare top-level "maven:" (missing the "redkite:" wrapper) must not be picked up.
+        String yaml = "maven:\n  profile: dev\n";
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertNull(config.profile());
     }
@@ -130,9 +163,10 @@ class ProjectConfigFileTest {
     @Test
     void unrecognizedKeysAreIgnoredNotFatal() {
         String yaml = """
-                maven:
-                  somethingFromTheFuture: whatever
-                  profile: dev
+                redkite:
+                  maven:
+                    somethingFromTheFuture: whatever
+                    profile: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals("dev", config.profile());
@@ -141,7 +175,7 @@ class ProjectConfigFileTest {
     @Test
     void emptyContentProducesEmptyConfig() {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("");
-        assertNull(config.args());
+        assertTrue(config.args().isEmpty());
         assertNull(config.profile());
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
         assertTrue(config.env().isEmpty());
@@ -155,26 +189,61 @@ class ProjectConfigFileTest {
     }
 
     @Test
+    void ensureDefaultExistsCreatesACommentedOutTemplate(@TempDir Path tempDir) throws IOException {
+        ProjectConfigFile.ensureDefaultExists(tempDir);
+
+        Path configPath = tempDir.resolve(ProjectConfigFile.RELATIVE_PATH);
+        assertTrue(Files.exists(configPath));
+        // Fully commented out — its mere presence must not change validation behavior.
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
+        assertEquals(ProjectConfigFile.ProjectConfig.EMPTY, config);
+    }
+
+    @Test
+    void ensureDefaultExistsNeverOverwritesAnExistingFile(@TempDir Path tempDir) throws IOException {
+        Path configDir = tempDir.resolve(".redkite");
+        Files.createDirectories(configDir);
+        Files.writeString(configDir.resolve("config.yml"), "redkite:\n  maven:\n    profile: keep-me\n");
+
+        ProjectConfigFile.ensureDefaultExists(tempDir);
+
+        assertEquals("keep-me", ProjectConfigFile.load(tempDir).profile());
+    }
+
+    @Test
+    void ensureDefaultExistsIsANoOpOnAnEmptyExistingFile(@TempDir Path tempDir) throws IOException {
+        // A project that deliberately left the file empty must not have it silently replaced.
+        Path configDir = tempDir.resolve(".redkite");
+        Files.createDirectories(configDir);
+        Path configPath = configDir.resolve("config.yml");
+        Files.writeString(configPath, "");
+
+        ProjectConfigFile.ensureDefaultExists(tempDir);
+
+        assertEquals("", Files.readString(configPath));
+    }
+
+    @Test
     void loadsRealFileFromDisk(@TempDir Path tempDir) throws IOException {
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("config.yml"), "maven:\n  profile: ci\n");
+        Files.writeString(configDir.resolve("config.yml"), "redkite:\n  maven:\n    profile: ci\n");
 
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
         assertEquals("ci", config.profile());
     }
 
     @Test
-    void toBuildArgsExcludesSpringProfiles() {
+    void toBuildArgsAppendsProfileFlagAfterArgs() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                "-Dfoo=bar", "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                "-Dfoo=bar", "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -184,9 +253,9 @@ class ProjectConfigFileTest {
     }
 
     @Test
-    void toBuildArgsSkipsBlankFields() {
+    void toBuildArgsSkipsBlankProfile() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                null, "", ValidationRunner.Mode.RUN, Map.of(), null);
+                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null);
         assertEquals(List.of(), config.toBuildArgs());
     }
 
@@ -194,10 +263,11 @@ class ProjectConfigFileTest {
     void indentWidthIsNotHardcoded() {
         // 4-space indent throughout, instead of 2 — must still parse correctly.
         String yaml = """
-                maven:
-                    mode: test
-                    env:
-                        DB_HOST: localhost
+                redkite:
+                    maven:
+                        mode: test
+                        env:
+                            DB_HOST: localhost
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals(ValidationRunner.Mode.TEST, config.mode());

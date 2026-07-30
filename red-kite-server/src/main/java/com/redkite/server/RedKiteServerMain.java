@@ -524,8 +524,8 @@ public class RedKiteServerMain {
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">File</span>")
                     .append("<code class=\"proj-meta-val\">").append(escape(configPath.toString())).append("</code></div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Maven arguments</span>")
-                    .append(config.args() != null && !config.args().isBlank()
-                            ? "<code class=\"proj-meta-val\">" + escape(config.args()) + "</code>"
+                    .append(!config.args().isEmpty()
+                            ? "<code class=\"proj-meta-val\">" + escape(String.join(" ", config.args())) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Profile</span>")
@@ -662,6 +662,7 @@ public class RedKiteServerMain {
         new Thread(() -> {
             try {
                 store.reconfigureForProject(projectRoot);
+                com.redkite.maven.ProjectConfigFile.ensureDefaultExists(projectRoot);
 
                 // Phase 0: dependency scan
                 int[] scanMods = {0}, scanDone = {0};

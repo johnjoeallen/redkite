@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,26 +26,36 @@ import java.util.logging.Logger;
  * a missing section, an unexpected shape, or a non-string scalar rather than throwing, since a
  * malformed or partially-unfamiliar config file should degrade gracefully, not block validation.
  *
- * <p>Everything lives under one top-level {@code maven:} key. {@code args}/{@code profile}/
- * {@code env} apply to every validation RedKite runs for the project — the plain build check, and,
- * for a Spring Boot project in {@code mode: run}, the {@code spring-boot:run} startup check too.
- * {@code spring.profiles} applies only to the startup check, since it's meaningless outside
- * {@code spring-boot:run} — kept in its own section to make that scope obvious. {@code mode} picks
- * the Maven lifecycle phase (and whether a startup check ever runs at all) — see
- * {@link ValidationRunner.Mode}.
+ * <p>Everything lives under {@code redkite.maven} — nested under a {@code redkite:} root rather
+ * than {@code maven:} directly, leaving room for future, non-Maven config sections alongside it.
+ * {@code args}/{@code profile}/{@code env} apply to every validation RedKite runs for the project —
+ * the plain build check, and, for a Spring Boot project in {@code mode: run}, the
+ * {@code spring-boot:run} startup check too. {@code spring.profiles} applies only to the startup
+ * check, since it's meaningless outside {@code spring-boot:run} — kept in its own section to make
+ * that scope obvious. {@code mode} picks the Maven lifecycle phase (and whether a startup check
+ * ever runs at all) — see {@link ValidationRunner.Mode}.
  *
  * <pre>{@code
- * maven:
- *   mode: run
- *   profile: redkite
- *   args:
- *     -Dfoo=bar
- *   env:
- *     DB_HOST: localhost
- *     DB_PASS: pw
- *   spring:
- *     profiles: redkite
+ * redkite:
+ *   maven:
+ *     mode: run
+ *     profile: redkite-build
+ *     args:
+ *       - "--batch-mode"
+ *       - "--no-transfer-progress"
+ *       - "-Dfoo=bar"
+ *     env:
+ *       DB_HOST: localhost
+ *       DB_PASS: pw
+ *     spring:
+ *       profiles: redkite-local
  * }</pre>
+ *
+ * {@code args} accepts either form: a real YAML list (as above — each entry is a single argument,
+ * so one containing a space is unambiguous) or a single whitespace-separated string
+ * ({@code args: --batch-mode -Dfoo=bar}), split the same way the rest of RedKite's argument
+ * handling already does. The list form is the one to reach for when an argument's own value needs
+ * to contain a space.
  */
 public final class ProjectConfigFile {
     private static final Logger LOGGER = Logger.getLogger(ProjectConfigFile.class.getName());
@@ -52,9 +63,9 @@ public final class ProjectConfigFile {
     /** Path to the config file, relative to a project's root directory. */
     public static final String RELATIVE_PATH = ".redkite/config.yml";
 
-    public record ProjectConfig(String args, String profile, ValidationRunner.Mode mode,
+    public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
                                  Map<String, String> env, String springProfiles) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(null, null, ValidationRunner.Mode.RUN, Map.of(), null);
+        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null);
 
         /** {@code args} and {@code profile} folded into one list, in a stable order — applies to
          *  every validation RedKite runs for this project. Does not include
@@ -62,12 +73,7 @@ public final class ProjectConfigFile {
          *  startup check specifically; a caller building that command appends
          *  {@link #springBootArgs()} on top of this. */
         public List<String> toBuildArgs() {
-            List<String> result = new java.util.ArrayList<>();
-            if (args != null && !args.isBlank()) {
-                for (String part : args.trim().split("\\s+")) {
-                    if (!part.isEmpty()) result.add(part);
-                }
-            }
+            List<String> result = new ArrayList<>(args);
             if (profile != null && !profile.isBlank()) {
                 result.add("-P" + profile.trim());
             }
@@ -82,7 +88,46 @@ public final class ProjectConfigFile {
         }
     }
 
+    /** Written to {@code <projectRoot>/.redkite/config.yml} by {@link #ensureDefaultExists} when a
+     *  project has none — every field commented out, so its presence alone never changes
+     *  validation behavior; it's a discoverable, editable starting point, not a live default. */
+    private static final String DEFAULT_TEMPLATE = """
+            # RedKite build validation settings for this project — see:
+            # https://johnjoeallen.github.io/redkite/projects/build-validation/
+            #
+            # Uncomment and edit whatever this project actually needs; everything below is
+            # optional, and this file is never overwritten once it exists.
+
+            #redkite:
+            #  maven:
+            #    mode: run              # run (default) | verify | test
+            #    profile: my-profile
+            #    args:
+            #      - "-Dfoo=bar"
+            #    env:
+            #      KEY: value
+            #    spring:
+            #      profiles: my-spring-profile
+            """;
+
     private ProjectConfigFile() {
+    }
+
+    /** Writes {@link #DEFAULT_TEMPLATE} to {@code <projectRoot>/.redkite/config.yml} if that file
+     *  doesn't already exist — so a project gets a discoverable, fully commented-out starting
+     *  point the first time RedKite scans it, without ever overwriting anything already there
+     *  (including a file the project has deliberately left empty). Best-effort: a failure to
+     *  write is logged, never thrown — scaffolding a config file must never block a scan. */
+    public static void ensureDefaultExists(Path projectRoot) {
+        Path configPath = projectRoot.resolve(RELATIVE_PATH);
+        if (Files.exists(configPath)) return;
+        try {
+            Files.createDirectories(configPath.getParent());
+            Files.writeString(configPath, DEFAULT_TEMPLATE, StandardCharsets.UTF_8);
+            LOGGER.info(() -> "Created default " + RELATIVE_PATH + " for " + projectRoot);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not create default " + RELATIVE_PATH + " for " + projectRoot + ": " + e.getMessage());
+        }
     }
 
     /** Reads {@code <projectRoot>/.redkite/config.yml}, or {@link ProjectConfig#EMPTY} if it
@@ -107,17 +152,39 @@ public final class ProjectConfigFile {
             LOGGER.warning(() -> "Failed to parse " + RELATIVE_PATH + ": " + e.getMessage());
             return ProjectConfig.EMPTY;
         }
-        if (!(loaded instanceof Map<?, ?> root) || !(root.get("maven") instanceof Map<?, ?> maven)) {
+        if (!(loaded instanceof Map<?, ?> root)
+                || !(root.get("redkite") instanceof Map<?, ?> redkite)
+                || !(redkite.get("maven") instanceof Map<?, ?> maven)) {
             return ProjectConfig.EMPTY;
         }
 
-        String args = asString(maven.get("args"));
+        List<String> args = asArgList(maven.get("args"));
         String profile = asString(maven.get("profile"));
         ValidationRunner.Mode mode = parseMode(asString(maven.get("mode")));
         Map<String, String> env = asStringMap(maven.get("env"));
         String springProfiles = maven.get("spring") instanceof Map<?, ?> spring ? asString(spring.get("profiles")) : null;
 
         return new ProjectConfig(args, profile, mode, env, springProfiles);
+    }
+
+    /** Accepts either a real YAML list (each entry becomes one argument as-is) or a single
+     *  whitespace-separated scalar string (split the same way the rest of RedKite's argument
+     *  handling already does) — see the class doc for when each form is worth reaching for. */
+    private static List<String> asArgList(Object value) {
+        if (value instanceof List<?> list) {
+            List<String> result = new ArrayList<>();
+            for (Object item : list) {
+                if (item != null && !String.valueOf(item).isBlank()) result.add(String.valueOf(item));
+            }
+            return List.copyOf(result);
+        }
+        String scalar = asString(value);
+        if (scalar == null || scalar.isBlank()) return List.of();
+        List<String> result = new ArrayList<>();
+        for (String part : scalar.trim().split("\\s+")) {
+            if (!part.isEmpty()) result.add(part);
+        }
+        return List.copyOf(result);
     }
 
     /** {@code null} for a missing key; otherwise the scalar's string form, even if the author
