@@ -127,6 +127,7 @@ nav:
 
   - Concepts:
       - Overview: concepts/index.md
+      - Why RedKite: concepts/why-redkite.md
       - How RedKite Works: concepts/how-redkite-works.md
       - Dependency Resolution: concepts/dependency-resolution.md
       - Version Management: concepts/version-management.md

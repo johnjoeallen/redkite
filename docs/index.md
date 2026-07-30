@@ -36,6 +36,14 @@ Everything runs on your own machine — no source code or dependency data leaves
 
     [:octicons-arrow-right-24: Getting Started](getting-started/index.md)
 
+- :material-scale-balance:{ .lg .middle } **How is this different from Dependabot or Black Duck?**
+
+    ---
+
+    A local, build-validated, minimal-change approach to remediation.
+
+    [:octicons-arrow-right-24: Why RedKite](concepts/why-redkite.md)
+
 - :material-source-branch:{ .lg .middle } **Curious how it got here?**
 
     ---
