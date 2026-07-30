@@ -18,7 +18,7 @@ class ProjectConfigFileTest {
         String yaml = """
                 mavenArgs: -Dfoo=bar
                 profile: dev
-                verify: true
+                mode: verify
                 env:
                   SPRING_PROFILES_ACTIVE: dev
                   DB_HOST: localhost
@@ -29,23 +29,30 @@ class ProjectConfigFileTest {
 
         assertEquals("-Dfoo=bar", config.mavenArgs());
         assertEquals("dev", config.profile());
-        assertTrue(config.verify());
+        assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
         assertEquals(Map.of("SPRING_PROFILES_ACTIVE", "dev", "DB_HOST", "localhost"), config.env());
         assertEquals("dev,local", config.springBootProfiles());
     }
 
     @Test
-    void verifyDefaultsToFalse() {
+    void modeDefaultsToRun() {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("mavenArgs: -Dfoo=bar\n");
-        assertFalse(config.verify());
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
     @Test
-    void verifyIsCaseInsensitive() {
-        assertTrue(ProjectConfigFile.parse("verify: TRUE\n").verify());
-        assertTrue(ProjectConfigFile.parse("verify: True\n").verify());
-        assertFalse(ProjectConfigFile.parse("verify: false\n").verify());
-        assertFalse(ProjectConfigFile.parse("verify: nonsense\n").verify());
+    void modeIsCaseInsensitiveAndCoversAllThreeValues() {
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("mode: run\n").mode());
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("mode: RUN\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("mode: verify\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("mode: Verify\n").mode());
+        assertEquals(ValidationRunner.Mode.TEST, ProjectConfigFile.parse("mode: test\n").mode());
+    }
+
+    @Test
+    void unrecognizedModeDefaultsToRun() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("mode: nonsense\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
     @Test
@@ -111,7 +118,7 @@ class ProjectConfigFileTest {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("");
         assertNull(config.mavenArgs());
         assertNull(config.profile());
-        assertFalse(config.verify());
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
         assertTrue(config.env().isEmpty());
         assertNull(config.springBootProfiles());
     }
@@ -135,14 +142,14 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsExcludesSpringBootProfiles() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                "-Dfoo=bar", "dev", false, Map.of(), "dev,local");
+                "-Dfoo=bar", "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                "-Dfoo=bar", "dev", false, Map.of(), "dev,local");
+                "-Dfoo=bar", "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -153,7 +160,8 @@ class ProjectConfigFileTest {
 
     @Test
     void toBuildArgsSkipsBlankFields() {
-        ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(null, "", false, Map.of(), null);
+        ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
+                null, "", ValidationRunner.Mode.RUN, Map.of(), null);
         assertEquals(List.of(), config.toBuildArgs());
     }
 }

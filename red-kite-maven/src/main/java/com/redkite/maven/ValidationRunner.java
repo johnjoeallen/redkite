@@ -27,24 +27,43 @@ public class ValidationRunner {
     public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
 
     /**
+     * What a validation run actually checks. {@code RUN} is the default and the only mode that
+     * ever attempts the {@code spring-boot:run} startup check — {@code VERIFY} and {@code TEST}
+     * always stop at the build/test phase, for a project where starting the app for real isn't
+     * practical but running its own tests still is.
+     */
+    public enum Mode {
+        /** {@code mvn clean install -DskipTests}, then, if {@code spring-boot-maven-plugin} is
+         *  present, {@code spring-boot:run} — today's default behavior. Adapts to the project:
+         *  a startup check for a Spring Boot project, build-only otherwise. */
+        RUN,
+        /** {@code mvn clean verify} (tests included) — the full lifecycle through {@code verify},
+         *  covering anything bound to that phase (e.g. integration tests via failsafe). Never
+         *  attempts a startup check. */
+        VERIFY,
+        /** {@code mvn clean test} (unit tests only, no packaging) — lighter than {@code VERIFY}.
+         *  Never attempts a startup check. */
+        TEST
+    }
+
+    /**
      * Extra configuration for a validation run, sourced from a project's own
      * {@code .redkite/config.yml} (see {@link ProjectConfigFile}).
      *
      * @param mavenArgs    extra arguments appended to every {@code mvn} invocation (build and, for
-     *                     a Spring Boot project, the startup check) — e.g. Maven profiles via
-     *                     {@code -P} or {@code -D} properties
+     *                     a Spring Boot project in {@link Mode#RUN}, the startup check) — e.g.
+     *                     Maven profiles via {@code -P} or {@code -D} properties
      * @param env          extra environment variables set on the spawned processes
-     * @param verify       when {@code true}, runs {@code mvn clean verify} (tests included) instead
-     *                     of the default {@code mvn clean install -DskipTests} — for a project that
-     *                     wants its own unit tests to gate an apply, not just "does it compile"
+     * @param mode         which lifecycle phase (and whether a startup check ever runs) — see
+     *                     {@link Mode}
      * @param springBootArgs extra arguments appended only to the {@code spring-boot:run} startup
      *                       check, on top of {@code mavenArgs} — never used for the plain build
      *                       check, since they're meaningless outside a Spring Boot startup (e.g.
      *                       {@code -Dspring-boot.run.profiles=...})
      */
-    public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, boolean verify,
+    public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, Mode mode,
                                      List<String> springBootArgs) {
-        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), false, List.of());
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of());
     }
 
     /** Runs {@code mvn clean install} and returns the result. */
@@ -52,16 +71,19 @@ public class ValidationRunner {
         return validate(projectRoot, pomPath, ValidationOptions.DEFAULT);
     }
 
-    /** Runs {@code mvn clean install} (or {@code mvn clean verify} — see
-     *  {@link ValidationOptions#verify()}) and returns the result. */
+    /** Runs the build/test check appropriate to {@link ValidationOptions#mode()} and returns the
+     *  result. */
     public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options) {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = options.verify()
-                ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
-                        "clean", "verify", "-Denforcer.skip=true")
-                : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
-                        "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+        List<String> command = switch (options.mode()) {
+            case VERIFY -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                    "clean", "verify", "-Denforcer.skip=true");
+            case TEST -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                    "clean", "test", "-Denforcer.skip=true");
+            case RUN -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                    "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+        };
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
@@ -94,22 +116,23 @@ public class ValidationRunner {
     }
 
     /**
-     * Runs the build check (see {@link #validate}) then, if {@link ValidationOptions#verify()} is
-     * {@code false} and {@code spring-boot-maven-plugin} is detected in the root POM, also runs
-     * {@code mvn spring-boot:run} and waits for the startup signal or timeout. The spawned process
-     * is always killed before returning.
+     * Runs the build/test check (see {@link #validate}) then, if {@link ValidationOptions#mode()}
+     * is {@link Mode#RUN} and {@code spring-boot-maven-plugin} is detected in the root POM, also
+     * runs {@code mvn spring-boot:run} and waits for the startup signal or timeout. The spawned
+     * process is always killed before returning.
      *
-     * <p>When {@link ValidationOptions#verify()} is {@code true}, the startup check never runs at
-     * all, regardless of whether the project is Spring Boot — validation is the build check alone
-     * (with tests included), for a project where starting the app isn't practical but its own test
-     * suite is still a meaningful gate.
+     * <p>In {@link Mode#VERIFY} or {@link Mode#TEST}, the startup check never runs at all,
+     * regardless of whether the project is Spring Boot — validation is the build/test check alone,
+     * for a project where starting the app isn't practical but its own test suite is still a
+     * meaningful gate.
      */
     public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds,
                                                  ValidationOptions options) {
         ValidationResult buildResult = validate(projectRoot, pomPath, options);
         if (!buildResult.passed()) return buildResult;
-        if (options.verify()) {
-            LOGGER.info(() -> "verify-only configured for " + pomPath + "; skipping startup validation");
+        if (options.mode() != Mode.RUN) {
+            Mode mode = options.mode();
+            LOGGER.info(() -> "Mode " + mode + " configured for " + pomPath + "; skipping startup validation");
             return buildResult;
         }
 

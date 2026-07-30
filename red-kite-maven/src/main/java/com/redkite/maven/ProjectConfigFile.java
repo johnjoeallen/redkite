@@ -13,9 +13,9 @@ import java.util.logging.Logger;
  * Reads a project's own {@code .redkite/config.yml} — build validation settings checked into the
  * project itself, rather than entered through RedKite's UI and stored in RedKite's own database.
  * Lets a project declare, once, the extra Maven arguments, activated profile, environment
- * variables, and Spring Boot-specific settings its build (and, for Spring Boot projects, its
- * startup) validation needs — a project that requires a specific profile to build or start would
- * otherwise always fail apply validation.
+ * variables, validation mode, and Spring Boot-specific settings its build (and, for Spring Boot
+ * projects, its startup) validation needs — a project that requires a specific profile to build or
+ * start would otherwise always fail apply validation.
  *
  * <p>The file is a restricted YAML subset — flat {@code key: value} lines plus nested maps
  * (indented {@code KEY: value} lines under {@code env:} or {@code springBoot:}) — parsed by hand
@@ -25,16 +25,18 @@ import java.util.logging.Logger;
  * keys are ignored, not an error, so a newer/older RedKite version reading an unfamiliar file
  * degrades gracefully.
  *
- * <p>{@code mavenArgs}/{@code profile}/{@code env}/{@code verify} apply to every validation
- * RedKite runs for the project — the plain build check, and, for a Spring Boot project, the
+ * <p>{@code mavenArgs}/{@code profile}/{@code env} apply to every validation RedKite runs for the
+ * project — the plain build check, and, for a Spring Boot project in {@code mode: run}, the
  * {@code spring-boot:run} startup check too. {@code springBoot.profiles} applies only to the
  * startup check, since it's meaningless outside {@code spring-boot:run} — it's kept in its own
  * section rather than a flat {@code springProfiles} key specifically to make that scope obvious.
+ * {@code mode} picks the Maven lifecycle phase (and whether a startup check ever runs at all) —
+ * see {@link ValidationRunner.Mode}.
  *
  * <pre>{@code
  * mavenArgs: -Dfoo=bar
  * profile: dev
- * verify: true
+ * mode: verify
  * env:
  *   DB_HOST: localhost
  * springBoot:
@@ -47,9 +49,9 @@ public final class ProjectConfigFile {
     /** Path to the config file, relative to a project's root directory. */
     public static final String RELATIVE_PATH = ".redkite/config.yml";
 
-    public record ProjectConfig(String mavenArgs, String profile, boolean verify,
+    public record ProjectConfig(String mavenArgs, String profile, ValidationRunner.Mode mode,
                                  Map<String, String> env, String springBootProfiles) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(null, null, false, Map.of(), null);
+        public static final ProjectConfig EMPTY = new ProjectConfig(null, null, ValidationRunner.Mode.RUN, Map.of(), null);
 
         /** {@code mavenArgs} and {@code profile} folded into one list, in a stable order — applies
          *  to every validation RedKite runs for this project. Does not include
@@ -96,7 +98,7 @@ public final class ProjectConfigFile {
 
     static ProjectConfig parse(String content) {
         String mavenArgs = null, profile = null, springBootProfiles = null;
-        boolean verify = false;
+        ValidationRunner.Mode mode = ValidationRunner.Mode.RUN;
         Map<String, String> env = new LinkedHashMap<>();
         String currentTopKey = null;
 
@@ -127,12 +129,22 @@ public final class ProjectConfigFile {
             switch (key) {
                 case "mavenArgs" -> mavenArgs = value;
                 case "profile" -> profile = value;
-                case "verify" -> verify = "true".equalsIgnoreCase(value);
+                case "mode" -> mode = parseMode(value);
                 case "env", "springBoot" -> { /* value (if any) on this line is ignored — only indented children are read */ }
                 default -> LOGGER.fine(() -> "Ignoring unrecognized " + RELATIVE_PATH + " key: " + key);
             }
         }
-        return new ProjectConfig(mavenArgs, profile, verify, Map.copyOf(env), springBootProfiles);
+        return new ProjectConfig(mavenArgs, profile, mode, Map.copyOf(env), springBootProfiles);
+    }
+
+    /** Case-insensitive; an unrecognized value falls back to {@link ValidationRunner.Mode#RUN},
+     *  the default, rather than failing to parse the whole file. */
+    private static ValidationRunner.Mode parseMode(String value) {
+        for (ValidationRunner.Mode candidate : ValidationRunner.Mode.values()) {
+            if (candidate.name().equalsIgnoreCase(value)) return candidate;
+        }
+        LOGGER.warning(() -> "Unrecognized mode \"" + value + "\" in " + RELATIVE_PATH + " — defaulting to run");
+        return ValidationRunner.Mode.RUN;
     }
 
     private static String unquote(String value) {

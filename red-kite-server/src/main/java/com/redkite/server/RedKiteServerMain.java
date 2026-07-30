@@ -533,10 +533,8 @@ public class RedKiteServerMain {
                             ? "<code class=\"proj-meta-val\">" + escape(config.profile()) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
-            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Verify only (run tests, skip startup)</span>")
-                    .append(config.verify()
-                            ? "<code class=\"proj-meta-val\">true</code>"
-                            : "<span class=\"proj-meta-val muted\">false</span>")
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Mode</span>")
+                    .append("<code class=\"proj-meta-val\">").append(config.mode().name().toLowerCase()).append("</code>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Spring Boot profiles</span>")
                     .append(config.springBootProfiles() != null && !config.springBootProfiles().isBlank()
@@ -1209,7 +1207,7 @@ public class RedKiteServerMain {
             Path rootPom = projectRoot.resolve("pom.xml");
             com.redkite.maven.ProjectConfigFile.ProjectConfig projectConfig = com.redkite.maven.ProjectConfigFile.load(projectRoot);
             com.redkite.maven.ValidationRunner.ValidationOptions validationOptions = new com.redkite.maven.ValidationRunner.ValidationOptions(
-                    projectConfig.toBuildArgs(), projectConfig.env(), projectConfig.verify(), projectConfig.springBootArgs());
+                    projectConfig.toBuildArgs(), projectConfig.env(), projectConfig.mode(), projectConfig.springBootArgs());
 
             new Thread(() -> {
                 try {
