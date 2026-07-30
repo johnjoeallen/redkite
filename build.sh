@@ -20,7 +20,7 @@ rm -f "$ZIP"
 
 (
   cd "$DIR/scripts"
-  zip -q "$ZIP" red-kite.jar red-kite.sh red-kite.bat
+  zip -q "$ZIP" red-kite.jar red-kite.sh red-kite.bat red-kite.properties.default
 )
 
 (

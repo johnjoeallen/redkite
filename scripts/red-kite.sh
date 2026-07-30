@@ -3,6 +3,14 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JAR="$DIR/red-kite.jar"
 
+CONFIG_DIR="$HOME/.redkite"
+CONFIG_FILE="$CONFIG_DIR/redkite.properties"
+DEFAULT_CONFIG="$DIR/red-kite.properties.default"
+if [ ! -f "$CONFIG_FILE" ] && [ -f "$DEFAULT_CONFIG" ]; then
+  mkdir -p "$CONFIG_DIR"
+  cp "$DEFAULT_CONFIG" "$CONFIG_FILE"
+fi
+
 if ! command -v java &>/dev/null; then
   echo "Error: Java 17 or later is required." >&2
   echo "Download from https://adoptium.net" >&2

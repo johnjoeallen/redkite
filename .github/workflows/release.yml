@@ -33,9 +33,10 @@ jobs:
           cp red-kite-server/target/red-kite-${VERSION}.jar dist/red-kite.jar
           cp scripts/red-kite.sh dist/
           cp scripts/red-kite.bat dist/
+          cp scripts/red-kite.properties.default dist/
           chmod +x dist/red-kite.sh
           ZIP="$(pwd)/red-kite-${VERSION}.zip"
-          zip -j "$ZIP" dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat
+          zip -j "$ZIP" dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat dist/red-kite.properties.default
           cd test/projects
           find convergence-fixture -name "pom.xml.orig" ! -path "*/target/*" | while read -r f; do cp "$f" "${f%.orig}"; done
           find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" \) ! -path "*/target/*" | xargs zip "$ZIP"

@@ -1,6 +1,14 @@
 @echo off
 setlocal
 
+set "CONFIG_DIR=%USERPROFILE%\.redkite"
+set "CONFIG_FILE=%CONFIG_DIR%\redkite.properties"
+set "DEFAULT_CONFIG=%~dp0red-kite.properties.default"
+if not exist "%CONFIG_FILE%" if exist "%DEFAULT_CONFIG%" (
+    if not exist "%CONFIG_DIR%" mkdir "%CONFIG_DIR%"
+    copy /y "%DEFAULT_CONFIG%" "%CONFIG_FILE%" >nul
+)
+
 where java >nul 2>&1
 if %errorlevel% neq 0 (
     echo Error: Java 17 or later is required.

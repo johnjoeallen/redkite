@@ -247,6 +247,7 @@ public class RedKiteServerMain {
     public static void main(String[] args) throws Exception {
         java.nio.file.Path dataDir = java.nio.file.Path.of(System.getProperty("user.home"), ".redkite");
         Files.createDirectories(dataDir);
+        loadConfigFileDefaults(dataDir.resolve("redkite.properties"));
 
         for (String arg : args) {
             if ("--drop-db".equals(arg)) {
@@ -268,6 +269,31 @@ public class RedKiteServerMain {
         app.start();
         System.out.println(BRAND + " server listening on http://localhost:" + port);
         new CountDownLatch(1).await();
+    }
+
+    /** Applies {@code redkite.*} keys from {@code ~/.redkite/redkite.properties} (if present) as
+     *  system-property defaults — a persistent alternative to passing {@code -Dredkite.xxx=...}
+     *  on every launch. An explicit {@code -D} flag on the command line always wins: this only
+     *  ever fills in a property that isn't already set, so precedence stays flag > file > compiled-
+     *  in default. {@code ${user.home}} in a value is expanded, since the bundled default file
+     *  needs a portable way to express a path under the user's home directory. */
+    private static void loadConfigFileDefaults(java.nio.file.Path configFile) {
+        if (!Files.exists(configFile)) return;
+        java.util.Properties fileProps = new java.util.Properties();
+        try (var reader = Files.newBufferedReader(configFile)) {
+            fileProps.load(reader);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Failed to read config file " + configFile + ": " + e.getMessage());
+            return;
+        }
+        String userHome = System.getProperty("user.home");
+        for (String key : fileProps.stringPropertyNames()) {
+            if (!key.startsWith("redkite.") || System.getProperty(key) != null) continue;
+            String value = fileProps.getProperty(key);
+            if (value != null && !value.isBlank()) {
+                System.setProperty(key, value.replace("${user.home}", userHome));
+            }
+        }
     }
 
     public void start() {

@@ -1,0 +1,31 @@
+# RedKite server configuration.
+#
+# Copied to ~/.redkite/redkite.properties on first run by red-kite.sh / red-kite.bat, if that
+# file doesn't already exist. Edit any value here and restart the server for it to take effect —
+# this file itself is never read again once it's been copied.
+#
+# A -Dredkite.xxx=... flag on the command line always overrides whatever is set here.
+
+# HTTP port the server listens on.
+redkite.port=6502
+
+# H2 database JDBC URL.
+redkite.db.url=jdbc:h2:${user.home}/.redkite/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE
+
+# Database user and password.
+redkite.db.user=sa
+redkite.db.password=
+
+# Local UI preferences file (theme, etc).
+redkite.prefs.file=${user.home}/.redkite/preferences.properties
+
+# Base URL for OSV.dev vulnerability queries.
+redkite.osv.url=https://api.osv.dev
+
+# Number of prior versions considered when searching for a candidate CVE fix.
+redkite.version.lookback=10
+
+# Comma-separated repository URLs for metadata lookups (Maven Central, an internal Artifactory,
+# etc), bypassing settings.xml discovery entirely. Leave commented out to use settings.xml-based
+# discovery instead, which is what almost every setup wants.
+#redkite.maven.repositories=
