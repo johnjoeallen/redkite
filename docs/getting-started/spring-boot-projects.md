@@ -16,12 +16,14 @@ The goal isn't to reproduce the full production environment — the application 
 For example, a Maven profile and a Spring Boot profile used together, declared in `.redkite/config.yml`:
 
 ```yaml
-profile: redkite
-springBoot:
-  profiles: redkite
+redkite:
+  maven:
+    profile: redkite
+    spring:
+      profiles: redkite
 ```
 
-`profile` applies to every validation call; `springBoot.profiles` applies only to the startup check. RedKite uses this to run the equivalent of:
+`profile` applies to every validation call; `spring.profiles` applies only to the startup check. RedKite uses this to run the equivalent of:
 
 ```bash
 mvn clean install -DskipTests -Predkite
