@@ -43,7 +43,7 @@ All Maven subprocess invocation and POM file manipulation.
 | `ValidationRunner` | Runs the build (and, where applicable, startup) validation described in [Validation Model](../concepts/validation-model.md) |
 | `PomModel` | In-memory representation of a parsed POM |
 | `MavenSettingsReader` | Reads `settings.xml` for repository URLs and credentials |
-| `ProjectConfigFile` | Reads a project's own `.redkite/project.cfg` — extra Maven arguments, profile, Spring profile, environment variables — see [Build Validation](../projects/build-validation.md) |
+| `ProjectConfigFile` | Reads a project's own `.redkite/config.yml` — extra Maven arguments, profile, Spring profile, environment variables — see [Build Validation](../projects/build-validation.md) |
 | `ManagedVersionResolver` / `BomVersionResolver` / `FamilyVersionAligner` | Parent/BOM-aware managed-version resolution — see [Parent, BOM, and Ancestor](../concepts/parent-bom-and-ancestor.md) and [Dependency Conflicts](../recommendations/dependency-conflicts.md) |
 | `PomFetcher` / `PomAvailabilityChecker` | Fetches and caches external POMs, distinguishing a confirmed-absent artifact from a transport error |
 | `LicenseResolver` | Resolves a dependency's declared license(s) from its own POM or its parent chain — see [License Scanning](../analysis/license-scanning.md) |

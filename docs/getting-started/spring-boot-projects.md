@@ -1,6 +1,6 @@
 # Spring Boot Projects
 
-For RedKite to apply changes successfully to a Spring Boot project, the application must be able to build and start directly through Maven using the configuration declared in the project's own [`.redkite/project.cfg`](../projects/build-validation.md).
+For RedKite to apply changes successfully to a Spring Boot project, the application must be able to build and start directly through Maven using the configuration declared in the project's own [`.redkite/config.yml`](../projects/build-validation.md).
 
 The configured profile doesn't have to be named `local` — any suitable profile works, such as `dev`, `test`, `desktop`, or a profile created specifically for this purpose, e.g. `redkite`. A dedicated `redkite` profile can be designed specifically for dependency validation, and should require as little external infrastructure as practical. A suitable profile might:
 
@@ -13,22 +13,24 @@ The configured profile doesn't have to be named `local` — any suitable profile
 
 The goal isn't to reproduce the full production environment — the application only needs to start reliably enough for RedKite to verify that dependency changes haven't broken it. Docker shouldn't be required for this: RedKite starts the project directly through Maven, so any services it needs should either be available locally, or disabled/replaced by the selected profile.
 
-For example, a Maven profile and a Spring Boot profile used together, declared in `.redkite/project.cfg`:
+For example, a Maven profile and a Spring Boot profile used together, declared in `.redkite/config.yml`:
 
 ```yaml
 profile: redkite
-springProfiles: redkite
+springBoot:
+  profiles: redkite
 ```
 
-RedKite uses this to run the equivalent of:
+`profile` applies to every validation call; `springBoot.profiles` applies only to the startup check. RedKite uses this to run the equivalent of:
 
 ```bash
+mvn clean install -DskipTests -Predkite
 mvn spring-boot:run \
   -Predkite \
   -Dspring-boot.run.profiles=redkite
 ```
 
 !!! tip
-    Before applying changes to a Spring Boot project for the first time, verify the configured commands work outside RedKite — run the build (`mvn clean install -DskipTests -Predkite -Dspring-boot.run.profiles=redkite`) and the startup check (`mvn spring-boot:run -Predkite -Dspring-boot.run.profiles=redkite`) yourself first. Once both succeed on their own, RedKite can use the same configuration to validate dependency updates and conflict resolutions.
+    Before applying changes to a Spring Boot project for the first time, verify the configured commands work outside RedKite — run the build (`mvn clean install -DskipTests -Predkite`) and the startup check (`mvn spring-boot:run -Predkite -Dspring-boot.run.profiles=redkite`) yourself first. Once both succeed on their own, RedKite can use the same configuration to validate dependency updates and conflict resolutions.
 
-RedKite only runs this startup check when it detects `spring-boot-maven-plugin` in the project's root POM — a plain (non-Spring-Boot) project only ever gets the plain build check. See [Validation Process](../applying-changes/validation-process.md) for the full sequence.
+RedKite only runs this startup check when it detects `spring-boot-maven-plugin` in the project's root POM, and `verify` isn't set to `true` — a plain (non-Spring-Boot) project, or one with `verify: true`, only ever gets the build check. See [Validation Process](../applying-changes/validation-process.md) for the full sequence.

@@ -44,9 +44,10 @@ All Maven subprocess invocation and POM file manipulation.
 | `EnforcerDetector` | Detects whether `maven-enforcer-plugin` is configured in the project |
 | `TempPomAnalyzer` | Creates stripped temp POM trees for pristine / phase-2 enforcer runs |
 | `RemediationApplier` | Inserts dep-management pins and exclusions into POM XML with marker comments, via DOM parse + serialise (well-formed output, two-space indent); inserted pins use a hardcoded `<version>`, but project entries managed via `${property}` get the property value updated instead (family semantics preserved) |
-| `ValidationRunner` | Runs `mvn clean install -DskipTests -Denforcer.skip=true` (and optionally `spring-boot:run`) to validate a project build |
+| `ValidationRunner` | Runs `mvn clean install -DskipTests -Denforcer.skip=true` (or `mvn clean verify` — see `ValidationOptions.verify`) and optionally `spring-boot:run` to validate a project build |
 | `PomModel` | In-memory representation of a parsed POM |
 | `MavenSettingsReader` | Reads `~/.m2/settings.xml` for repository URLs and credentials |
+| `ProjectConfigFile` | Reads a project's own `.redkite/config.yml` — see Apply Changes Flow below |
 
 ### `red-kite-metadata`
 
@@ -499,8 +500,8 @@ projects
   name varchar
   root_path varchar UNIQUE
   enforcer_use_verify boolean      ← true = skip enforcer, use mvn verify
-  validation_maven_args varchar    ← unused since project.cfg replaced it; column kept, never read/written
-  validation_env varchar           ← unused since project.cfg replaced it; column kept, never read/written
+  validation_maven_args varchar    ← unused since config.yml replaced it; column kept, never read/written
+  validation_env varchar           ← unused since config.yml replaced it; column kept, never read/written
 
 scans
   id uuid PK
@@ -653,7 +654,9 @@ mvn clean install -DskipTests -Denforcer.skip=true -f <rootPom>
 
 Enforcer is skipped because enforcer violations are what RedKite is fixing — running it during validation would create an unresolvable catch-22 on broken projects. Tests are skipped for speed.
 
-Both the build and the `spring-boot:run` startup check accept extra configuration, read from the project's own `.redkite/project.cfg` (`ProjectConfigFile`, red-kite-maven) — a restricted YAML subset with `mavenArgs`, `profile`, `springProfiles`, and an `env` map. `ProjectConfig.toMavenArgs()` folds `mavenArgs`/`profile`/`springProfiles` into one argument list (`-P<profile>`, `-Dspring-boot.run.profiles=<springProfiles>`); `env` is used as-is. Loaded fresh from `projectRoot` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., extraMavenArgs, extraEnv)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different projects need different values. The project page shows a read-only panel with whatever the file currently resolves to — there's no UI form or API endpoint to edit it; the old `projects.validation_maven_args`/`validation_env` columns and their `/api/projects/{id}/validation` endpoint are gone from the code (columns remain in the schema, unused, per the project's no-destructive-migration convention).
+Both the build and the `spring-boot:run` startup check accept extra configuration, read from the project's own `.redkite/config.yml` (`ProjectConfigFile`, red-kite-maven) — a restricted YAML subset with `mavenArgs`, `profile`, `verify`, an `env` map, and a nested `springBoot.profiles`. `ProjectConfig.toBuildArgs()` folds `mavenArgs`/`profile` into one argument list (`-P<profile>`) that applies to *every* validation call; `springBootArgs()` returns `-Dspring-boot.run.profiles=<value>` separately, appended only to the `spring-boot:run` invocation, never the plain build — segregated because it's meaningless outside a Spring Boot startup. `verify` switches the build command from `mvn clean install -DskipTests` to `mvn clean verify` (tests included) and, when true, skips the startup check entirely regardless of whether `spring-boot-maven-plugin` is present — for a project where starting the app for real isn't practical but its own test suite is still a meaningful gate.
+
+These are bundled into `ValidationRunner.ValidationOptions(mavenArgs, env, verify, springBootArgs)`, loaded fresh from `projectRoot` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., options)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different projects need different values. The project page shows a read-only panel with whatever the file currently resolves to — there's no UI form or API endpoint to edit it; the old `projects.validation_maven_args`/`validation_env` columns and their `/api/projects/{id}/validation` endpoint are gone from the code (columns remain in the schema, unused, per the project's no-destructive-migration convention).
 
 ### Status responses
 

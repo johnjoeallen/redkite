@@ -20,7 +20,7 @@ By default, RedKite stores everything under `~/.redkite/`:
 
 | File | Contents |
 |---|---|
-| `.redkite/project.cfg` | Extra Maven arguments, profile, Spring profile, and environment variables for build validation — see [Build Validation](../projects/build-validation.md). Written by you, not RedKite; entirely optional. |
+| `.redkite/config.yml` | Extra Maven arguments, profile, Spring profile, and environment variables for build validation — see [Build Validation](../projects/build-validation.md). Written by you, not RedKite; entirely optional. |
 
 ## Files written inside your projects
 
