@@ -14,44 +14,58 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProjectConfigFileTest {
 
     @Test
-    void parsesAllFields() {
+    void parsesAllFieldsNestedUnderMaven() {
         String yaml = """
-                mavenArgs: -Dfoo=bar
-                profile: dev
-                mode: verify
-                env:
-                  SPRING_PROFILES_ACTIVE: dev
-                  DB_HOST: localhost
-                springBoot:
-                  profiles: dev,local
+                maven:
+                  mode: verify
+                  profile: dev
+                  args:
+                    -Dfoo=bar
+                  env:
+                    SPRING_PROFILES_ACTIVE: dev
+                    DB_HOST: localhost
+                  spring:
+                    profiles: dev,local
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
 
-        assertEquals("-Dfoo=bar", config.mavenArgs());
+        assertEquals("-Dfoo=bar", config.args());
         assertEquals("dev", config.profile());
         assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
         assertEquals(Map.of("SPRING_PROFILES_ACTIVE", "dev", "DB_HOST", "localhost"), config.env());
-        assertEquals("dev,local", config.springBootProfiles());
+        assertEquals("dev,local", config.springProfiles());
+    }
+
+    @Test
+    void argsAlsoAcceptsAnInlineValue() {
+        // Real YAML: "args: -Dfoo=bar" (inline) and "args:\n  -Dfoo=bar" (continuation) mean
+        // the same thing — both must work.
+        String yaml = """
+                maven:
+                  args: -Dfoo=bar -Dbaz=qux
+                """;
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertEquals("-Dfoo=bar -Dbaz=qux", config.args());
     }
 
     @Test
     void modeDefaultsToRun() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("mavenArgs: -Dfoo=bar\n");
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("maven:\n  profile: dev\n");
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
     @Test
     void modeIsCaseInsensitiveAndCoversAllThreeValues() {
-        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("mode: run\n").mode());
-        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("mode: RUN\n").mode());
-        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("mode: verify\n").mode());
-        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("mode: Verify\n").mode());
-        assertEquals(ValidationRunner.Mode.TEST, ProjectConfigFile.parse("mode: test\n").mode());
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("maven:\n  mode: run\n").mode());
+        assertEquals(ValidationRunner.Mode.RUN, ProjectConfigFile.parse("maven:\n  mode: RUN\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("maven:\n  mode: verify\n").mode());
+        assertEquals(ValidationRunner.Mode.VERIFY, ProjectConfigFile.parse("maven:\n  mode: Verify\n").mode());
+        assertEquals(ValidationRunner.Mode.TEST, ProjectConfigFile.parse("maven:\n  mode: test\n").mode());
     }
 
     @Test
     void unrecognizedModeDefaultsToRun() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("mode: nonsense\n");
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("maven:\n  mode: nonsense\n");
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
     }
 
@@ -59,68 +73,79 @@ class ProjectConfigFileTest {
     void blankLinesAndCommentsAreIgnored() {
         String yaml = """
                 # a comment
-                mavenArgs: -Dfoo=bar
-
-                # another comment
-                profile: dev
+                maven:
+                  # another comment
+                  profile: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
-        assertEquals("-Dfoo=bar", config.mavenArgs());
         assertEquals("dev", config.profile());
     }
 
     @Test
     void quotedValuesAreUnwrapped() {
         String yaml = """
-                mavenArgs: "-Dfoo=bar -Dbaz=qux"
-                profile: 'dev'
+                maven:
+                  args: "-Dfoo=bar -Dbaz=qux"
+                  profile: 'dev'
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
-        assertEquals("-Dfoo=bar -Dbaz=qux", config.mavenArgs());
+        assertEquals("-Dfoo=bar -Dbaz=qux", config.args());
         assertEquals("dev", config.profile());
     }
 
     @Test
     void envValueContainingAColonIsKeptIntact() {
         String yaml = """
-                env:
-                  DB_URL: jdbc:postgresql://localhost:5432/db
+                maven:
+                  env:
+                    DB_URL: jdbc:postgresql://localhost:5432/db
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals("jdbc:postgresql://localhost:5432/db", config.env().get("DB_URL"));
     }
 
     @Test
-    void springBootSectionDoesNotLeakIntoEnv() {
+    void springSectionDoesNotLeakIntoEnv() {
         String yaml = """
-                env:
-                  DB_HOST: localhost
-                springBoot:
-                  profiles: dev
+                maven:
+                  env:
+                    DB_HOST: localhost
+                  spring:
+                    profiles: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
         assertEquals(Map.of("DB_HOST", "localhost"), config.env());
-        assertEquals("dev", config.springBootProfiles());
+        assertEquals("dev", config.springProfiles());
+    }
+
+    @Test
+    void fieldsOutsideTheMavenKeyAreIgnored() {
+        // Everything lives under "maven:" now — a bare top-level "profile:" (the old flat shape)
+        // must not be picked up.
+        String yaml = "profile: dev\n";
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertNull(config.profile());
     }
 
     @Test
     void unrecognizedKeysAreIgnoredNotFatal() {
         String yaml = """
-                somethingFromTheFuture: whatever
-                mavenArgs: -Dfoo=bar
+                maven:
+                  somethingFromTheFuture: whatever
+                  profile: dev
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
-        assertEquals("-Dfoo=bar", config.mavenArgs());
+        assertEquals("dev", config.profile());
     }
 
     @Test
     void emptyContentProducesEmptyConfig() {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("");
-        assertNull(config.mavenArgs());
+        assertNull(config.args());
         assertNull(config.profile());
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
         assertTrue(config.env().isEmpty());
-        assertNull(config.springBootProfiles());
+        assertNull(config.springProfiles());
     }
 
     @Test
@@ -133,14 +158,14 @@ class ProjectConfigFileTest {
     void loadsRealFileFromDisk(@TempDir Path tempDir) throws IOException {
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("config.yml"), "profile: ci\n");
+        Files.writeString(configDir.resolve("config.yml"), "maven:\n  profile: ci\n");
 
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
         assertEquals("ci", config.profile());
     }
 
     @Test
-    void toBuildArgsExcludesSpringBootProfiles() {
+    void toBuildArgsExcludesSpringProfiles() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
                 "-Dfoo=bar", "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
@@ -163,5 +188,19 @@ class ProjectConfigFileTest {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
                 null, "", ValidationRunner.Mode.RUN, Map.of(), null);
         assertEquals(List.of(), config.toBuildArgs());
+    }
+
+    @Test
+    void indentWidthIsNotHardcoded() {
+        // 4-space indent throughout, instead of 2 — must still parse correctly.
+        String yaml = """
+                maven:
+                    mode: test
+                    env:
+                        DB_HOST: localhost
+                """;
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertEquals(ValidationRunner.Mode.TEST, config.mode());
+        assertEquals("localhost", config.env().get("DB_HOST"));
     }
 }

@@ -7,4 +7,5 @@
 # left implicit, since this file also serves as a real, bundled sample of
 # the format for anyone exploring the release zip.
 
-mode: run
+maven:
+  mode: run

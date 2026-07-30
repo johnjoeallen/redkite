@@ -524,8 +524,8 @@ public class RedKiteServerMain {
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">File</span>")
                     .append("<code class=\"proj-meta-val\">").append(escape(configPath.toString())).append("</code></div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Maven arguments</span>")
-                    .append(config.mavenArgs() != null && !config.mavenArgs().isBlank()
-                            ? "<code class=\"proj-meta-val\">" + escape(config.mavenArgs()) + "</code>"
+                    .append(config.args() != null && !config.args().isBlank()
+                            ? "<code class=\"proj-meta-val\">" + escape(config.args()) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Profile</span>")
@@ -537,8 +537,8 @@ public class RedKiteServerMain {
                     .append("<code class=\"proj-meta-val\">").append(config.mode().name().toLowerCase()).append("</code>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Spring Boot profiles</span>")
-                    .append(config.springBootProfiles() != null && !config.springBootProfiles().isBlank()
-                            ? "<code class=\"proj-meta-val\">" + escape(config.springBootProfiles()) + "</code>"
+                    .append(config.springProfiles() != null && !config.springProfiles().isBlank()
+                            ? "<code class=\"proj-meta-val\">" + escape(config.springProfiles()) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Environment variables</span>");
