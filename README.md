@@ -6,7 +6,7 @@ It analyses Maven projects, including multi-module builds, builds a dependency i
 
 ![RedKite analysis](images/screenshot.png)
 
-📖 [Documentation](https://johnjoeallen.github.io/redkite/) — start with the [Quick Start guide](https://johnjoeallen.github.io/redkite/quick-start).
+📖 [Documentation](https://johnjoeallen.github.io/redkite/) — start with [Getting Started](https://johnjoeallen.github.io/redkite/getting-started/).
 
 ## What It Does
 
