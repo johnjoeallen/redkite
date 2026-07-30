@@ -108,7 +108,7 @@ Some projects need a Spring profile or other environment-specific config to buil
 ```yaml
 mavenArgs: -Dfoo=bar
 profile: dev
-verify: false
+mode: run
 env:
   SPRING_PROFILES_ACTIVE: dev
   DB_HOST: localhost
@@ -116,7 +116,7 @@ springBoot:
   profiles: dev,local
 ```
 
-`mavenArgs`/`profile`/`env` apply to every validation call; `springBoot.profiles` applies only to the `spring-boot:run` startup check. Setting `verify: true` runs `mvn clean verify` (unit tests included) instead of the default `mvn clean install -DskipTests`, and skips the startup check entirely — for a project where starting the app for real isn't practical.
+`mavenArgs`/`profile`/`env` apply to every validation call; `springBoot.profiles` applies only to the `spring-boot:run` startup check. `mode` picks the Maven lifecycle phase and whether a startup check is ever attempted: `run` (default) is `mvn clean install -DskipTests` plus `spring-boot:run` for a Spring Boot project; `verify` is `mvn clean verify` (tests included); `test` is `mvn clean test` (unit tests only) — `verify` and `test` never attempt a startup check, for a project where starting the app for real isn't practical.
 
 Picked up on the next apply — no restart needed. The project's own page shows a read-only panel with whatever the file currently resolves to.
 
