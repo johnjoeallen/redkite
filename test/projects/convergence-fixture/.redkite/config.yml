@@ -1,0 +1,10 @@
+# RedKite build validation settings for this project — see:
+# https://johnjoeallen.github.io/redkite/projects/build-validation/
+#
+# This fixture has no Spring Boot startup component and needs no extra Maven
+# arguments, profile, or environment variables to build — mode: run (the
+# default) is spelled out explicitly here as a worked example rather than
+# left implicit, since this file also serves as a real, bundled sample of
+# the format for anyone exploring the release zip.
+
+mode: run

@@ -39,7 +39,7 @@ jobs:
           zip -j "$ZIP" dist/red-kite.jar dist/red-kite.sh dist/red-kite.bat dist/red-kite.properties.default
           cd test/projects
           find convergence-fixture -name "pom.xml.orig" ! -path "*/target/*" | while read -r f; do cp "$f" "${f%.orig}"; done
-          find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" \) ! -path "*/target/*" | xargs zip "$ZIP"
+          find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" -o -name "config.yml" \) ! -path "*/target/*" | xargs zip "$ZIP"
           zip "$ZIP" revert-poms.sh
 
       - name: Create GitHub release

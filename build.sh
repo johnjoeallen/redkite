@@ -28,7 +28,7 @@ rm -f "$ZIP"
   find convergence-fixture -name "pom.xml.orig" ! -path "*/target/*" | while read -r f; do
     cp "$f" "${f%.orig}"
   done
-  find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" \) ! -path "*/target/*" | \
+  find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" -o -name "config.yml" \) ! -path "*/target/*" | \
     xargs zip -q "$ZIP"
   zip -q "$ZIP" revert-poms.sh
 )
