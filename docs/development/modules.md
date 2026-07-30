@@ -25,6 +25,8 @@ Domain records and stateless classifiers, no I/O.
 | `RemediationStatus` / `RemediationClassifier` | Classification of what action a component needs |
 | `AdvisoryClassifier` | Picks the highest severity across a list of findings |
 | `SemanticVersionComparator` | Version comparison and "same release line" logic — see [Version Management](../concepts/version-management.md) |
+| `LicenseNormalizer` | Canonicalizes a raw declared license string to a short canonical name |
+| `LicensePermissiveness` / `LicensePermissivenessDefaults` | Ranks canonical license names by permissiveness and picks a dependency's most-permissive one — see [License Scanning](../analysis/license-scanning.md) |
 
 ## `red-kite-maven`
 
@@ -43,6 +45,7 @@ All Maven subprocess invocation and POM file manipulation.
 | `MavenSettingsReader` | Reads `settings.xml` for repository URLs and credentials |
 | `ManagedVersionResolver` / `BomVersionResolver` / `FamilyVersionAligner` | Parent/BOM-aware managed-version resolution — see [Parent, BOM, and Ancestor](../concepts/parent-bom-and-ancestor.md) and [Dependency Conflicts](../recommendations/dependency-conflicts.md) |
 | `PomFetcher` / `PomAvailabilityChecker` | Fetches and caches external POMs, distinguishing a confirmed-absent artifact from a transport error |
+| `LicenseResolver` | Resolves a dependency's declared license(s) from its own POM or its parent chain — see [License Scanning](../analysis/license-scanning.md) |
 
 ## `red-kite-metadata`
 
