@@ -18,7 +18,7 @@ Black Duck (and tools like it) is enterprise software composition analysis: deep
 
 RedKite isn't trying to be that. Its vulnerability and license data both come from declared, static sources — OSV.dev for CVEs, POM metadata (walking the parent chain when needed) for licenses — rather than binary or snippet-level composition analysis, so it can't identify a vendored or repackaged copy of a vulnerable component the way Black Duck's deeper scanning can. There's no central server, no account, no policy engine spanning multiple teams. It's a single-developer, single-project tool you point at a Maven build and get an answer from immediately, not a compliance platform you roll out organization-wide — and, unlike Black Duck, it goes a step further than reporting by proposing and applying an actual fix. See [License Scanning](../analysis/license-scanning.md) and [Vulnerability Fixes](../recommendations/vulnerability-fixes.md).
 
-## Philosophy: the smallest change that actually fixes it
+## Principle of least change
 
 This is the sharpest philosophical difference, and it shows up most clearly in how RedKite resolves a CVE.
 
