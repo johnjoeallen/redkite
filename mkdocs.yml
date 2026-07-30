@@ -11,6 +11,8 @@ extra_css:
 
 theme:
   name: material
+  logo: assets/images/redkite-logo.svg
+  favicon: assets/images/redkite-logo.svg
   palette:
     - scheme: slate
       primary: deep purple
@@ -77,6 +79,7 @@ nav:
       - Transitive Dependencies: analysis/transitive-dependencies.md
       - Plugins: analysis/plugins.md
       - Snapshots: analysis/snapshots.md
+      - License Scanning: analysis/license-scanning.md
       - Analysis History: analysis/analysis-history.md
 
   - Recommendations:
