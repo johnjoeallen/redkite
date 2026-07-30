@@ -54,7 +54,13 @@ public final class ManagedVersionResolver {
     public record UnresolvedReference(String groupId, String artifactId, String version, String detail) {
     }
 
-    public record ResolutionOutcome(Map<String, ManagedVersion> managed, List<UnresolvedReference> unresolved) {
+    /** @param declaredProperties every property name declared anywhere across the module itself,
+     *      its parent chain, and its imported BOMs — the walk already collects this internally to
+     *      resolve {@code ${...}} references, so it's exposed rather than rebuilt. Useful for
+     *      checking whether a property name a caller is about to introduce would shadow one an
+     *      ancestor already owns (see {@code BomVersionResolver#resolveProjectDeclaredPropertyNames}). */
+    public record ResolutionOutcome(Map<String, ManagedVersion> managed, List<UnresolvedReference> unresolved,
+                                     Set<String> declaredProperties) {
     }
 
     private record RawManagedEntry(String groupId, String artifactId, String rawVersion, String propertyName, boolean bomImport) {
@@ -90,7 +96,7 @@ public final class ManagedVersionResolver {
         ExternalPom asExternal = new ExternalPom(module.parentGroupId(), module.parentArtifactId(), module.parentVersion(),
                 Map.of(), toRawEntries(module.dependencyManagement()));
         contribute(asExternal, properties, managed, unresolved, visited, 0, null, false);
-        return new ResolutionOutcome(managed, unresolved);
+        return new ResolutionOutcome(managed, unresolved, Set.copyOf(properties.keySet()));
     }
 
     private void contribute(ExternalPom pom, Map<String, String> properties, Map<String, ManagedVersion> managed,

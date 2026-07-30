@@ -201,4 +201,29 @@ class ManagedVersionResolverTest {
         assertTrue(detail.contains("https://repo.example/maven2"), detail);
         assertTrue(detail.contains("connection refused"), detail);
     }
+
+    @Test
+    void declaredPropertiesIncludesNamesFromTheParentChainAndImportedBoms() {
+        // Shaped like a Spring Boot parent: it declares jackson-bom.version in its own <properties>
+        // to control an internal BOM import the module never sees directly (the module doesn't
+        // depend on anything from that BOM, so nothing here resolves it as a *managed version* —
+        // but the property name itself is still "owned" by the parent and must be reported, since
+        // a caller reusing it locally would silently redefine what the parent's own import means).
+        String parentXml = "<project><properties>"
+                + "<jackson-bom.version>3.0.0</jackson-bom.version>"
+                + "</properties><dependencyManagement><dependencies>"
+                + "<dependency><groupId>tools.jackson</groupId><artifactId>jackson-bom</artifactId>"
+                + "<version>${jackson-bom.version}</version><type>pom</type><scope>import</scope></dependency>"
+                + "</dependencies></dependencyManagement></project>";
+        FakePomSource source = new FakePomSource().with("org.example", "some-parent", "1.0.0", parentXml);
+        ManagedVersionResolver resolver = new ManagedVersionResolver(source);
+
+        PomModel mod = module("org.example", "some-parent", "1.0.0", Map.of("app.own.version", "1.2.3"), List.of());
+        ManagedVersionResolver.ResolutionOutcome outcome = resolver.resolveWithDiagnostics(mod);
+
+        assertTrue(outcome.declaredProperties().contains("jackson-bom.version"),
+                "Parent-declared property names must be reported even when nothing local resolves through them");
+        assertTrue(outcome.declaredProperties().contains("app.own.version"),
+                "The starting module's own properties are included too");
+    }
 }

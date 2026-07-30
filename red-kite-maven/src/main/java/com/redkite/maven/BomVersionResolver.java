@@ -37,6 +37,19 @@ public final class BomVersionResolver {
         return resolver.resolve(scanner.parsePomXml(cleaned, rootPomPath));
     }
 
+    /** Every property name declared anywhere across the project's own root POM, its parent chain,
+     *  and its imported BOMs — used to keep a newly-introduced property (e.g. normalising a literal
+     *  dependency version into {@code ${artifactId.version}}) from shadowing a name an ancestor
+     *  already owns for its own purposes. A Spring Boot parent, for example, defines properties
+     *  like {@code jackson-bom.version} to control its own internal BOM imports; a locally-created
+     *  property with that exact name silently redefines it for everything the parent manages
+     *  through it, not just the dependency the local property was meant for. */
+    public java.util.Set<String> resolveProjectDeclaredPropertyNames(Path rootPomPath, String rootPomXml) throws Exception {
+        if (rootPomXml == null || rootPomXml.isBlank()) return java.util.Set.of();
+        String cleaned = remediationApplier.stripRedkiteRemediations(rootPomXml);
+        return resolver.resolveWithDiagnostics(scanner.parsePomXml(cleaned, rootPomPath)).declaredProperties();
+    }
+
     /** What importing {@code groupId:artifactId:version} as a BOM would manage, per member
      *  artifact, recursively (nested imports, property-chained versions) — as if a real build
      *  imported it. */

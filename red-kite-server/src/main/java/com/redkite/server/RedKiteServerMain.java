@@ -816,6 +816,19 @@ public class RedKiteServerMain {
         }
     }
 
+    /** Every property name declared anywhere across the project's parent chain and imported BOMs
+     *  — see {@link BomVersionResolver#resolveProjectDeclaredPropertyNames}. Used by
+     *  {@link #patchPomXml} so a newly-introduced property from normalising a literal version never
+     *  shadows one an ancestor (e.g. a Spring Boot parent) already owns. */
+    private Set<String> resolveProjectDeclaredPropertyNames(Path projectRoot, Path pomPath, String rootPomXml) {
+        try {
+            return new BomVersionResolver(new PomFetcher(projectRoot)).resolveProjectDeclaredPropertyNames(pomPath, rootPomXml);
+        } catch (Exception e) {
+            LOGGER.warning(() -> "Could not resolve ancestor property names: " + e.getMessage());
+            return Set.of();
+        }
+    }
+
     /**
      * Computes planned dep-management pins for a set of findings, family-aligned. Used both by
      * {@link #runPhase2Validation} and by display-only fallback paths that recompute pins live
@@ -2038,6 +2051,15 @@ public class RedKiteServerMain {
             if (propertyName != null) activeProperties.add(propertyName);
         }
 
+        // Property names already owned by the project's parent chain / imported BOMs — checked so
+        // normalising a literal version into a new property (below) never shadows one an ancestor
+        // relies on for its own, unrelated dependency management (see
+        // resolveProjectDeclaredPropertyNames).
+        String rootPomKey = selectRootPomKey(sourcePoms, workingTreePath);
+        Set<String> reservedPropertyNames = rootPomKey != null && sourcePoms.get(rootPomKey) != null
+                ? resolveProjectDeclaredPropertyNames(Path.of(workingTreePath), Path.of(workingTreePath).resolve(rootPomKey), sourcePoms.get(rootPomKey))
+                : Set.of();
+
         // Direct dependency upgrades stay property-backed through the normal version patch flow.
         // Only transitive convergence fixes should introduce dependencyManagement pins.
         Map<String, List<ScanComponent>> directByFile = new LinkedHashMap<>();
@@ -2063,17 +2085,16 @@ public class RedKiteServerMain {
                 if (updateById.containsKey(c.id())) fileUpdates.put(coord, updateById.get(c.id()));
                 else if (pinnedIds.contains(c.id()) && c.version() != null) fileUpdates.put(coord, c.version());
             }
-            result.put(entry.getKey(), patchPomXml(content, fileUpdates, pinnedCoords, unpinnedCoords, activeProperties));
+            result.put(entry.getKey(), patchPomXml(content, fileUpdates, pinnedCoords, unpinnedCoords, activeProperties, reservedPropertyNames));
         }
 
         // Sync the root POM's declared version properties to match any direct dep upgrades so
         // project-owned version declarations stay aligned across modules.
         RemediationApplier applier = new RemediationApplier();
-        String rootPomKey = selectRootPomKey(sourcePoms, workingTreePath);
         if (rootPomKey != null && (!allDirectUpdates.isEmpty() || !pinnedCoords.isEmpty() || !unpinnedCoords.isEmpty())) {
             String rootContent = result.containsKey(rootPomKey) ? result.get(rootPomKey) : sourcePoms.get(rootPomKey);
             if (rootContent != null) {
-                String updated = patchPomXml(rootContent, allDirectUpdates, pinnedCoords, unpinnedCoords, activeProperties);
+                String updated = patchPomXml(rootContent, allDirectUpdates, pinnedCoords, unpinnedCoords, activeProperties, reservedPropertyNames);
                 if (!updated.equals(rootContent)) {
                     result.put(rootPomKey, updated);
                 }
@@ -2255,17 +2276,23 @@ public class RedKiteServerMain {
     private static final String USER_PIN_NOTE = "user pinned — uncheck Pin in RedKite to let it manage this dependency again";
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates) throws Exception {
-        return patchPomXml(content, versionUpdates, Set.of(), Set.of(), Set.of());
+        return patchPomXml(content, versionUpdates, Set.of(), Set.of(), Set.of(), Set.of());
     }
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates,
                                       Set<String> pinnedCoords, Set<String> unpinnedCoords) throws Exception {
-        return patchPomXml(content, versionUpdates, pinnedCoords, unpinnedCoords, Set.of());
+        return patchPomXml(content, versionUpdates, pinnedCoords, unpinnedCoords, Set.of(), Set.of());
     }
 
     private static String patchPomXml(String content, Map<String, String> versionUpdates,
                                       Set<String> pinnedCoords, Set<String> unpinnedCoords,
                                       Set<String> activeProperties) throws Exception {
+        return patchPomXml(content, versionUpdates, pinnedCoords, unpinnedCoords, activeProperties, Set.of());
+    }
+
+    private static String patchPomXml(String content, Map<String, String> versionUpdates,
+                                      Set<String> pinnedCoords, Set<String> unpinnedCoords,
+                                      Set<String> activeProperties, Set<String> reservedPropertyNames) throws Exception {
         var dbf = DocumentBuilderFactory.newInstance();
         dbf.setNamespaceAware(false);
         Document doc = dbf.newDocumentBuilder().parse(new InputSource(new StringReader(content)));
@@ -2325,7 +2352,7 @@ public class RedKiteServerMain {
                     if (pinnedCoords.contains(coord) || unpinnedCoords.contains(coord)) {
                         // Route through the same property-backed convention as every other pin,
                         // rather than leaving a bare literal <version> with nothing to mark.
-                        String propName = assignPropName(a, g, propNameForCoord);
+                        String propName = assignPropName(a, g, propNameForCoord, reservedPropertyNames);
                         propNameForCoord.put(coord, propName);
                         Element propertiesEl = findOrCreateProperties(doc, root);
                         setProperty(doc, propertiesEl, propName, upgrade);
@@ -2365,7 +2392,7 @@ public class RedKiteServerMain {
                     String alreadySetTo = propUpgradeTo.get(propName);
                     if (alreadySetTo != null && !alreadySetTo.equals(upgrade)) {
                         // Conflict: create an independent property for this dep
-                        String newPropName = assignPropName(a, g, propNameForCoord);
+                        String newPropName = assignPropName(a, g, propNameForCoord, reservedPropertyNames);
                         propNameForCoord.put(coord, newPropName);
                         setProperty(doc, findOrCreateProperties(doc, root), newPropName, upgrade);
                         versionNode.setTextContent("${" + newPropName + "}");
@@ -2389,7 +2416,7 @@ public class RedKiteServerMain {
                 String effectiveVersion = upgrade != null ? upgrade : versionText;
                 String propName = propNameForCoord.get(coord);
                 if (propName == null) {
-                    propName = assignPropName(a, g, propNameForCoord);
+                    propName = assignPropName(a, g, propNameForCoord, reservedPropertyNames);
                     propNameForCoord.put(coord, propName);
                 }
                 Element propertiesEl = findOrCreateProperties(doc, root);
@@ -2546,10 +2573,25 @@ public class RedKiteServerMain {
         }
     }
 
-    private static String assignPropName(String a, String g, Map<String, String> propNameForCoord) {
+    /** Picks an unused property name for a newly property-backed dependency version. Avoids two
+     *  kinds of collision: another coordinate RedKite is patching in the same batch already claimed
+     *  the short form (propNameForCoord), and a name the project's own parent chain / imported BOMs
+     *  already rely on for something else entirely (reservedPropertyNames) — e.g. a Spring Boot
+     *  parent's own {@code jackson-bom.version} controlling its internal Jackson BOM import. The
+     *  groupId-qualified fallback resolves the overwhelming majority of real collisions (a
+     *  third-party parent's own convention essentially never uses a fully-qualified name); if even
+     *  that collides, the qualified name is still returned — there's no third fallback — since a
+     *  caller needs *some* name, but this is logged so it's diagnosable. */
+    private static String assignPropName(String a, String g, Map<String, String> propNameForCoord,
+                                          Set<String> reservedPropertyNames) {
         String shortName = a + ".version";
-        if (!propNameForCoord.containsValue(shortName)) return shortName;
-        return g + "." + a + ".version";
+        if (!propNameForCoord.containsValue(shortName) && !reservedPropertyNames.contains(shortName)) return shortName;
+        String qualifiedName = g + "." + a + ".version";
+        if (reservedPropertyNames.contains(shortName) && reservedPropertyNames.contains(qualifiedName)) {
+            LOGGER.warning(() -> "Property name " + qualifiedName + " for " + g + ":" + a
+                    + " also collides with a parent/BOM-declared property — using it anyway, nothing else available");
+        }
+        return qualifiedName;
     }
 
     private static Element findOrCreateProperties(Document doc, Element root) {
