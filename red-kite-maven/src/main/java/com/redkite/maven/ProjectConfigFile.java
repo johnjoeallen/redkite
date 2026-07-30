@@ -10,43 +10,54 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Reads a project's own {@code .redkite/project.cfg} — build validation settings checked into the
+ * Reads a project's own {@code .redkite/config.yml} — build validation settings checked into the
  * project itself, rather than entered through RedKite's UI and stored in RedKite's own database.
- * Lets a project declare, once, the extra Maven arguments, activated profile(s), and environment
- * variables its build (and, for Spring Boot projects, its startup) validation needs — a project
- * that requires a specific profile to build or start would otherwise always fail apply validation.
+ * Lets a project declare, once, the extra Maven arguments, activated profile, environment
+ * variables, and Spring Boot-specific settings its build (and, for Spring Boot projects, its
+ * startup) validation needs — a project that requires a specific profile to build or start would
+ * otherwise always fail apply validation.
  *
- * <p>The file is a restricted YAML subset — flat {@code key: value} lines plus one nested map
- * (indented {@code KEY: value} lines under {@code env:}) — parsed by hand rather than pulling in a
- * full YAML library, since that's the entire shape this file will ever need. A line starting with
- * {@code #} (after leading whitespace) or a blank line is ignored. Values may optionally be
- * wrapped in matching single or double quotes; unrecognized top-level keys are ignored, not an
- * error, so a newer/older RedKite version reading an unfamiliar file degrades gracefully.
+ * <p>The file is a restricted YAML subset — flat {@code key: value} lines plus nested maps
+ * (indented {@code KEY: value} lines under {@code env:} or {@code springBoot:}) — parsed by hand
+ * rather than pulling in a full YAML library, since that's the entire shape this file will ever
+ * need. A line starting with {@code #} (after leading whitespace) or a blank line is ignored.
+ * Values may optionally be wrapped in matching single or double quotes; unrecognized top-level
+ * keys are ignored, not an error, so a newer/older RedKite version reading an unfamiliar file
+ * degrades gracefully.
+ *
+ * <p>{@code mavenArgs}/{@code profile}/{@code env}/{@code verify} apply to every validation
+ * RedKite runs for the project — the plain build check, and, for a Spring Boot project, the
+ * {@code spring-boot:run} startup check too. {@code springBoot.profiles} applies only to the
+ * startup check, since it's meaningless outside {@code spring-boot:run} — it's kept in its own
+ * section rather than a flat {@code springProfiles} key specifically to make that scope obvious.
  *
  * <pre>{@code
  * mavenArgs: -Dfoo=bar
  * profile: dev
- * springProfiles: dev,local
+ * verify: true
  * env:
- *   SPRING_PROFILES_ACTIVE: dev
  *   DB_HOST: localhost
+ * springBoot:
+ *   profiles: dev,local
  * }</pre>
  */
 public final class ProjectConfigFile {
     private static final Logger LOGGER = Logger.getLogger(ProjectConfigFile.class.getName());
 
     /** Path to the config file, relative to a project's root directory. */
-    public static final String RELATIVE_PATH = ".redkite/project.cfg";
+    public static final String RELATIVE_PATH = ".redkite/config.yml";
 
-    public record ProjectConfig(String mavenArgs, String profile, String springProfiles, Map<String, String> env) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(null, null, null, Map.of());
+    public record ProjectConfig(String mavenArgs, String profile, boolean verify,
+                                 Map<String, String> env, String springBootProfiles) {
+        public static final ProjectConfig EMPTY = new ProjectConfig(null, null, false, Map.of(), null);
 
-        /** Every setting folded into one Maven argument list, in a stable order: {@code mavenArgs}
-         *  tokens first, then {@code -P<profile>}, then the Spring Boot profile-activation flag —
-         *  the shape {@link com.redkite.maven.ValidationRunner} already accepts, so the caller
-         *  doesn't need to know these came from three separate fields. */
-        public List<String> toMavenArgs() {
-            java.util.List<String> args = new java.util.ArrayList<>();
+        /** {@code mavenArgs} and {@code profile} folded into one list, in a stable order — applies
+         *  to every validation RedKite runs for this project. Does not include
+         *  {@link #springBootProfiles()}, which only ever applies to the {@code spring-boot:run}
+         *  startup check specifically; a caller building that command appends
+         *  {@link #springBootArgs()} on top of this. */
+        public List<String> toBuildArgs() {
+            List<String> args = new java.util.ArrayList<>();
             if (mavenArgs != null && !mavenArgs.isBlank()) {
                 for (String part : mavenArgs.trim().split("\\s+")) {
                     if (!part.isEmpty()) args.add(part);
@@ -55,17 +66,21 @@ public final class ProjectConfigFile {
             if (profile != null && !profile.isBlank()) {
                 args.add("-P" + profile.trim());
             }
-            if (springProfiles != null && !springProfiles.isBlank()) {
-                args.add("-Dspring-boot.run.profiles=" + springProfiles.trim());
-            }
             return List.copyOf(args);
+        }
+
+        /** Extra arguments that apply only to the {@code spring-boot:run} startup check — appended
+         *  on top of {@link #toBuildArgs()}, never used for the plain build check. */
+        public List<String> springBootArgs() {
+            if (springBootProfiles == null || springBootProfiles.isBlank()) return List.of();
+            return List.of("-Dspring-boot.run.profiles=" + springBootProfiles.trim());
         }
     }
 
     private ProjectConfigFile() {
     }
 
-    /** Reads {@code <projectRoot>/.redkite/project.cfg}, or {@link ProjectConfig#EMPTY} if it
+    /** Reads {@code <projectRoot>/.redkite/config.yml}, or {@link ProjectConfig#EMPTY} if it
      *  doesn't exist or fails to parse (logged, never thrown — a malformed config file shouldn't
      *  block analysis or validation from running at all). */
     public static ProjectConfig load(Path projectRoot) {
@@ -80,7 +95,8 @@ public final class ProjectConfigFile {
     }
 
     static ProjectConfig parse(String content) {
-        String mavenArgs = null, profile = null, springProfiles = null;
+        String mavenArgs = null, profile = null, springBootProfiles = null;
+        boolean verify = false;
         Map<String, String> env = new LinkedHashMap<>();
         String currentTopKey = null;
 
@@ -95,8 +111,15 @@ public final class ProjectConfigFile {
             String key = trimmed.substring(0, colon).strip();
             String value = unquote(trimmed.substring(colon + 1).strip());
 
-            if (indented && "env".equals(currentTopKey)) {
-                if (!key.isEmpty()) env.put(key, value);
+            if (indented && currentTopKey != null) {
+                if (key.isEmpty()) continue;
+                switch (currentTopKey) {
+                    case "env" -> env.put(key, value);
+                    case "springBoot" -> {
+                        if ("profiles".equals(key)) springBootProfiles = value;
+                    }
+                    default -> { /* an indented line under a top key with no nested sections — ignore */ }
+                }
                 continue;
             }
 
@@ -104,12 +127,12 @@ public final class ProjectConfigFile {
             switch (key) {
                 case "mavenArgs" -> mavenArgs = value;
                 case "profile" -> profile = value;
-                case "springProfiles" -> springProfiles = value;
-                case "env" -> { /* value (if any) on the same line as "env:" is ignored — only its indented children are read */ }
-                default -> LOGGER.fine(() -> "Ignoring unrecognized project.cfg key: " + key);
+                case "verify" -> verify = "true".equalsIgnoreCase(value);
+                case "env", "springBoot" -> { /* value (if any) on this line is ignored — only indented children are read */ }
+                default -> LOGGER.fine(() -> "Ignoring unrecognized " + RELATIVE_PATH + " key: " + key);
             }
         }
-        return new ProjectConfig(mavenArgs, profile, springProfiles, Map.copyOf(env));
+        return new ProjectConfig(mavenArgs, profile, verify, Map.copyOf(env), springBootProfiles);
     }
 
     private static String unquote(String value) {

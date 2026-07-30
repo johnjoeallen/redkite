@@ -18,17 +18,34 @@ class ProjectConfigFileTest {
         String yaml = """
                 mavenArgs: -Dfoo=bar
                 profile: dev
-                springProfiles: dev,local
+                verify: true
                 env:
                   SPRING_PROFILES_ACTIVE: dev
                   DB_HOST: localhost
+                springBoot:
+                  profiles: dev,local
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
 
         assertEquals("-Dfoo=bar", config.mavenArgs());
         assertEquals("dev", config.profile());
-        assertEquals("dev,local", config.springProfiles());
+        assertTrue(config.verify());
         assertEquals(Map.of("SPRING_PROFILES_ACTIVE", "dev", "DB_HOST", "localhost"), config.env());
+        assertEquals("dev,local", config.springBootProfiles());
+    }
+
+    @Test
+    void verifyDefaultsToFalse() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("mavenArgs: -Dfoo=bar\n");
+        assertFalse(config.verify());
+    }
+
+    @Test
+    void verifyIsCaseInsensitive() {
+        assertTrue(ProjectConfigFile.parse("verify: TRUE\n").verify());
+        assertTrue(ProjectConfigFile.parse("verify: True\n").verify());
+        assertFalse(ProjectConfigFile.parse("verify: false\n").verify());
+        assertFalse(ProjectConfigFile.parse("verify: nonsense\n").verify());
     }
 
     @Test
@@ -67,6 +84,19 @@ class ProjectConfigFileTest {
     }
 
     @Test
+    void springBootSectionDoesNotLeakIntoEnv() {
+        String yaml = """
+                env:
+                  DB_HOST: localhost
+                springBoot:
+                  profiles: dev
+                """;
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
+        assertEquals(Map.of("DB_HOST", "localhost"), config.env());
+        assertEquals("dev", config.springBootProfiles());
+    }
+
+    @Test
     void unrecognizedKeysAreIgnoredNotFatal() {
         String yaml = """
                 somethingFromTheFuture: whatever
@@ -81,8 +111,9 @@ class ProjectConfigFileTest {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("");
         assertNull(config.mavenArgs());
         assertNull(config.profile());
-        assertNull(config.springProfiles());
+        assertFalse(config.verify());
         assertTrue(config.env().isEmpty());
+        assertNull(config.springBootProfiles());
     }
 
     @Test
@@ -95,23 +126,34 @@ class ProjectConfigFileTest {
     void loadsRealFileFromDisk(@TempDir Path tempDir) throws IOException {
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("project.cfg"), "profile: ci\n");
+        Files.writeString(configDir.resolve("config.yml"), "profile: ci\n");
 
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
         assertEquals("ci", config.profile());
     }
 
     @Test
-    void toMavenArgsCombinesAllThreeSourcesInOrder() {
+    void toBuildArgsExcludesSpringBootProfiles() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                "-Dfoo=bar -Dbaz=qux", "dev", "dev,local", Map.of());
-        assertEquals(List.of("-Dfoo=bar", "-Dbaz=qux", "-Pdev", "-Dspring-boot.run.profiles=dev,local"),
-                config.toMavenArgs());
+                "-Dfoo=bar", "dev", false, Map.of(), "dev,local");
+        assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
-    void toMavenArgsSkipsBlankFields() {
-        ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(null, "", "dev", Map.of());
-        assertEquals(List.of("-Dspring-boot.run.profiles=dev"), config.toMavenArgs());
+    void springBootArgsOnlyContainsProfilesFlag() {
+        ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
+                "-Dfoo=bar", "dev", false, Map.of(), "dev,local");
+        assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
+    }
+
+    @Test
+    void springBootArgsEmptyWhenNotSet() {
+        assertEquals(List.of(), ProjectConfigFile.ProjectConfig.EMPTY.springBootArgs());
+    }
+
+    @Test
+    void toBuildArgsSkipsBlankFields() {
+        ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(null, "", false, Map.of(), null);
+        assertEquals(List.of(), config.toBuildArgs());
     }
 }

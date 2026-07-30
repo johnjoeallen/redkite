@@ -513,7 +513,7 @@ public class RedKiteServerMain {
         StringBuilder body = new StringBuilder();
         body.append("<section class=\"card span-2\"><h2>Project configuration</h2>");
         body.append("<p class=\"muted\">Extra Maven arguments, profile, and environment variables used when validating this project's build ")
-                .append("(e.g. a Spring profile a spring-boot:run startup check needs) — read from <code>")
+                .append("— read from <code>")
                 .append(escape(com.redkite.maven.ProjectConfigFile.RELATIVE_PATH)).append("</code> in the project itself.</p>");
         if (!exists) {
             body.append("<p class=\"proj-meta-val muted\">No <code>").append(escape(com.redkite.maven.ProjectConfigFile.RELATIVE_PATH))
@@ -533,9 +533,14 @@ public class RedKiteServerMain {
                             ? "<code class=\"proj-meta-val\">" + escape(config.profile()) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
-            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Spring profiles</span>")
-                    .append(config.springProfiles() != null && !config.springProfiles().isBlank()
-                            ? "<code class=\"proj-meta-val\">" + escape(config.springProfiles()) + "</code>"
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Verify only (run tests, skip startup)</span>")
+                    .append(config.verify()
+                            ? "<code class=\"proj-meta-val\">true</code>"
+                            : "<span class=\"proj-meta-val muted\">false</span>")
+                    .append("</div>");
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Spring Boot profiles</span>")
+                    .append(config.springBootProfiles() != null && !config.springBootProfiles().isBlank()
+                            ? "<code class=\"proj-meta-val\">" + escape(config.springBootProfiles()) + "</code>"
                             : "<span class=\"proj-meta-val muted\">none</span>")
                     .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Environment variables</span>");
@@ -1203,8 +1208,8 @@ public class RedKiteServerMain {
             Path projectRoot = Path.of(scanEntry.input().workingTreePath()).toAbsolutePath().normalize();
             Path rootPom = projectRoot.resolve("pom.xml");
             com.redkite.maven.ProjectConfigFile.ProjectConfig projectConfig = com.redkite.maven.ProjectConfigFile.load(projectRoot);
-            List<String> validationMavenArgs = projectConfig.toMavenArgs();
-            Map<String, String> validationEnv = projectConfig.env();
+            com.redkite.maven.ValidationRunner.ValidationOptions validationOptions = new com.redkite.maven.ValidationRunner.ValidationOptions(
+                    projectConfig.toBuildArgs(), projectConfig.env(), projectConfig.verify(), projectConfig.springBootArgs());
 
             new Thread(() -> {
                 try {
@@ -1283,7 +1288,7 @@ public class RedKiteServerMain {
                     // authoritative gate.
                     job.phase = ApplyJob.Phase.PRE_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult pre =
-                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions);
                     job.baselinePassed = pre.passed();
                     if (!pre.passed()) {
                         LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
@@ -1300,7 +1305,7 @@ public class RedKiteServerMain {
                     // --- POST-VALIDATE ---
                     job.phase = ApplyJob.Phase.POST_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult post =
-                            runner.validateWithStartup(projectRoot, rootPom, 180, validationMavenArgs, validationEnv);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions);
                     if (!post.passed()) {
                         // Restore originals.
                         for (Map.Entry<Path, String> entry : originals.entrySet()) {

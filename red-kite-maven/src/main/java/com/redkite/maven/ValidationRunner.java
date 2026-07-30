@@ -26,27 +26,46 @@ public class ValidationRunner {
 
     public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
 
-    /** Runs {@code mvn clean install} and returns the result. */
-    public ValidationResult validate(Path projectRoot, Path pomPath) {
-        return validate(projectRoot, pomPath, List.of(), Map.of());
+    /**
+     * Extra configuration for a validation run, sourced from a project's own
+     * {@code .redkite/config.yml} (see {@link ProjectConfigFile}).
+     *
+     * @param mavenArgs    extra arguments appended to every {@code mvn} invocation (build and, for
+     *                     a Spring Boot project, the startup check) — e.g. Maven profiles via
+     *                     {@code -P} or {@code -D} properties
+     * @param env          extra environment variables set on the spawned processes
+     * @param verify       when {@code true}, runs {@code mvn clean verify} (tests included) instead
+     *                     of the default {@code mvn clean install -DskipTests} — for a project that
+     *                     wants its own unit tests to gate an apply, not just "does it compile"
+     * @param springBootArgs extra arguments appended only to the {@code spring-boot:run} startup
+     *                       check, on top of {@code mavenArgs} — never used for the plain build
+     *                       check, since they're meaningless outside a Spring Boot startup (e.g.
+     *                       {@code -Dspring-boot.run.profiles=...})
+     */
+    public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, boolean verify,
+                                     List<String> springBootArgs) {
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), false, List.of());
     }
 
-    /**
-     * Runs {@code mvn clean install} and returns the result.
-     *
-     * @param extraMavenArgs extra arguments appended to the {@code mvn} command (e.g. {@code -Pdev},
-     *                       {@code -Dspring.profiles.active=dev})
-     * @param extraEnv       extra environment variables set on the spawned process
-     */
-    public ValidationResult validate(Path projectRoot, Path pomPath, List<String> extraMavenArgs, Map<String, String> extraEnv) {
+    /** Runs {@code mvn clean install} and returns the result. */
+    public ValidationResult validate(Path projectRoot, Path pomPath) {
+        return validate(projectRoot, pomPath, ValidationOptions.DEFAULT);
+    }
+
+    /** Runs {@code mvn clean install} (or {@code mvn clean verify} — see
+     *  {@link ValidationOptions#verify()}) and returns the result. */
+    public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options) {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs,
-                "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+        List<String> command = options.verify()
+                ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                        "clean", "verify", "-Denforcer.skip=true")
+                : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                        "clean", "install", "-DskipTests", "-Denforcer.skip=true");
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
-            builder.environment().putAll(extraEnv);
+            builder.environment().putAll(options.env());
             Process process = builder.start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exit = process.waitFor();
@@ -71,22 +90,28 @@ public class ValidationRunner {
      * The spawned process is always killed before returning.
      */
     public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds) {
-        return validateWithStartup(projectRoot, pomPath, timeoutSeconds, List.of(), Map.of());
+        return validateWithStartup(projectRoot, pomPath, timeoutSeconds, ValidationOptions.DEFAULT);
     }
 
     /**
-     * Runs {@code mvn clean install} then, if {@code spring-boot-maven-plugin} is detected in the
-     * root POM, also runs {@code mvn spring-boot:run} and waits for the startup signal or timeout.
-     * The spawned process is always killed before returning.
+     * Runs the build check (see {@link #validate}) then, if {@link ValidationOptions#verify()} is
+     * {@code false} and {@code spring-boot-maven-plugin} is detected in the root POM, also runs
+     * {@code mvn spring-boot:run} and waits for the startup signal or timeout. The spawned process
+     * is always killed before returning.
      *
-     * @param extraMavenArgs extra arguments appended to every {@code mvn} invocation (build and
-     *                       startup) — e.g. Maven profiles via {@code -P} or {@code -D} properties
-     * @param extraEnv       extra environment variables set on the spawned processes
+     * <p>When {@link ValidationOptions#verify()} is {@code true}, the startup check never runs at
+     * all, regardless of whether the project is Spring Boot — validation is the build check alone
+     * (with tests included), for a project where starting the app isn't practical but its own test
+     * suite is still a meaningful gate.
      */
     public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds,
-                                                 List<String> extraMavenArgs, Map<String, String> extraEnv) {
-        ValidationResult buildResult = validate(projectRoot, pomPath, extraMavenArgs, extraEnv);
+                                                 ValidationOptions options) {
+        ValidationResult buildResult = validate(projectRoot, pomPath, options);
         if (!buildResult.passed()) return buildResult;
+        if (options.verify()) {
+            LOGGER.info(() -> "verify-only configured for " + pomPath + "; skipping startup validation");
+            return buildResult;
+        }
 
         String pomContent;
         try {
@@ -113,13 +138,15 @@ public class ValidationRunner {
                 + " with timeout " + timeoutSeconds + "s");
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, extraMavenArgs,
+        List<String> startupArgs = new java.util.ArrayList<>(options.mavenArgs());
+        startupArgs.addAll(options.springBootArgs());
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, startupArgs,
                 "spring-boot:run", "-Dspring-boot.run.arguments=--server.port=" + port);
         LOGGER.info(() -> "Startup validation build: " + String.join(" ", command));
 
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
-            builder.environment().putAll(extraEnv);
+            builder.environment().putAll(options.env());
             Process process = builder.start();
 
             StringBuffer startupOutput = new StringBuffer();
