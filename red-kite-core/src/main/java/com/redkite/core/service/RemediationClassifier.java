@@ -11,6 +11,12 @@ import java.util.Map;
 import java.util.Set;
 
 public final class RemediationClassifier {
+    /** Matches the declarationPath the scanner gives a project's own {@code <parent>} component
+     *  (see {@code MavenProjectScanner}). Duplicated as a literal here rather than a cross-module
+     *  dependency, since red-kite-core doesn't depend on red-kite-maven — same reasoning as
+     *  {@code DependencyOriginClassifier}'s own copy of this constant. */
+    private static final String PARENT_DECLARATION_PATH = "/project/parent";
+
     private RemediationClassifier() {
     }
 
@@ -41,8 +47,12 @@ public final class RemediationClassifier {
         boolean isSnapshot = component.snapshot();
         if (isSnapshot) reasons.add("Snapshot dependency");
 
+        // A <parent> version is always literal by Maven's own resolution order — never anything
+        // this or any other tool could make property/BOM-managed instead — so flagging it here
+        // would be a permanent, unactionable finding on every single project scanned.
         boolean hasDeclaredVersion = component.direct()
-                && component.versionSource() == VersionSource.LITERAL;
+                && component.versionSource() == VersionSource.LITERAL
+                && !PARENT_DECLARATION_PATH.equals(component.declarationPath());
         if (hasDeclaredVersion) reasons.add("Declared inline version");
 
         List<VulnerabilityFinding> componentFindings = findingsFor(component, allFindings);

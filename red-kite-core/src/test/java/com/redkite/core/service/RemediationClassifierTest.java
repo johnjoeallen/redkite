@@ -77,6 +77,18 @@ class RemediationClassifierTest {
     }
 
     @Test
+    void projectsOwnParentIsNotFlaggedForItsLiteralVersion() {
+        // A <parent> version is always literal by Maven's own resolution order — never anything
+        // any tool could make property/BOM-managed instead — so flagging it here would be a
+        // permanent, unactionable finding on every single project scanned, at any version.
+        ScanComponent comp = new ScanComponent(1L, COORD, "1.0.0", DependencyScope.COMPILE,
+                true, VersionSource.LITERAL, "pom.xml", "/project/parent", Map.of(), false, null, null);
+        RemediationStatus status = RemediationClassifier.classify(comp, List.of(), List.of(), List.of());
+        assertFalse(status.hasDeclaredVersionDeclaration());
+        assertFalse(status.needsRemediation());
+    }
+
+    @Test
     void vulnerabilityNeedsRemediation() {
         ScanComponent comp = releaseComponent(1L);
         RemediationStatus status = RemediationClassifier.classify(
