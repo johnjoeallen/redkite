@@ -499,8 +499,8 @@ projects
   name varchar
   root_path varchar UNIQUE
   enforcer_use_verify boolean      ← true = skip enforcer, use mvn verify
-  validation_maven_args varchar    ← extra mvn args for build/startup validation, e.g. "-Pdev"
-  validation_env varchar           ← extra env vars for validation, "KEY=VALUE,KEY2=VALUE2"
+  validation_maven_args varchar    ← unused since project.cfg replaced it; column kept, never read/written
+  validation_env varchar           ← unused since project.cfg replaced it; column kept, never read/written
 
 scans
   id uuid PK
@@ -582,7 +582,6 @@ rk_schema_version                  ← migration gate (current: v2)
 | `GET` | `/api/scans/enforcer?scanId=` | Get enforcer findings as JSON |
 | `POST` | `/api/metadata/clear` | Clear version and vulnerability caches |
 | `DELETE` | `/api/projects/{id}` | Delete project and all its scans |
-| `POST` | `/api/projects/{id}/validation` | Save per-project build validation settings (extra mvn args / env vars), redirects back to `/projects/{id}` |
 | `POST` | `/api/prefs` | Save UI preferences (theme) |
 | `GET` | `/config` | Config page: edit cache TTLs (`rk_config`) |
 | `POST` | `/api/config` | Save cache TTL values, redirects back to `/config` |
@@ -654,7 +653,7 @@ mvn clean install -DskipTests -Denforcer.skip=true -f <rootPom>
 
 Enforcer is skipped because enforcer violations are what RedKite is fixing — running it during validation would create an unresolvable catch-22 on broken projects. Tests are skipped for speed.
 
-Both the build and the `spring-boot:run` startup check accept extra configuration, stored per-project (`projects.validation_maven_args`, `projects.validation_env`), editable via the "Build validation" panel on `/projects/{id}` and POSTed to `/api/projects/{id}/validation`: whitespace-separated extra `mvn` arguments (e.g. `-Pdev -Dspring.profiles.active=dev`) and comma-separated `KEY=VALUE` environment variables. Loaded fresh from `ProjectEntry` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., extraMavenArgs, extraEnv)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different projects need different values.
+Both the build and the `spring-boot:run` startup check accept extra configuration, read from the project's own `.redkite/project.cfg` (`ProjectConfigFile`, red-kite-maven) — a restricted YAML subset with `mavenArgs`, `profile`, `springProfiles`, and an `env` map. `ProjectConfig.toMavenArgs()` folds `mavenArgs`/`profile`/`springProfiles` into one argument list (`-P<profile>`, `-Dspring-boot.run.profiles=<springProfiles>`); `env` is used as-is. Loaded fresh from `projectRoot` at the start of each apply job and passed into `ValidationRunner.validateWithStartup(..., extraMavenArgs, extraEnv)` for both PRE_VALIDATE and POST_VALIDATE. This exists because projects that require an active Spring profile or environment-specific config to build/start would otherwise always fail startup validation, and different projects need different values. The project page shows a read-only panel with whatever the file currently resolves to — there's no UI form or API endpoint to edit it; the old `projects.validation_maven_args`/`validation_env` columns and their `/api/projects/{id}/validation` endpoint are gone from the code (columns remain in the schema, unused, per the project's no-destructive-migration convention).
 
 ### Status responses
 

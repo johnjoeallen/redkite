@@ -114,7 +114,6 @@ nav:
       - Project Settings: configuration/project-settings.md
       - Cache Settings: configuration/cache-settings.md
       - Maven Settings: configuration/maven-settings.md
-      - Future config.rk: configuration/future-config-file.md
 
   - Troubleshooting:
       - Overview: troubleshooting/index.md

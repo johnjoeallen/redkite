@@ -85,7 +85,7 @@ Use **Clear cache** to flush the cached version and vulnerability metadata and f
 
 ## Configuration
 
-Pass JVM system properties to override defaults:
+Pass JVM system properties to override defaults, or set them persistently in `~/.redkite/redkite.properties` (created from a bundled default by `red-kite.sh`/`red-kite.bat` on first run — a `-D` flag always overrides the file):
 
 ```bash
 java -Dredkite.port=8080 -jar red-kite.jar
@@ -103,12 +103,18 @@ java -Dredkite.port=8080 -jar red-kite.jar
 
 ### Build Validation Settings
 
-Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different projects can need different values — set them on the **Build validation** panel on each project's page (`/projects/{id}`):
+Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different projects can need different values — declared in a `.redkite/project.cfg` file checked into the project itself, not through RedKite's UI:
 
-- **Extra mvn arguments** — whitespace-separated arguments appended to every validation `mvn` call (build and `spring-boot:run`), e.g. `-Pdev -Dspring.profiles.active=dev`
-- **Extra environment variables** — comma-separated `KEY=VALUE` pairs set on the spawned validation processes, e.g. `SPRING_PROFILES_ACTIVE=dev,DB_HOST=localhost`
+```yaml
+mavenArgs: -Dfoo=bar
+profile: dev
+springProfiles: dev,local
+env:
+  SPRING_PROFILES_ACTIVE: dev
+  DB_HOST: localhost
+```
 
-Stored in the database (`projects.validation_maven_args` / `projects.validation_env`) and applied to the next apply — no restart needed.
+Picked up on the next apply — no restart needed. The project's own page shows a read-only panel with whatever the file currently resolves to.
 
 ### Config Page
 

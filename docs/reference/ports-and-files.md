@@ -16,10 +16,16 @@ By default, RedKite stores everything under `~/.redkite/`:
 
 `--drop-db` (see [Command Line](command-line.md)) deletes the two database files.
 
+## Files read from your project
+
+| File | Contents |
+|---|---|
+| `.redkite/project.cfg` | Extra Maven arguments, profile, Spring profile, and environment variables for build validation — see [Build Validation](../projects/build-validation.md). Written by you, not RedKite; entirely optional. |
+
 ## Files written inside your projects
 
 | File | When | Contents |
 |---|---|---|
 | `pom.failed` | A validation build/startup fails during an apply | A snapshot of the exact POM that was being validated at the moment of failure, sibling to the real `pom.xml`. Overwritten by the next failure. See [Failed POMs](../applying-changes/failed-poms.md). |
 
-RedKite never leaves any other file behind in a project it analyses — outside of an apply you explicitly triggered, the only files it touches are the POMs you selected changes for.
+RedKite never leaves any other file behind in a project it analyses — outside of an apply you explicitly triggered, the only files it writes are the POMs you selected changes for.

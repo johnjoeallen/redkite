@@ -6,6 +6,6 @@ Each project has its own page showing:
 - an **Analysis history** list of every past analysis, with timestamps and status badges — click any row to open that analysis
 - an **Analyse** button to trigger a new analysis
 - the resolved `settings.xml` path and configured Maven repositories RedKite is using for this project
-- the **Build Validation** panel — see [Build Validation](build-validation.md)
+- the **Project configuration** panel — a read-only view of the project's own `.redkite/project.cfg`, see [Build Validation](build-validation.md)
 
 See [Analysis History](../analysis/analysis-history.md) for what the history list itself shows.
