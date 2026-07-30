@@ -1,5 +1,7 @@
 # System Properties
 
+Every property below can also be set persistently in `~/.redkite/redkite.properties` instead of passing it as a `-D` flag on every launch — see [Application Settings](../configuration/application-settings.md#the-config-file). A `-D` flag always overrides the file.
+
 Set with `-D` at launch, e.g. `java -Dredkite.port=8080 -jar red-kite.jar`.
 
 | Property | Default | Purpose |

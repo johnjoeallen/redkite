@@ -17,5 +17,6 @@ A packaged release is a zip containing:
 
 - `red-kite.jar` — the fat jar
 - `red-kite.sh` / `red-kite.bat` — launcher scripts for Linux/macOS and Windows
+- `red-kite.properties.default` — the config file the launcher scripts copy to `~/.redkite/redkite.properties` on first run; see [Application Settings](../configuration/application-settings.md#the-config-file)
 
 Download and unzip it, then run the launcher script for your platform — see [Installation](../getting-started/installation.md).

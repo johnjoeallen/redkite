@@ -12,6 +12,7 @@ By default, RedKite stores everything under `~/.redkite/`:
 |---|---|
 | `redkite.mv.db`, `redkite.trace.db` | The H2 database — see [Database](database.md) |
 | `preferences.properties` | Local UI preferences (theme, etc.) |
+| `redkite.properties` | [System properties](system-properties.md), persisted — copied here from the release's bundled `red-kite.properties.default` on first run |
 
 `--drop-db` (see [Command Line](command-line.md)) deletes the two database files.
 
