@@ -7,6 +7,7 @@ redkite:
   maven:
     mode: run
     skipTests: true
+    fullLogs: false
     profile: redkite
     args:
       - "-Dfoo=bar"
@@ -33,6 +34,7 @@ None of the fields are required — an empty or missing file just means validati
 Use `verify` or `test` for a project where starting the app for real isn't practical, but its own tests are still a meaningful gate to run before an apply is kept — `test` is the lighter check of the two, `verify` the more thorough one.
 
 - **`skipTests`** (default `true`, matching RedKite's existing behavior) only applies to `mode: run` — set it to `false` to run the project's own tests as part of the build check too. `verify` and `test` always run tests regardless of this setting, since running tests is the entire reason to pick one of those modes over `run`.
+- **`fullLogs`** (default `false`) applies to every validation `mvn` call regardless of mode. RedKite normally runs with `--no-transfer-progress`, which suppresses per-artifact dependency download/upload logging — set this to `true` to include it in the raw build output, useful when a failure looks repository- or network-related rather than a genuine build error.
 
 The project dashboard shows a read-only **Project configuration** panel with whatever `.redkite/config.yml` currently resolves to, so you can confirm RedKite is reading what you expect without leaving the UI. There's nothing to save from the UI itself — edit the file in your project and RedKite picks it up on the next validation run, no restart needed.
 

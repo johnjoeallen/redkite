@@ -541,6 +541,9 @@ public class RedKiteServerMain {
                         .append("<code class=\"proj-meta-val\">").append(config.skipTests()).append("</code>")
                         .append("</div>");
             }
+            body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Full logs</span>")
+                    .append("<code class=\"proj-meta-val\">").append(config.fullLogs()).append("</code>")
+                    .append("</div>");
             body.append("<div class=\"proj-meta-row\"><span class=\"proj-meta-label\">Spring Boot profiles</span>")
                     .append(config.springProfiles() != null && !config.springProfiles().isBlank()
                             ? "<code class=\"proj-meta-val\">" + escape(config.springProfiles()) + "</code>"
@@ -1214,7 +1217,7 @@ public class RedKiteServerMain {
             com.redkite.maven.ProjectConfigFile.ProjectConfig projectConfig = com.redkite.maven.ProjectConfigFile.load(projectRoot);
             com.redkite.maven.ValidationRunner.ValidationOptions validationOptions = new com.redkite.maven.ValidationRunner.ValidationOptions(
                     projectConfig.toBuildArgs(), projectConfig.env(), projectConfig.mode(), projectConfig.springBootArgs(),
-                    projectConfig.skipTests());
+                    projectConfig.skipTests(), projectConfig.fullLogs());
 
             new Thread(() -> {
                 try {

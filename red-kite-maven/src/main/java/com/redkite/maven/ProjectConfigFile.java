@@ -36,12 +36,16 @@ import java.util.logging.Logger;
  * ever runs at all) — see {@link ValidationRunner.Mode}. {@code skipTests} (default {@code true},
  * matching today's existing behavior) only applies to {@code mode: run} — {@code verify}/{@code
  * test} always run tests regardless, since that's the entire point of choosing one of those modes.
+ * {@code fullLogs} (default {@code false}) applies to every {@code mvn} invocation regardless of
+ * mode — {@code true} omits {@code --no-transfer-progress}, so dependency download/upload activity
+ * shows up in the raw build output, useful when a failure looks repository/network-related.
  *
  * <pre>{@code
  * redkite:
  *   maven:
  *     mode: run
  *     skipTests: true
+ *     fullLogs: false
  *     profile: redkite-build
  *     args:
  *       - "--batch-mode"
@@ -67,8 +71,8 @@ public final class ProjectConfigFile {
     public static final String RELATIVE_PATH = ".redkite/config.yml";
 
     public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
-                                 Map<String, String> env, String springProfiles, boolean skipTests) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, true);
+                                 Map<String, String> env, String springProfiles, boolean skipTests, boolean fullLogs) {
+        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, true, false);
 
         /** {@code args} and {@code profile} folded into one list, in a stable order — applies to
          *  every validation RedKite runs for this project. Does not include
@@ -105,6 +109,7 @@ public final class ProjectConfigFile {
             #  maven:
             #    mode: run              # run (default) | verify | test
             #    skipTests: true        # only applies to mode: run — default true
+            #    fullLogs: false        # true includes dependency transfer logging — default false
             #    profile: my-profile
             #    args:
             #      - "-Dfoo=bar"
@@ -168,8 +173,9 @@ public final class ProjectConfigFile {
         Map<String, String> env = asStringMap(maven.get("env"));
         String springProfiles = maven.get("spring") instanceof Map<?, ?> spring ? asString(spring.get("profiles")) : null;
         boolean skipTests = asBoolean(maven.get("skipTests"), true);
+        boolean fullLogs = asBoolean(maven.get("fullLogs"), false);
 
-        return new ProjectConfig(args, profile, mode, env, springProfiles, skipTests);
+        return new ProjectConfig(args, profile, mode, env, springProfiles, skipTests, fullLogs);
     }
 
     /** Accepts either a real YAML list (each entry becomes one argument as-is) or a single

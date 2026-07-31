@@ -65,10 +65,15 @@ public class ValidationRunner {
      *                     behavior — {@code -DskipTests}). {@link Mode#VERIFY} and {@link Mode#TEST}
      *                     always run tests regardless of this flag, since running tests is the
      *                     entire reason to pick one of those modes over {@code RUN}.
+     * @param fullLogs     default {@code false}, today's existing behavior — every {@code mvn}
+     *                     invocation runs with {@code --no-transfer-progress}, which suppresses
+     *                     per-artifact dependency download/upload logging. {@code true} omits that
+     *                     flag, so the raw build output includes it — useful when diagnosing a
+     *                     failure that looks repository/network-related.
      */
     public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, Mode mode,
-                                     List<String> springBootArgs, boolean skipTests) {
-        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), true);
+                                     List<String> springBootArgs, boolean skipTests, boolean fullLogs) {
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), true, false);
     }
 
     /** Runs {@code mvn clean install} and returns the result. */
@@ -82,14 +87,14 @@ public class ValidationRunner {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         List<String> command = switch (options.mode()) {
-            case VERIFY -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+            case VERIFY -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
                     "clean", "verify", "-Denforcer.skip=true");
-            case TEST -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+            case TEST -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
                     "clean", "test", "-Denforcer.skip=true");
             case RUN -> options.skipTests()
-                    ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                    ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
                             "clean", "install", "-DskipTests", "-Denforcer.skip=true")
-                    : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                    : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
                             "clean", "install", "-Denforcer.skip=true");
         };
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
@@ -171,7 +176,7 @@ public class ValidationRunner {
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         List<String> startupArgs = new java.util.ArrayList<>(options.mavenArgs());
         startupArgs.addAll(options.springBootArgs());
-        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, startupArgs,
+        List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, startupArgs, options.fullLogs(),
                 "spring-boot:run", "-Dspring-boot.run.arguments=--server.port=" + port);
         LOGGER.info(() -> "Startup validation build: " + String.join(" ", command));
 
@@ -323,7 +328,7 @@ public class ValidationRunner {
     }
 
     private static List<String> buildCommand(String mvn, Path settings, Path projectRoot, Path pomPath,
-                                              List<String> extraMavenArgs, String... goals) {
+                                              List<String> extraMavenArgs, boolean fullLogs, String... goals) {
         List<String> command = new ArrayList<>();
         command.add(mvn);
         if (settings != null && MavenSettingsReader.isProjectLocalSettings(settings, projectRoot)) {
@@ -332,7 +337,7 @@ public class ValidationRunner {
         }
         command.add("-f");
         command.add(pomPath.toString());
-        command.add("--no-transfer-progress");
+        if (!fullLogs) command.add("--no-transfer-progress");
         for (String goal : goals) command.add(goal);
         command.addAll(extraMavenArgs);
         return command;

@@ -20,6 +20,7 @@ class ProjectConfigFileTest {
                   maven:
                     mode: verify
                     skipTests: false
+                    fullLogs: true
                     profile: redkite-build
                     args:
                       - "--batch-mode"
@@ -39,6 +40,7 @@ class ProjectConfigFileTest {
         assertEquals(Map.of("DB_HOST", "localhost", "DB_PASS", "pw"), config.env());
         assertEquals("redkite-local", config.springProfiles());
         assertFalse(config.skipTests());
+        assertTrue(config.fullLogs());
     }
 
     @Test
@@ -59,6 +61,26 @@ class ProjectConfigFileTest {
     void unrecognizedSkipTestsValueDefaultsToTrue() {
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: nonsense\n");
         assertTrue(config.skipTests());
+    }
+
+    @Test
+    void fullLogsDefaultsToFalse() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    profile: dev\n");
+        assertFalse(config.fullLogs());
+    }
+
+    @Test
+    void fullLogsIsCaseInsensitiveAndAcceptsAQuotedScalar() {
+        assertTrue(ProjectConfigFile.parse("redkite:\n  maven:\n    fullLogs: true\n").fullLogs());
+        assertTrue(ProjectConfigFile.parse("redkite:\n  maven:\n    fullLogs: TRUE\n").fullLogs());
+        assertTrue(ProjectConfigFile.parse("redkite:\n  maven:\n    fullLogs: \"true\"\n").fullLogs());
+        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    fullLogs: false\n").fullLogs());
+    }
+
+    @Test
+    void unrecognizedFullLogsValueDefaultsToFalse() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    fullLogs: nonsense\n");
+        assertFalse(config.fullLogs());
     }
 
     @Test
@@ -203,6 +225,7 @@ class ProjectConfigFileTest {
         assertTrue(config.env().isEmpty());
         assertNull(config.springProfiles());
         assertTrue(config.skipTests());
+        assertFalse(config.fullLogs());
     }
 
     @Test
@@ -259,14 +282,14 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsAppendsProfileFlagAfterArgs() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true, false);
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true, false);
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -278,7 +301,7 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsSkipsBlankProfile() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, true);
+                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, true, false);
         assertEquals(List.of(), config.toBuildArgs());
     }
 

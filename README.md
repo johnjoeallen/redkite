@@ -110,6 +110,7 @@ redkite:
   maven:
     mode: run
     skipTests: true
+    fullLogs: false
     profile: dev
     args:
       - "-Dfoo=bar"
@@ -120,7 +121,7 @@ redkite:
       profiles: dev,local
 ```
 
-`args`/`profile`/`env` apply to every validation call; `spring.profiles` applies only to the `spring-boot:run` startup check. `mode` picks the Maven lifecycle phase and whether a startup check is ever attempted: `run` (default) is `mvn clean install` plus `spring-boot:run` for a Spring Boot project; `verify` is `mvn clean verify` (tests included); `test` is `mvn clean test` (unit tests only) — `verify` and `test` never attempt a startup check, for a project where starting the app for real isn't practical. `skipTests` (default `true`) only applies to `mode: run` — `verify`/`test` always run tests regardless.
+`args`/`profile`/`env` apply to every validation call; `spring.profiles` applies only to the `spring-boot:run` startup check. `mode` picks the Maven lifecycle phase and whether a startup check is ever attempted: `run` (default) is `mvn clean install` plus `spring-boot:run` for a Spring Boot project; `verify` is `mvn clean verify` (tests included); `test` is `mvn clean test` (unit tests only) — `verify` and `test` never attempt a startup check, for a project where starting the app for real isn't practical. `skipTests` (default `true`) only applies to `mode: run` — `verify`/`test` always run tests regardless. `fullLogs` (default `false`) applies regardless of mode — set it to `true` to include dependency transfer logging in the raw build output, normally suppressed via `--no-transfer-progress`.
 
 Picked up on the next apply — no restart needed. The project's own page shows a read-only panel with whatever the file currently resolves to. If a project has no `.redkite/config.yml` yet, RedKite creates a commented-out template automatically on its first scan.
 
