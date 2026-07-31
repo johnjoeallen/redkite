@@ -2,13 +2,13 @@
 # https://johnjoeallen.github.io/redkite/projects/build-validation/
 #
 # This fixture has no Spring Boot startup component and needs no extra Maven
-# arguments, profile, or environment variables to build — mode, skipTests, and
-# fullLogs are spelled out explicitly here as a worked example rather than
-# left implicit, since this file also serves as a real, bundled sample of
-# the format for anyone exploring the release zip.
+# arguments, profile, or environment variables to build — mode and fullLogs
+# are spelled out explicitly here as a worked example rather than left
+# implicit, since this file also serves as a real, bundled sample of the
+# format for anyone exploring the release zip. mode combines run (install
+# goal) with test (don't skip tests) — see build-validation docs.
 
 redkite:
   maven:
-    mode: run
-    skipTests: false
+    mode: [run, test]
     fullLogs: true

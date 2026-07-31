@@ -27,23 +27,24 @@ public class ValidationRunner {
     public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
 
     /**
-     * What a validation run actually checks. {@code RUN} is the default and the only mode that
-     * ever attempts the {@code spring-boot:run} startup check — {@code VERIFY} and {@code TEST}
-     * always stop at the build/test phase, for a project where starting the app for real isn't
-     * practical but running its own tests still is.
+     * Which Maven lifecycle phase a validation run reaches. {@code RUN} is the default and the only
+     * one that ever attempts the {@code spring-boot:run} startup check — {@code VERIFY} and
+     * {@code TEST} always stop at the build/test phase, for a project where starting the app for
+     * real isn't practical. This is the deepest goal implied by a project's {@code mode:} setting —
+     * see {@link ProjectConfigFile} for how a combination like {@code mode: [run, test]} resolves to
+     * one {@code Mode} plus {@link ValidationOptions#enableTests()}.
      */
     public enum Mode {
-        /** {@code mvn clean install} (tests skipped by default, see
-         *  {@link ValidationOptions#skipTests()}), then, if {@code spring-boot-maven-plugin} is
-         *  present, {@code spring-boot:run} — today's default behavior. Adapts to the project:
-         *  a startup check for a Spring Boot project, build-only otherwise. */
+        /** {@code mvn clean install}, then, if {@code spring-boot-maven-plugin} is present,
+         *  {@code spring-boot:run}. Adapts to the project: a startup check for a Spring Boot
+         *  project, build-only otherwise. */
         RUN,
-        /** {@code mvn clean verify} (tests included) — the full lifecycle through {@code verify},
-         *  covering anything bound to that phase (e.g. integration tests via failsafe). Never
-         *  attempts a startup check. */
+        /** {@code mvn clean verify} — the full lifecycle through {@code verify}, covering anything
+         *  bound to that phase (e.g. integration tests via failsafe). Never attempts a startup
+         *  check. */
         VERIFY,
-        /** {@code mvn clean test} (unit tests only, no packaging) — lighter than {@code VERIFY}.
-         *  Never attempts a startup check. */
+        /** {@code mvn clean test} — lighter than {@code VERIFY}, no packaging. Never attempts a
+         *  startup check. */
         TEST
     }
 
@@ -61,10 +62,12 @@ public class ValidationRunner {
      *                       check, on top of {@code mavenArgs} — never used for the plain build
      *                       check, since they're meaningless outside a Spring Boot startup (e.g.
      *                       {@code -Dspring-boot.run.profiles=...})
-     * @param skipTests    only applies to {@link Mode#RUN} (default {@code true}, today's existing
-     *                     behavior — {@code -DskipTests}). {@link Mode#VERIFY} and {@link Mode#TEST}
-     *                     always run tests regardless of this flag, since running tests is the
-     *                     entire reason to pick one of those modes over {@code RUN}.
+     * @param enableTests  applies uniformly to every {@link Mode} (default {@code false}, today's
+     *                     existing behavior for {@code RUN} — {@code -DskipTests} is added whenever
+     *                     this is {@code false}, regardless of which {@link Mode} was selected).
+     *                     Derived by {@link ProjectConfigFile} from whether {@code test} appears in
+     *                     a project's {@code mode:} combination — {@code Mode#TEST} is only ever
+     *                     selected when it does, so this is always {@code true} in that case.
      * @param fullLogs     default {@code false}, today's existing behavior — every {@code mvn}
      *                     invocation runs with {@code --no-transfer-progress}, which suppresses
      *                     per-artifact dependency download/upload logging. {@code true} omits that
@@ -72,8 +75,8 @@ public class ValidationRunner {
      *                     failure that looks repository/network-related.
      */
     public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, Mode mode,
-                                     List<String> springBootArgs, boolean skipTests, boolean fullLogs) {
-        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), true, false);
+                                     List<String> springBootArgs, boolean enableTests, boolean fullLogs) {
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), false, false);
     }
 
     /** Runs {@code mvn clean install} and returns the result. */
@@ -82,21 +85,21 @@ public class ValidationRunner {
     }
 
     /** Runs the build/test check appropriate to {@link ValidationOptions#mode()} and returns the
-     *  result. */
+     *  result. {@link ValidationOptions#enableTests()} decides whether {@code -DskipTests} is added
+     *  — uniformly across all three modes, not just {@code RUN}. */
     public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options) {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
-        List<String> command = switch (options.mode()) {
-            case VERIFY -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
-                    "clean", "verify", "-Denforcer.skip=true");
-            case TEST -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
-                    "clean", "test", "-Denforcer.skip=true");
-            case RUN -> options.skipTests()
-                    ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
-                            "clean", "install", "-DskipTests", "-Denforcer.skip=true")
-                    : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
-                            "clean", "install", "-Denforcer.skip=true");
+        String goal = switch (options.mode()) {
+            case RUN -> "install";
+            case VERIFY -> "verify";
+            case TEST -> "test";
         };
+        List<String> command = options.enableTests()
+                ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
+                        "clean", goal, "-Denforcer.skip=true")
+                : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(), options.fullLogs(),
+                        "clean", goal, "-DskipTests", "-Denforcer.skip=true");
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);

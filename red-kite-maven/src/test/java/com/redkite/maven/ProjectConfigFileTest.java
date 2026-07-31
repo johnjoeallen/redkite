@@ -18,8 +18,7 @@ class ProjectConfigFileTest {
         String yaml = """
                 redkite:
                   maven:
-                    mode: verify
-                    skipTests: false
+                    mode: [verify, test]
                     fullLogs: true
                     profile: redkite-build
                     args:
@@ -39,28 +38,64 @@ class ProjectConfigFileTest {
         assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
         assertEquals(Map.of("DB_HOST", "localhost", "DB_PASS", "pw"), config.env());
         assertEquals("redkite-local", config.springProfiles());
-        assertFalse(config.skipTests());
+        assertTrue(config.enableTests());
         assertTrue(config.fullLogs());
     }
 
     @Test
-    void skipTestsDefaultsToTrue() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    profile: dev\n");
-        assertTrue(config.skipTests());
+    void modeRunAloneSkipsTestsByDefault() {
+        // mode: run with no "test" token: today's existing default behavior, unchanged.
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: run\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
+        assertFalse(config.enableTests());
     }
 
     @Test
-    void skipTestsIsCaseInsensitiveAndAcceptsAQuotedScalar() {
-        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: false\n").skipTests());
-        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: FALSE\n").skipTests());
-        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: \"false\"\n").skipTests());
-        assertTrue(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: true\n").skipTests());
+    void modeRunPlusTestEnablesTestsButKeepsTheInstallGoal() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: [run, test]\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
+        assertTrue(config.enableTests());
     }
 
     @Test
-    void unrecognizedSkipTestsValueDefaultsToTrue() {
-        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: nonsense\n");
-        assertTrue(config.skipTests());
+    void modeVerifyAloneNowAlsoSkipsTestsByDefault() {
+        // Deliberate behavior change: verify no longer unconditionally runs tests — "test" must be
+        // named explicitly in the combination, same rule as every other mode.
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: verify\n");
+        assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
+        assertFalse(config.enableTests());
+    }
+
+    @Test
+    void modeTestAloneImpliesEnableTests() {
+        // Mode.TEST can only ever be selected when "test" was itself a token in the combination, so
+        // enableTests is always true here.
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: test\n");
+        assertEquals(ValidationRunner.Mode.TEST, config.mode());
+        assertTrue(config.enableTests());
+    }
+
+    @Test
+    void modeAcceptsACommaOrWhitespaceSeparatedScalarAsAnAlternativeToAList() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: run, test\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
+        assertTrue(config.enableTests());
+    }
+
+    @Test
+    void modeTokenOrderDoesNotMatterForGoalSelection() {
+        // "run" always wins the goal regardless of where it appears in the combination — install
+        // already contains verify and test.
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: [test, verify, run]\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
+        assertTrue(config.enableTests());
+    }
+
+    @Test
+    void unrecognizedModeTokenIsIgnoredNotFatal() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: [run, nonsense]\n");
+        assertEquals(ValidationRunner.Mode.RUN, config.mode());
+        assertFalse(config.enableTests());
     }
 
     @Test
@@ -224,7 +259,7 @@ class ProjectConfigFileTest {
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
         assertTrue(config.env().isEmpty());
         assertNull(config.springProfiles());
-        assertTrue(config.skipTests());
+        assertFalse(config.enableTests());
         assertFalse(config.fullLogs());
     }
 
@@ -322,14 +357,14 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsAppendsProfileFlagAfterArgs() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true, false);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false);
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true, false);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false);
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -341,7 +376,7 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsSkipsBlankProfile() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, true, false);
+                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, false, false);
         assertEquals(List.of(), config.toBuildArgs());
     }
 

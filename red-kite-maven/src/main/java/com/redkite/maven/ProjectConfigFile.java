@@ -8,9 +8,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -30,22 +32,31 @@ import java.util.logging.Logger;
  * <p>Everything lives under {@code redkite.maven} — nested under a {@code redkite:} root rather
  * than {@code maven:} directly, leaving room for future, non-Maven config sections alongside it.
  * {@code args}/{@code profile}/{@code env} apply to every validation RedKite runs for the project —
- * the plain build check, and, for a Spring Boot project in {@code mode: run}, the
- * {@code spring-boot:run} startup check too. {@code spring.profiles} applies only to the startup
- * check, since it's meaningless outside {@code spring-boot:run} — kept in its own section to make
- * that scope obvious. {@code mode} picks the Maven lifecycle phase (and whether a startup check
- * ever runs at all) — see {@link ValidationRunner.Mode}. {@code skipTests} (default {@code true},
- * matching today's existing behavior) only applies to {@code mode: run} — {@code verify}/{@code
- * test} always run tests regardless, since that's the entire point of choosing one of those modes.
- * {@code fullLogs} (default {@code false}) applies to every {@code mvn} invocation regardless of
+ * the plain build check, and, for a Spring Boot project reaching {@link ValidationRunner.Mode#RUN},
+ * the {@code spring-boot:run} startup check too. {@code spring.profiles} applies only to the
+ * startup check, since it's meaningless outside {@code spring-boot:run} — kept in its own section
+ * to make that scope obvious.
+ *
+ * <p>{@code mode} is a combination of {@code run}/{@code verify}/{@code test} — written as a single
+ * scalar ({@code mode: run}) or a list ({@code mode: [run, test]}) — resolved by
+ * {@link #parseModeCombination} into two things: which {@link ValidationRunner.Mode} RedKite runs
+ * (the deepest Maven lifecycle phase present — {@code run} beats {@code verify} beats {@code test},
+ * since each one's underlying Maven phase already contains the shallower ones), and whether
+ * {@code test} appears anywhere in the combination, which decides {@code -DskipTests} uniformly
+ * regardless of which {@link ValidationRunner.Mode} was picked — see
+ * {@link ValidationRunner.ValidationOptions#enableTests()}. {@code mode: run} alone (the default)
+ * skips tests, matching today's existing behavior; {@code mode: [run, test]} runs the same
+ * {@code install} goal but with tests enabled; {@code mode: verify} on its own now also skips
+ * tests (write {@code mode: [verify, test]} for the traditional "verify with tests" behavior).
+ *
+ * <p>{@code fullLogs} (default {@code false}) applies to every {@code mvn} invocation regardless of
  * mode — {@code true} omits {@code --no-transfer-progress}, so dependency download/upload activity
  * shows up in the raw build output, useful when a failure looks repository/network-related.
  *
  * <pre>{@code
  * redkite:
  *   maven:
- *     mode: run
- *     skipTests: true
+ *     mode: [run, test]
  *     fullLogs: false
  *     profile: redkite-build
  *     args:
@@ -79,8 +90,8 @@ public final class ProjectConfigFile {
     private static final String YAML_RELATIVE_PATH = DIRECTORY + "/" + BASE_NAME + ".yaml";
 
     public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
-                                 Map<String, String> env, String springProfiles, boolean skipTests, boolean fullLogs) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, true, false);
+                                 Map<String, String> env, String springProfiles, boolean enableTests, boolean fullLogs) {
+        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, false, false);
 
         /** {@code args} and {@code profile} folded into one list, in a stable order — applies to
          *  every validation RedKite runs for this project. Does not include
@@ -115,8 +126,8 @@ public final class ProjectConfigFile {
 
             #redkite:
             #  maven:
-            #    mode: run              # run (default) | verify | test
-            #    skipTests: true        # only applies to mode: run — default true
+            #    mode: run              # run (default) | verify | test — or a combination, e.g. [run, test]
+            #                           # include "test" to run tests; omitted means -DskipTests
             #    fullLogs: false        # true includes dependency transfer logging — default false
             #    profile: my-profile
             #    args:
@@ -189,13 +200,16 @@ public final class ProjectConfigFile {
 
         List<String> args = asArgList(maven.get("args"));
         String profile = asString(maven.get("profile"));
-        ValidationRunner.Mode mode = parseMode(asString(maven.get("mode")));
+        Set<ValidationRunner.Mode> modeTokens = parseModeCombination(maven.get("mode"));
+        ValidationRunner.Mode mode = modeTokens.contains(ValidationRunner.Mode.RUN) ? ValidationRunner.Mode.RUN
+                : modeTokens.contains(ValidationRunner.Mode.VERIFY) ? ValidationRunner.Mode.VERIFY
+                : ValidationRunner.Mode.TEST;
+        boolean enableTests = modeTokens.contains(ValidationRunner.Mode.TEST);
         Map<String, String> env = asStringMap(maven.get("env"));
         String springProfiles = maven.get("spring") instanceof Map<?, ?> spring ? asString(spring.get("profiles")) : null;
-        boolean skipTests = asBoolean(maven.get("skipTests"), true);
         boolean fullLogs = asBoolean(maven.get("fullLogs"), false);
 
-        return new ProjectConfig(args, profile, mode, env, springProfiles, skipTests, fullLogs);
+        return new ProjectConfig(args, profile, mode, env, springProfiles, enableTests, fullLogs);
     }
 
     /** Accepts either a real YAML list (each entry becomes one argument as-is) or a single
@@ -228,7 +242,7 @@ public final class ProjectConfigFile {
 
     /** {@code null} falls back to {@code defaultValue}; SnakeYAML already parses an unquoted
      *  {@code true}/{@code false} scalar into a real {@link Boolean}, so this only needs to handle
-     *  that and the string form for a quoted value like {@code skipTests: "false"}. Anything else
+     *  that and the string form for a quoted value like {@code fullLogs: "false"}. Anything else
      *  unrecognized also falls back to {@code defaultValue} rather than failing the whole file. */
     private static boolean asBoolean(Object value, boolean defaultValue) {
         if (value instanceof Boolean bool) return bool;
@@ -251,14 +265,42 @@ public final class ProjectConfigFile {
         return Map.copyOf(result);
     }
 
-    /** Case-insensitive; a missing or unrecognized value falls back to
-     *  {@link ValidationRunner.Mode#RUN}, the default. */
-    private static ValidationRunner.Mode parseMode(String value) {
-        if (value == null) return ValidationRunner.Mode.RUN;
-        for (ValidationRunner.Mode candidate : ValidationRunner.Mode.values()) {
-            if (candidate.name().equalsIgnoreCase(value)) return candidate;
+    /** Parses {@code mode} into the set of {@code run}/{@code verify}/{@code test} tokens it names —
+     *  a real YAML list ({@code mode: [run, test]}), or a single scalar, itself either one token
+     *  ({@code mode: verify}) or several separated by commas and/or whitespace
+     *  ({@code mode: run, test}). Case-insensitive; unrecognized tokens are logged and ignored
+     *  rather than failing the whole file. A missing key, or a value with no recognizable tokens at
+     *  all, falls back to {@code {RUN}} — {@link ValidationRunner.Mode#RUN} with tests skipped,
+     *  today's existing default. */
+    private static Set<ValidationRunner.Mode> parseModeCombination(Object value) {
+        List<String> tokens;
+        if (value instanceof List<?> list) {
+            tokens = new ArrayList<>();
+            for (Object item : list) {
+                if (item != null) tokens.add(String.valueOf(item));
+            }
+        } else {
+            String scalar = asString(value);
+            tokens = scalar == null ? List.of() : List.of(scalar.trim().split("[,\\s]+"));
         }
-        LOGGER.warning(() -> "Unrecognized mode \"" + value + "\" in " + RELATIVE_PATH + " — defaulting to run");
-        return ValidationRunner.Mode.RUN;
+
+        Set<ValidationRunner.Mode> result = EnumSet.noneOf(ValidationRunner.Mode.class);
+        for (String token : tokens) {
+            if (token.isBlank()) continue;
+            ValidationRunner.Mode matched = null;
+            for (ValidationRunner.Mode candidate : ValidationRunner.Mode.values()) {
+                if (candidate.name().equalsIgnoreCase(token.trim())) {
+                    matched = candidate;
+                    break;
+                }
+            }
+            if (matched != null) {
+                result.add(matched);
+            } else {
+                LOGGER.warning(() -> "Unrecognized mode token \"" + token + "\" in " + RELATIVE_PATH + " — ignoring");
+            }
+        }
+        if (result.isEmpty()) result.add(ValidationRunner.Mode.RUN);
+        return result;
     }
 }
