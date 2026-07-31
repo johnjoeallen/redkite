@@ -5,8 +5,7 @@ RedKite validates a project before and after applying changes — by default, it
 ```yaml
 redkite:
   maven:
-    mode: run
-    skipTests: true
+    mode: [run, test]
     fullLogs: false
     profile: redkite
     args:
@@ -21,19 +20,29 @@ Everything lives under a `redkite:` root — rather than `maven:` directly — l
 
 None of the fields are required — an empty or missing file just means validation runs with nothing extra, in the default mode. If a project has neither `.redkite/settings.yml` nor `.redkite/settings.yaml`, RedKite creates a `settings.yml` automatically the first time it scans the project: a fully commented-out template with every field shown but disabled, so it's discoverable and easy to edit without changing any validation behavior by its mere presence.
 
-- **`args`**, **`profile`**, and **`env`** apply to *every* validation RedKite runs — the plain build check, and, for a Spring Boot project in `mode: run`, the `spring-boot:run` startup check too. See [Maven Arguments](maven-arguments.md) and [Environment Variables](environment-variables.md).
+- **`args`**, **`profile`**, and **`env`** apply to *every* validation RedKite runs — the plain build check, and, for a Spring Boot project that reaches the `run` goal, the `spring-boot:run` startup check too. See [Maven Arguments](maven-arguments.md) and [Environment Variables](environment-variables.md).
 - **`spring.profiles`** applies *only* to the `spring-boot:run` startup check — it's kept in its own section rather than a flat field specifically because it's meaningless for the plain build check, and mixing it into settings that apply everywhere was confusing.
-- **`mode`** picks which Maven lifecycle phase validation runs, and whether a startup check is ever attempted at all:
+- **`mode`** is a combination of `run`/`verify`/`test` — written as a single value (`mode: run`) or a list (`mode: [run, test]`). Two things fall out of the combination:
+    1. **Which Maven goal runs, and whether a startup check is ever attempted** — the deepest phase present wins, since each one's underlying Maven lifecycle already contains the shallower ones:
 
-| Mode | Command | Startup check |
-|---|---|---|
-| `run` (default) | `mvn clean install` (`-DskipTests` unless overridden, see below) | Yes, for a Spring Boot project |
-| `verify` | `mvn clean verify` (tests included, plus anything else bound to the `verify` phase, e.g. integration tests via failsafe) | Never |
-| `test` | `mvn clean test` (unit tests only, no packaging) | Never |
+        | Present | Goal | Startup check |
+        |---|---|---|
+        | `run` | `mvn clean install` | Yes, for a Spring Boot project |
+        | `verify` (no `run`) | `mvn clean verify` (plus anything else bound to that phase, e.g. integration tests via failsafe) | Never |
+        | `test` only | `mvn clean test` (no packaging) | Never |
 
-Use `verify` or `test` for a project where starting the app for real isn't practical, but its own tests are still a meaningful gate to run before an apply is kept — `test` is the lighter check of the two, `verify` the more thorough one.
+    2. **Whether `-DskipTests` is added** — this is decided purely by whether `test` appears anywhere in the combination, independent of which goal above was picked:
 
-- **`skipTests`** (default `true`, matching RedKite's existing behavior) only applies to `mode: run` — set it to `false` to run the project's own tests as part of the build check too. `verify` and `test` always run tests regardless of this setting, since running tests is the entire reason to pick one of those modes over `run`.
+        | `mode:` | Effective command |
+        |---|---|
+        | `run` (default) | `mvn clean install -DskipTests` — today's existing default |
+        | `[run, test]` | `mvn clean install` |
+        | `verify` | `mvn clean verify -DskipTests` |
+        | `[verify, test]` | `mvn clean verify` — traditional "verify with tests" behavior |
+        | `test` | `mvn clean test` (tests always run — `test` is what selected this goal) |
+
+    Use `verify` or `test` for a project where starting the app for real isn't practical, but its own tests are still a meaningful gate to run before an apply is kept.
+
 - **`fullLogs`** (default `false`) applies to every validation `mvn` call regardless of mode. RedKite normally runs with `--no-transfer-progress`, which suppresses per-artifact dependency download/upload logging — set this to `true` to include it in the raw build output, useful when a failure looks repository- or network-related rather than a genuine build error.
 
 The project dashboard shows a read-only **Project configuration** panel with whatever `.redkite/settings.yml`/`.yaml` currently resolves to, so you can confirm RedKite is reading what you expect without leaving the UI. There's nothing to save from the UI itself — edit the file in your project and RedKite picks it up on the next validation run, no restart needed.
