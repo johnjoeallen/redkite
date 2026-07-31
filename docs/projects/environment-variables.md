@@ -1,6 +1,6 @@
 # Environment Variables
 
-The `env` section of `.redkite/config.yml` is a set of `KEY: value` pairs set on the processes RedKite spawns to validate this project — both the build check and, for Spring Boot projects, the `spring-boot:run` startup check.
+The `env` section of `.redkite/settings.yml` is a set of `KEY: value` pairs set on the processes RedKite spawns to validate this project — both the build check and, for Spring Boot projects, the `spring-boot:run` startup check.
 
 ```yaml
 env:

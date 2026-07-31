@@ -1,6 +1,6 @@
 # Maven Arguments
 
-`.redkite/config.yml`'s `redkite.maven` section has two fields that end up as extra arguments on every validation `mvn` call RedKite runs for a project — both the build check and, for Spring Boot projects, the `spring-boot:run` startup check:
+`.redkite/settings.yml`'s `redkite.maven` section has two fields that end up as extra arguments on every validation `mvn` call RedKite runs for a project — both the build check and, for Spring Boot projects, the `spring-boot:run` startup check:
 
 ```yaml
 redkite:

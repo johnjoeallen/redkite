@@ -103,7 +103,7 @@ java -Dredkite.port=8080 -jar red-kite.jar
 
 ### Build Validation Settings
 
-Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different projects can need different values — declared in a `.redkite/config.yml` file checked into the project itself, not through RedKite's UI:
+Some projects need a Spring profile or other environment-specific config to build or start (e.g. for the `spring-boot:run` startup check). These are per-project, not global, since different projects can need different values — declared in a `.redkite/settings.yml` file checked into the project itself (`.redkite/settings.yaml` also works, and takes precedence if both exist), not through RedKite's UI:
 
 ```yaml
 redkite:
@@ -123,7 +123,7 @@ redkite:
 
 `args`/`profile`/`env` apply to every validation call; `spring.profiles` applies only to the `spring-boot:run` startup check. `mode` picks the Maven lifecycle phase and whether a startup check is ever attempted: `run` (default) is `mvn clean install` plus `spring-boot:run` for a Spring Boot project; `verify` is `mvn clean verify` (tests included); `test` is `mvn clean test` (unit tests only) — `verify` and `test` never attempt a startup check, for a project where starting the app for real isn't practical. `skipTests` (default `true`) only applies to `mode: run` — `verify`/`test` always run tests regardless. `fullLogs` (default `false`) applies regardless of mode — set it to `true` to include dependency transfer logging in the raw build output, normally suppressed via `--no-transfer-progress`.
 
-Picked up on the next apply — no restart needed. The project's own page shows a read-only panel with whatever the file currently resolves to. If a project has no `.redkite/config.yml` yet, RedKite creates a commented-out template automatically on its first scan.
+Picked up on the next apply — no restart needed. The project's own page shows a read-only panel with whatever the file currently resolves to. If a project has neither file yet, RedKite creates a commented-out `settings.yml` template automatically on its first scan.
 
 ### Config Page
 
