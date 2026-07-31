@@ -19,6 +19,7 @@ class ProjectConfigFileTest {
                 redkite:
                   maven:
                     mode: verify
+                    skipTests: false
                     profile: redkite-build
                     args:
                       - "--batch-mode"
@@ -37,6 +38,27 @@ class ProjectConfigFileTest {
         assertEquals(ValidationRunner.Mode.VERIFY, config.mode());
         assertEquals(Map.of("DB_HOST", "localhost", "DB_PASS", "pw"), config.env());
         assertEquals("redkite-local", config.springProfiles());
+        assertFalse(config.skipTests());
+    }
+
+    @Test
+    void skipTestsDefaultsToTrue() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    profile: dev\n");
+        assertTrue(config.skipTests());
+    }
+
+    @Test
+    void skipTestsIsCaseInsensitiveAndAcceptsAQuotedScalar() {
+        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: false\n").skipTests());
+        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: FALSE\n").skipTests());
+        assertFalse(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: \"false\"\n").skipTests());
+        assertTrue(ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: true\n").skipTests());
+    }
+
+    @Test
+    void unrecognizedSkipTestsValueDefaultsToTrue() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    skipTests: nonsense\n");
+        assertTrue(config.skipTests());
     }
 
     @Test
@@ -180,6 +202,7 @@ class ProjectConfigFileTest {
         assertEquals(ValidationRunner.Mode.RUN, config.mode());
         assertTrue(config.env().isEmpty());
         assertNull(config.springProfiles());
+        assertTrue(config.skipTests());
     }
 
     @Test
@@ -236,14 +259,14 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsAppendsProfileFlagAfterArgs() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true);
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local");
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", true);
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -255,7 +278,7 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsSkipsBlankProfile() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null);
+                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, true);
         assertEquals(List.of(), config.toBuildArgs());
     }
 

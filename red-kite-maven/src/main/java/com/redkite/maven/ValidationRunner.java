@@ -33,7 +33,8 @@ public class ValidationRunner {
      * practical but running its own tests still is.
      */
     public enum Mode {
-        /** {@code mvn clean install -DskipTests}, then, if {@code spring-boot-maven-plugin} is
+        /** {@code mvn clean install} (tests skipped by default, see
+         *  {@link ValidationOptions#skipTests()}), then, if {@code spring-boot-maven-plugin} is
          *  present, {@code spring-boot:run} — today's default behavior. Adapts to the project:
          *  a startup check for a Spring Boot project, build-only otherwise. */
         RUN,
@@ -60,10 +61,14 @@ public class ValidationRunner {
      *                       check, on top of {@code mavenArgs} — never used for the plain build
      *                       check, since they're meaningless outside a Spring Boot startup (e.g.
      *                       {@code -Dspring-boot.run.profiles=...})
+     * @param skipTests    only applies to {@link Mode#RUN} (default {@code true}, today's existing
+     *                     behavior — {@code -DskipTests}). {@link Mode#VERIFY} and {@link Mode#TEST}
+     *                     always run tests regardless of this flag, since running tests is the
+     *                     entire reason to pick one of those modes over {@code RUN}.
      */
     public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, Mode mode,
-                                     List<String> springBootArgs) {
-        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of());
+                                     List<String> springBootArgs, boolean skipTests) {
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), true);
     }
 
     /** Runs {@code mvn clean install} and returns the result. */
@@ -81,8 +86,11 @@ public class ValidationRunner {
                     "clean", "verify", "-Denforcer.skip=true");
             case TEST -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
                     "clean", "test", "-Denforcer.skip=true");
-            case RUN -> buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
-                    "clean", "install", "-DskipTests", "-Denforcer.skip=true");
+            case RUN -> options.skipTests()
+                    ? buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                            "clean", "install", "-DskipTests", "-Denforcer.skip=true")
+                    : buildCommand(mvn, settings, projectRoot, pomPath, options.mavenArgs(),
+                            "clean", "install", "-Denforcer.skip=true");
         };
         LOGGER.info(() -> "Validation build: " + String.join(" ", command));
         try {

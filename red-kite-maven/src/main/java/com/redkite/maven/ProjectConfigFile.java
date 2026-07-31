@@ -33,12 +33,15 @@ import java.util.logging.Logger;
  * {@code spring-boot:run} startup check too. {@code spring.profiles} applies only to the startup
  * check, since it's meaningless outside {@code spring-boot:run} — kept in its own section to make
  * that scope obvious. {@code mode} picks the Maven lifecycle phase (and whether a startup check
- * ever runs at all) — see {@link ValidationRunner.Mode}.
+ * ever runs at all) — see {@link ValidationRunner.Mode}. {@code skipTests} (default {@code true},
+ * matching today's existing behavior) only applies to {@code mode: run} — {@code verify}/{@code
+ * test} always run tests regardless, since that's the entire point of choosing one of those modes.
  *
  * <pre>{@code
  * redkite:
  *   maven:
  *     mode: run
+ *     skipTests: true
  *     profile: redkite-build
  *     args:
  *       - "--batch-mode"
@@ -64,8 +67,8 @@ public final class ProjectConfigFile {
     public static final String RELATIVE_PATH = ".redkite/config.yml";
 
     public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
-                                 Map<String, String> env, String springProfiles) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null);
+                                 Map<String, String> env, String springProfiles, boolean skipTests) {
+        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, true);
 
         /** {@code args} and {@code profile} folded into one list, in a stable order — applies to
          *  every validation RedKite runs for this project. Does not include
@@ -101,6 +104,7 @@ public final class ProjectConfigFile {
             #redkite:
             #  maven:
             #    mode: run              # run (default) | verify | test
+            #    skipTests: true        # only applies to mode: run — default true
             #    profile: my-profile
             #    args:
             #      - "-Dfoo=bar"
@@ -163,8 +167,9 @@ public final class ProjectConfigFile {
         ValidationRunner.Mode mode = parseMode(asString(maven.get("mode")));
         Map<String, String> env = asStringMap(maven.get("env"));
         String springProfiles = maven.get("spring") instanceof Map<?, ?> spring ? asString(spring.get("profiles")) : null;
+        boolean skipTests = asBoolean(maven.get("skipTests"), true);
 
-        return new ProjectConfig(args, profile, mode, env, springProfiles);
+        return new ProjectConfig(args, profile, mode, env, springProfiles, skipTests);
     }
 
     /** Accepts either a real YAML list (each entry becomes one argument as-is) or a single
@@ -193,6 +198,20 @@ public final class ProjectConfigFile {
      *  own type inference would have guessed. */
     private static String asString(Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    /** {@code null} falls back to {@code defaultValue}; SnakeYAML already parses an unquoted
+     *  {@code true}/{@code false} scalar into a real {@link Boolean}, so this only needs to handle
+     *  that and the string form for a quoted value like {@code skipTests: "false"}. Anything else
+     *  unrecognized also falls back to {@code defaultValue} rather than failing the whole file. */
+    private static boolean asBoolean(Object value, boolean defaultValue) {
+        if (value instanceof Boolean bool) return bool;
+        if (value == null) return defaultValue;
+        String s = String.valueOf(value).trim();
+        if ("true".equalsIgnoreCase(s)) return true;
+        if ("false".equalsIgnoreCase(s)) return false;
+        LOGGER.warning(() -> "Unrecognized boolean value \"" + s + "\" in " + RELATIVE_PATH + " — defaulting to " + defaultValue);
+        return defaultValue;
     }
 
     private static Map<String, String> asStringMap(Object value) {
