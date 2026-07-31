@@ -49,7 +49,7 @@ public class ValidationRunner {
 
     /**
      * Extra configuration for a validation run, sourced from a project's own
-     * {@code .redkite/config.yml} (see {@link ProjectConfigFile}).
+     * {@code .redkite/settings.yml} (see {@link ProjectConfigFile}).
      *
      * @param mavenArgs    extra arguments appended to every {@code mvn} invocation (build and, for
      *                     a Spring Boot project in {@link Mode#RUN}, the startup check) — e.g.

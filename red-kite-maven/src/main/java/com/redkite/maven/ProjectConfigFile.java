@@ -14,8 +14,9 @@ import java.util.Map;
 import java.util.logging.Logger;
 
 /**
- * Reads a project's own {@code .redkite/config.yml} — build validation settings checked into the
+ * Reads a project's own {@code .redkite/settings.yml} — build validation settings checked into the
  * project itself, rather than entered through RedKite's UI and stored in RedKite's own database.
+ * {@code .redkite/settings.yaml} is also recognized and takes precedence if, unusually, both exist.
  * Lets a project declare, once, the extra Maven arguments, activated profile, environment
  * variables, validation mode, and Spring Boot-specific settings its build (and, for Spring Boot
  * projects, its startup) validation needs — a project that requires a specific profile to build or
@@ -67,8 +68,15 @@ import java.util.logging.Logger;
 public final class ProjectConfigFile {
     private static final Logger LOGGER = Logger.getLogger(ProjectConfigFile.class.getName());
 
-    /** Path to the config file, relative to a project's root directory. */
-    public static final String RELATIVE_PATH = ".redkite/config.yml";
+    private static final String DIRECTORY = ".redkite";
+    private static final String BASE_NAME = "settings";
+
+    /** Canonical path, relative to a project's root directory — what {@link #ensureDefaultExists}
+     *  scaffolds and what's shown when neither form exists. {@code .yaml} (see
+     *  {@link #resolveExistingPath}) is equally valid and takes precedence if both are present. */
+    public static final String RELATIVE_PATH = DIRECTORY + "/" + BASE_NAME + ".yml";
+
+    private static final String YAML_RELATIVE_PATH = DIRECTORY + "/" + BASE_NAME + ".yaml";
 
     public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
                                  Map<String, String> env, String springProfiles, boolean skipTests, boolean fullLogs) {
@@ -95,7 +103,7 @@ public final class ProjectConfigFile {
         }
     }
 
-    /** Written to {@code <projectRoot>/.redkite/config.yml} by {@link #ensureDefaultExists} when a
+    /** Written to {@code <projectRoot>/.redkite/settings.yml} by {@link #ensureDefaultExists} when a
      *  project has none — every field commented out, so its presence alone never changes
      *  validation behavior; it's a discoverable, editable starting point, not a live default. */
     private static final String DEFAULT_TEMPLATE = """
@@ -122,14 +130,15 @@ public final class ProjectConfigFile {
     private ProjectConfigFile() {
     }
 
-    /** Writes {@link #DEFAULT_TEMPLATE} to {@code <projectRoot>/.redkite/config.yml} if that file
-     *  doesn't already exist — so a project gets a discoverable, fully commented-out starting
-     *  point the first time RedKite scans it, without ever overwriting anything already there
-     *  (including a file the project has deliberately left empty). Best-effort: a failure to
-     *  write is logged, never thrown — scaffolding a config file must never block a scan. */
+    /** Writes {@link #DEFAULT_TEMPLATE} to {@code <projectRoot>/.redkite/settings.yml} if neither
+     *  that file nor {@code settings.yaml} already exists — so a project gets a discoverable, fully
+     *  commented-out starting point the first time RedKite scans it, without ever overwriting
+     *  anything already there (including a file the project has deliberately left empty).
+     *  Best-effort: a failure to write is logged, never thrown — scaffolding a config file must
+     *  never block a scan. */
     public static void ensureDefaultExists(Path projectRoot) {
+        if (resolveExistingPath(projectRoot) != null) return;
         Path configPath = projectRoot.resolve(RELATIVE_PATH);
-        if (Files.exists(configPath)) return;
         try {
             Files.createDirectories(configPath.getParent());
             Files.writeString(configPath, DEFAULT_TEMPLATE, StandardCharsets.UTF_8);
@@ -139,12 +148,23 @@ public final class ProjectConfigFile {
         }
     }
 
-    /** Reads {@code <projectRoot>/.redkite/config.yml}, or {@link ProjectConfig#EMPTY} if it
-     *  doesn't exist or fails to parse (logged, never thrown — a malformed config file shouldn't
-     *  block analysis or validation from running at all). */
+    /** The project's actual config file, if either form exists — {@code settings.yaml} takes
+     *  precedence over {@code settings.yml} on the rare occasion both are present. {@code null} if
+     *  neither exists. */
+    public static Path resolveExistingPath(Path projectRoot) {
+        Path yaml = projectRoot.resolve(YAML_RELATIVE_PATH);
+        if (Files.exists(yaml)) return yaml;
+        Path yml = projectRoot.resolve(RELATIVE_PATH);
+        return Files.exists(yml) ? yml : null;
+    }
+
+    /** Reads {@code <projectRoot>/.redkite/settings.yaml} or {@code settings.yml} (see
+     *  {@link #resolveExistingPath}), or {@link ProjectConfig#EMPTY} if neither exists or fails to
+     *  parse (logged, never thrown — a malformed config file shouldn't block analysis or
+     *  validation from running at all). */
     public static ProjectConfig load(Path projectRoot) {
-        Path configPath = projectRoot.resolve(RELATIVE_PATH);
-        if (!Files.exists(configPath)) return ProjectConfig.EMPTY;
+        Path configPath = resolveExistingPath(projectRoot);
+        if (configPath == null) return ProjectConfig.EMPTY;
         try {
             return parse(Files.readString(configPath, StandardCharsets.UTF_8));
         } catch (IOException e) {

@@ -249,7 +249,7 @@ class ProjectConfigFileTest {
     void ensureDefaultExistsNeverOverwritesAnExistingFile(@TempDir Path tempDir) throws IOException {
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("config.yml"), "redkite:\n  maven:\n    profile: keep-me\n");
+        Files.writeString(configDir.resolve("settings.yml"), "redkite:\n  maven:\n    profile: keep-me\n");
 
         ProjectConfigFile.ensureDefaultExists(tempDir);
 
@@ -257,11 +257,25 @@ class ProjectConfigFileTest {
     }
 
     @Test
+    void ensureDefaultExistsNeverOverwritesAnExistingYamlFile(@TempDir Path tempDir) throws IOException {
+        // A project using the .yaml spelling must not get a redundant settings.yml scaffolded
+        // alongside it.
+        Path configDir = tempDir.resolve(".redkite");
+        Files.createDirectories(configDir);
+        Files.writeString(configDir.resolve("settings.yaml"), "redkite:\n  maven:\n    profile: keep-me\n");
+
+        ProjectConfigFile.ensureDefaultExists(tempDir);
+
+        assertEquals("keep-me", ProjectConfigFile.load(tempDir).profile());
+        assertTrue(Files.notExists(configDir.resolve("settings.yml")));
+    }
+
+    @Test
     void ensureDefaultExistsIsANoOpOnAnEmptyExistingFile(@TempDir Path tempDir) throws IOException {
         // A project that deliberately left the file empty must not have it silently replaced.
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Path configPath = configDir.resolve("config.yml");
+        Path configPath = configDir.resolve("settings.yml");
         Files.writeString(configPath, "");
 
         ProjectConfigFile.ensureDefaultExists(tempDir);
@@ -273,10 +287,36 @@ class ProjectConfigFileTest {
     void loadsRealFileFromDisk(@TempDir Path tempDir) throws IOException {
         Path configDir = tempDir.resolve(".redkite");
         Files.createDirectories(configDir);
-        Files.writeString(configDir.resolve("config.yml"), "redkite:\n  maven:\n    profile: ci\n");
+        Files.writeString(configDir.resolve("settings.yml"), "redkite:\n  maven:\n    profile: ci\n");
 
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
         assertEquals("ci", config.profile());
+    }
+
+    @Test
+    void loadsRealYamlFileFromDisk(@TempDir Path tempDir) throws IOException {
+        Path configDir = tempDir.resolve(".redkite");
+        Files.createDirectories(configDir);
+        Files.writeString(configDir.resolve("settings.yaml"), "redkite:\n  maven:\n    profile: ci\n");
+
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.load(tempDir);
+        assertEquals("ci", config.profile());
+    }
+
+    @Test
+    void yamlExtensionTakesPrecedenceOverYmlWhenBothExist(@TempDir Path tempDir) throws IOException {
+        Path configDir = tempDir.resolve(".redkite");
+        Files.createDirectories(configDir);
+        Files.writeString(configDir.resolve("settings.yml"), "redkite:\n  maven:\n    profile: from-yml\n");
+        Files.writeString(configDir.resolve("settings.yaml"), "redkite:\n  maven:\n    profile: from-yaml\n");
+
+        assertEquals("from-yaml", ProjectConfigFile.load(tempDir).profile());
+        assertEquals(configDir.resolve("settings.yaml"), ProjectConfigFile.resolveExistingPath(tempDir));
+    }
+
+    @Test
+    void resolveExistingPathReturnsNullWhenNeitherFormExists(@TempDir Path tempDir) {
+        assertNull(ProjectConfigFile.resolveExistingPath(tempDir));
     }
 
     @Test

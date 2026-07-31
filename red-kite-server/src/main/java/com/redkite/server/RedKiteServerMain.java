@@ -502,13 +502,15 @@ public class RedKiteServerMain {
         sendText(exchange, 404, "Not found");
     }
 
-    /** Read-only display of a project's own {@code .redkite/project.cfg} — build validation
-     *  settings live in that file, checked into the project itself, rather than entered through
-     *  the UI and stored in RedKite's own database. See {@link com.redkite.maven.ProjectConfigFile}. */
+    /** Read-only display of a project's own {@code .redkite/settings.yml} (or {@code settings.yaml})
+     *  — build validation settings live in that file, checked into the project itself, rather than
+     *  entered through the UI and stored in RedKite's own database. See
+     *  {@link com.redkite.maven.ProjectConfigFile}. */
     private String renderProjectConfigPanel(Path projectRoot) {
-        Path configPath = projectRoot.resolve(com.redkite.maven.ProjectConfigFile.RELATIVE_PATH);
+        Path resolvedPath = com.redkite.maven.ProjectConfigFile.resolveExistingPath(projectRoot);
+        boolean exists = resolvedPath != null;
+        Path configPath = exists ? resolvedPath : projectRoot.resolve(com.redkite.maven.ProjectConfigFile.RELATIVE_PATH);
         com.redkite.maven.ProjectConfigFile.ProjectConfig config = com.redkite.maven.ProjectConfigFile.load(projectRoot);
-        boolean exists = Files.exists(configPath);
 
         StringBuilder body = new StringBuilder();
         body.append("<section class=\"card span-2\"><h2>Project configuration</h2>");
