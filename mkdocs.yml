@@ -145,6 +145,7 @@ nav:
 
   - Development:
       - Overview: development/index.md
+      - AI-Assisted Development: development/ai-assisted-development.md
       - Building from Source: development/building-from-source.md
       - Architecture: development/architecture.md
       - Modules: development/modules.md

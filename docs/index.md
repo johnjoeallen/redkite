@@ -5,6 +5,11 @@ RedKite is a local Maven dependency analyser and update assistant. It analyses M
 !!! note
     RedKite never modifies a project during analysis. Changes are made only after you select recommendations and click **Apply selected** — see [Applying Changes](applying-changes/index.md).
 
+!!! abstract "Built with AI"
+    RedKite's code, tests, and documentation were written by **Claude** (Anthropic) and
+    **Codex** (OpenAI), directed, reviewed, and manually tested by the author — see
+    [AI-Assisted Development](development/ai-assisted-development.md).
+
 Everything runs on your own machine — no source code or dependency data leaves it except the version and vulnerability lookups RedKite makes on your behalf. See [Local-First Design](concepts/local-first-design.md).
 
 [Get started :material-arrow-right:](getting-started/index.md){ .md-button .md-button--primary }

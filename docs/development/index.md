@@ -1,5 +1,6 @@
 # Development
 
+- [AI-Assisted Development](ai-assisted-development.md) — RedKite's code, tests, and docs were written by Claude and Codex, directed and reviewed by the author
 - [Building from Source](building-from-source.md)
 - [Architecture](architecture.md)
 - [Modules](modules.md)

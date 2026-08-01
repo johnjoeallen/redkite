@@ -4,6 +4,8 @@ RedKite is a local Maven dependency analyser and upgrade assistant.
 
 It analyses Maven projects, including multi-module builds, builds a dependency inventory, checks Maven Central for newer versions, records vulnerability findings from OSV.dev, and lets you select upgrades in the browser and generate a ready-to-apply updated POM.
 
+> **Built with AI.** RedKite's code, tests, and documentation were written by **Claude** (Anthropic) and **Codex** (OpenAI), directed, reviewed, and manually tested by the author. See [AI-Assisted Development](https://johnjoeallen.github.io/redkite/development/ai-assisted-development/).
+
 ![RedKite analysis](images/screenshot.png)
 
 📖 [Documentation](https://johnjoeallen.github.io/redkite/) — start with [Getting Started](https://johnjoeallen.github.io/redkite/getting-started/).
