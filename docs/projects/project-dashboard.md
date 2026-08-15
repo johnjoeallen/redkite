@@ -1,5 +1,7 @@
 # Project Dashboard
 
+![RedKite project dashboard showing the latest analysis summary, project configuration, and analysis history](../assets/images/redkite-project-dashboard.png)
+
 Each project has its own page showing:
 
 - a summary of the latest analysis (component count, recommendations, status)

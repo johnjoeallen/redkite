@@ -10,6 +10,8 @@ RedKite deliberately does **not** recommend updating a transitive dependency jus
 
 Without one of those, a transitive dependency with a newer release available is treated as clean — it still shows an informational "Update available" (or "Major update available") note so you know one exists, but it isn't counted as a finding needing attention. See [Minimum Upgrade Policy](../recommendations/minimum-upgrade-policy.md) for the reasoning.
 
+![Two clean transitive dependency cards for the same artifact, each with an informational "Update available" note](../assets/images/redkite-duplicate-dependency.png)
+
 ## Child dependency vulnerabilities
 
 Even when a dependency itself is clean, something it pulls in transitively might not be. Each dependency's card shows an "In dependencies" summary — a count of CVEs by severity found among its own transitive subtree, deduplicated so a dependency reachable through more than one path is only counted once. Hovering a severity count shows exactly which child dependency and advisory it refers to.

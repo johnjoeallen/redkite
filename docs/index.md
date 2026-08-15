@@ -12,6 +12,8 @@ RedKite is a local Maven dependency analyser and update assistant. It analyses M
 
 Everything runs on your own machine — no source code or dependency data leaves it except the version and vulnerability lookups RedKite makes on your behalf. See [Local-First Design](concepts/local-first-design.md).
 
+![RedKite dependency analysis, showing a critical CVE finding with a recommended fix version](assets/images/redkite-analysis-overview.png)
+
 [Get started :material-arrow-right:](getting-started/index.md){ .md-button .md-button--primary }
 [View on GitHub :fontawesome-brands-github:](https://github.com/johnjoeallen/redkite){ .md-button }
 

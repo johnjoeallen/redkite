@@ -1,5 +1,7 @@
 # First Analysis
 
+![RedKite home page, with a project ready to analyse](../assets/images/redkite-home.png)
+
 ## Add and analyse a project
 
 From the RedKite home page:

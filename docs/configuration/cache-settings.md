@@ -2,6 +2,8 @@
 
 RedKite caches network lookups (Maven Central metadata, OSV vulnerability data, POM-declared licenses) so repeated analyses don't re-fetch the same data. Each cache has a time-to-live (TTL), configurable from the `/config` page in the UI, stored in the database so a change takes effect on the next lookup without a restart.
 
+![The Cache TTLs panel on the /config page](../assets/images/redkite-cache-settings.png)
+
 | Setting | Default | Covers |
 |---|---|---|
 | Vulnerability cache | 24 hours | OSV.dev advisory lookups |
