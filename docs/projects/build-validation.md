@@ -47,4 +47,6 @@ None of the fields are required — an empty or missing file just means validati
 
 The project dashboard shows a read-only **Project configuration** panel with whatever `.redkite/settings.yml`/`.yaml` currently resolves to, so you can confirm RedKite is reading what you expect without leaving the UI. There's nothing to save from the UI itself — edit the file in your project and RedKite picks it up on the next validation run, no restart needed.
 
+![The read-only Project configuration panel on a project's dashboard](../assets/images/redkite-project-configuration.png)
+
 For Spring Boot projects specifically, see [Spring Boot Projects](../getting-started/spring-boot-projects.md) for guidance on choosing or building a suitable profile. For what these settings actually get used for, see [Validation Process](../applying-changes/validation-process.md).

@@ -11,4 +11,6 @@ The analysis view lists every dependency RedKite found, grouped by module (for m
 
 **Findings** / **Clean** / **All** tabs filter the list to what needs attention versus everything; filter chips narrow further by CVE status, conflict status, and origin (direct vs. transitive). A module selector (for multi-module projects) scopes the whole view to one module at a time.
 
+![Severity summary, module selector, and Findings/Clean/All tabs with reason and origin filter chips](../assets/images/redkite-dependency-inventory.png)
+
 See [Recommendations](../recommendations/index.md) for exactly what makes a dependency count as a "finding" rather than "clean".

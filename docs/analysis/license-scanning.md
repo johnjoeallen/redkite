@@ -37,6 +37,8 @@ The license breakdown panel counts each dependency under exactly one bucket — 
 
 License information has its own always-visible panel on the analysis page — it doesn't depend on Maven Enforcer being configured, unlike the [conflict/convergence](../recommendations/dependency-conflicts.md) panel. Each license in the breakdown is a clickable filter chip: clicking one filters the same Findings/Clean/All dependency list the other filter chips (reason, origin) already use.
 
+![The license breakdown panel, with a count and clickable filter chip per canonical license](../assets/images/redkite-license-breakdown.png)
+
 ## Caching
 
 License lookups are cached like version and vulnerability data — 30 days by default, configurable from the same `/config` page. See [Cache Settings](../configuration/cache-settings.md).
