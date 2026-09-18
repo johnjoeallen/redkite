@@ -148,6 +148,12 @@ public class RedKiteServerMain {
         volatile String revertedVersion;
         volatile String failedVersion;
         volatile String failureSignature;
+        /** Exact Maven command line run for the failing post-apply validation, so the UI can show
+         *  the user exactly what RedKite ran (also persisted to {@code pom.failed.log}). */
+        volatile String failureCommand;
+        /** Absolute path to the {@code pom.failed.log} file ValidationRunner wrote for this
+         *  failure, or {@code null} if it could not be determined. */
+        volatile String failureLogPath;
         /** True when the fully-computed patched POM set turned out identical to what's already on
          *  disk — nothing was validated or written, since there was nothing to apply. */
         volatile boolean noChanges = false;
@@ -1340,6 +1346,8 @@ public class RedKiteServerMain {
                         String baselineNote = job.baselinePassed ? "" : " (project was already failing before changes)";
                         job.failureMessage = "Post-apply validation failed (" + post.phase() + ")" + baselineNote + ": " + post.failureSignature();
                         job.failureSignature = post.failureSignature();
+                        job.failureCommand = post.command() != null ? String.join(" ", post.command()) : null;
+                        job.failureLogPath = rootPom.resolveSibling("pom.failed.log").toString();
                         job.status = ApplyJob.Status.FAILED;
                         return;
                     }
@@ -1578,6 +1586,8 @@ public class RedKiteServerMain {
                 StringBuilder sb = new StringBuilder("{\"status\":\"failed\"");
                 sb.append(",\"message\":").append(jsonStr(job.failureMessage));
                 sb.append(",\"failureSignature\":").append(jsonStr(job.failureSignature));
+                if (job.failureCommand != null) sb.append(",\"command\":").append(jsonStr(job.failureCommand));
+                if (job.failureLogPath != null) sb.append(",\"logPath\":").append(jsonStr(job.failureLogPath));
                 if (job.attribution != null) sb.append(",\"attribution\":").append(jsonStr(job.attribution));
                 if (job.failedVersion != null) sb.append(",\"failedVersion\":").append(jsonStr(job.failedVersion));
                 if (job.revertedVersion != null) sb.append(",\"revertedVersion\":").append(jsonStr(job.revertedVersion));

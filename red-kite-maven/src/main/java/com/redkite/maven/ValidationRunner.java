@@ -24,7 +24,8 @@ public class ValidationRunner {
     private static final Pattern SPRING_STARTED = Pattern.compile("Started .+ in [\\d.]+ seconds");
     private static final String SPRING_BOOT_PLUGIN = "spring-boot-maven-plugin";
 
-    public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature) {}
+    public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature,
+                                    List<String> command) {}
 
     /**
      * Which Maven lifecycle phase a validation run reaches. {@code RUN} is the default and the only
@@ -113,12 +114,14 @@ public class ValidationRunner {
             } else {
                 LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
                 saveFailedPom(pomPath);
+                saveFailedLog(pomPath, command, output);
             }
-            return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output));
+            return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
             saveFailedPom(pomPath);
-            return new ValidationResult(false, "build", "", e.getMessage());
+            saveFailedLog(pomPath, command, e.getMessage());
+            return new ValidationResult(false, "build", "", e.getMessage(), command);
         }
     }
 
@@ -171,7 +174,7 @@ public class ValidationRunner {
             port = findFreePort();
         } catch (IOException e) {
             LOGGER.warning(() -> "Could not allocate a free port for startup validation: " + e.getMessage());
-            return new ValidationResult(false, "startup", "", "Could not allocate a free port: " + e.getMessage());
+            return new ValidationResult(false, "startup", "", "Could not allocate a free port: " + e.getMessage(), null);
         }
         LOGGER.info(() -> "Running startup validation (spring-boot:run, port " + port + ") for " + pomPath
                 + " with timeout " + timeoutSeconds + "s");
@@ -217,12 +220,14 @@ public class ValidationRunner {
             } else {
                 LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
                 saveFailedPom(pomPath);
+                saveFailedLog(pomPath, command, output);
             }
-            return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output));
+            return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
             saveFailedPom(pomPath);
-            return new ValidationResult(false, "startup", "", e.getMessage());
+            saveFailedLog(pomPath, command, e.getMessage());
+            return new ValidationResult(false, "startup", "", e.getMessage(), command);
         }
     }
 
@@ -277,6 +282,24 @@ public class ValidationRunner {
             LOGGER.info(() -> "Saved failing POM to " + failedPath);
         } catch (IOException e) {
             LOGGER.warning(() -> "Could not save failing POM to " + failedPath + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Writes the exact Maven command and its full output to a sibling {@code pom.failed.log} file
+     * (overwriting any previous one), so a failure like a duplicate-dependency enforcer error can
+     * be diagnosed from the project directory even though the build ran through RedKite rather than
+     * a developer's own terminal. Best-effort: failures to save are logged but never thrown.
+     */
+    private static void saveFailedLog(Path pomPath, List<String> command, String output) {
+        Path logPath = pomPath.resolveSibling("pom.failed.log");
+        String commandLine = command == null ? "(unavailable)" : String.join(" ", command);
+        String content = "$ " + commandLine + "\n\n" + (output == null ? "" : output);
+        try {
+            Files.writeString(logPath, content, StandardCharsets.UTF_8);
+            LOGGER.info(() -> "Saved failing build log to " + logPath);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not save failing build log to " + logPath + ": " + e.getMessage());
         }
     }
 
