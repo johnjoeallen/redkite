@@ -25,11 +25,19 @@ rm -f "$ZIP"
 
 (
   cd "$DIR/test/projects"
-  find convergence-fixture -name "pom.xml.orig" ! -path "*/target/*" | while read -r f; do
+  # Reset pom.xml from pom.xml.orig in a scratch copy, never in the working tree — the fixture's
+  # real pom.xml files may hold in-progress RedKite remediation state a developer is testing with,
+  # and this packaging step has no business touching that.
+  TMP_FIXTURE=$(mktemp -d)
+  trap 'rm -rf "$TMP_FIXTURE"' EXIT
+  find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" -o -name "settings.yml" -o -name "settings.yaml" \) ! -path "*/target/*" \
+    -exec cp --parents {} "$TMP_FIXTURE/" \;
+  find "$TMP_FIXTURE/convergence-fixture" -name "pom.xml.orig" | while read -r f; do
     cp "$f" "${f%.orig}"
   done
-  find convergence-fixture \( -name "pom.xml" -o -name "pom.xml.orig" -o -name "settings.yml" -o -name "settings.yaml" \) ! -path "*/target/*" | \
-    xargs zip -q "$ZIP"
+  (cd "$TMP_FIXTURE" && find convergence-fixture -type f -print0 | xargs -0 zip -q "$ZIP")
+  rm -rf "$TMP_FIXTURE"
+  trap - EXIT
   zip -q "$ZIP" revert-poms.sh
 )
 
