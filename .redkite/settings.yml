@@ -1,0 +1,29 @@
+# RedKite build validation settings for this project — see:
+# https://johnjoeallen.github.io/redkite/projects/build-validation/
+#
+# Uncomment and edit whatever this project actually needs; everything below is
+# optional, and this file is never overwritten once it exists.
+
+redkite:
+  maven:
+    # RedKite is self-hosted here: applying changes to this repo runs its own build-validation
+    # against itself. red-kite-server carries the spring-boot-maven-plugin purely as a generic
+    # launcher/packager for its plain main() — RedKiteServerMain never calls
+    # SpringApplication.run(), it just binds its own com.sun.net.httpserver.HttpServer directly —
+    # so it never prints Spring Boot's own "Started ... in N seconds" banner. Without the two
+    # settings below, the startup check either hangs the full 180s timeout waiting for a banner
+    # that will never come, or collides with an already-running RedKite instance on the same
+    # default port.
+    mode: run
+    args:
+      # RedKiteServerMain binds System.getProperty("redkite.port", "6502") via InetSocketAddress
+      # — the same port a locally-running RedKite instance normally already listens on. Port 0
+      # means "OS picks a free ephemeral port" (same trick ValidationRunner uses for a real Spring
+      # Boot app's --server.port, which this app doesn't read at all). It has to go through
+      # spring-boot.run.jvmArguments rather than a bare -D flag, since spring-boot:run forks a
+      # separate JVM for the app and only jvmArguments gets forwarded into it.
+      - "-Dspring-boot.run.jvmArguments=-Dredkite.port=0"
+    # RedKiteServerMain's own startup line (see RedKiteServerMain.java, BRAND + " server listening
+    # on ..."), matched in place of Spring Boot's banner so the startup check can actually confirm
+    # success instead of always timing out.
+    startedPattern: "RedKite server listening on"
