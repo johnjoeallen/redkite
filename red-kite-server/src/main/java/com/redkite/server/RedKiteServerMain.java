@@ -1239,7 +1239,7 @@ public class RedKiteServerMain {
             com.redkite.maven.ProjectConfigFile.ProjectConfig projectConfig = com.redkite.maven.ProjectConfigFile.load(projectRoot);
             com.redkite.maven.ValidationRunner.ValidationOptions validationOptions = new com.redkite.maven.ValidationRunner.ValidationOptions(
                     projectConfig.toBuildArgs(), projectConfig.env(), projectConfig.mode(), projectConfig.springBootArgs(),
-                    projectConfig.enableTests(), projectConfig.fullLogs());
+                    projectConfig.enableTests(), projectConfig.fullLogs(), projectConfig.startedPattern());
 
             new Thread(() -> {
                 try {

@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 public class ValidationRunner {
 
     private static final Logger LOGGER = Logger.getLogger(ValidationRunner.class.getName());
-    private static final Pattern SPRING_STARTED = Pattern.compile("Started .+ in [\\d.]+ seconds");
+    private static final Pattern DEFAULT_STARTED_PATTERN = Pattern.compile("Started .+ in [\\d.]+ seconds");
     private static final String SPRING_BOOT_PLUGIN = "spring-boot-maven-plugin";
 
     public record ValidationResult(boolean passed, String phase, String rawOutput, String failureSignature,
@@ -75,10 +75,20 @@ public class ValidationRunner {
      *                     per-artifact dependency download/upload logging. {@code true} omits that
      *                     flag, so the raw build output includes it — useful when diagnosing a
      *                     failure that looks repository/network-related.
+     * @param startedPattern regex matched against each line of {@code spring-boot:run}'s output to
+     *                     detect a successful startup, in place of the default
+     *                     {@code "Started .+ in [\d.]+ seconds"} (Spring Boot's own banner line).
+     *                     {@code null} (the default) keeps the default pattern. Needed for a project
+     *                     that only uses {@code spring-boot-maven-plugin} as a generic launcher/
+     *                     packager for a {@code mainClass} that isn't actually a Spring Boot
+     *                     application (no {@code SpringApplication.run()}) and so never prints that
+     *                     banner — RedKite's own {@code red-kite-server} module is exactly this case;
+     *                     see its own {@code .redkite/settings.yml}.
      */
     public record ValidationOptions(List<String> mavenArgs, Map<String, String> env, Mode mode,
-                                     List<String> springBootArgs, boolean enableTests, boolean fullLogs) {
-        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), false, false);
+                                     List<String> springBootArgs, boolean enableTests, boolean fullLogs,
+                                     String startedPattern) {
+        public static final ValidationOptions DEFAULT = new ValidationOptions(List.of(), Map.of(), Mode.RUN, List.of(), false, false, null);
     }
 
     /** Runs {@code mvn clean install} and returns the result. */
@@ -123,12 +133,12 @@ public class ValidationRunner {
                 LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
                 saveFailedPom(projectRoot, pomPath);
             }
-            saveLog(projectRoot, command, output);
+            appendLog(projectRoot, "build (" + options.mode() + ")", command, output);
             return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
             saveFailedPom(projectRoot, pomPath);
-            saveLog(projectRoot, command, e.getMessage());
+            appendLog(projectRoot, "build (" + options.mode() + ")", command, e.getMessage());
             return new ValidationResult(false, "build", "", e.getMessage(), command);
         }
     }
@@ -215,6 +225,15 @@ public class ValidationRunner {
         List<String> command = buildCommand(mvn, settings, projectRoot, pomPath, startupArgs, options.fullLogs(),
                 "spring-boot:run", "-Dspring-boot.run.arguments=--server.port=" + port);
         LOGGER.info(() -> "Startup validation build: " + String.join(" ", command));
+        Pattern startedPattern = DEFAULT_STARTED_PATTERN;
+        if (options.startedPattern() != null) {
+            try {
+                startedPattern = Pattern.compile(options.startedPattern());
+            } catch (java.util.regex.PatternSyntaxException e) {
+                LOGGER.warning(() -> "Invalid startedPattern \"" + options.startedPattern() + "\" — falling back to the default: " + e.getMessage());
+            }
+        }
+        Pattern effectiveStartedPattern = startedPattern;
 
         try {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
@@ -231,7 +250,7 @@ public class ValidationRunner {
                     while ((line = reader.readLine()) != null) {
                         startupOutput.append(line).append('\n');
                         if (onLine != null) onLine.accept(line);
-                        if (SPRING_STARTED.matcher(line).find()) {
+                        if (effectiveStartedPattern.matcher(line).find()) {
                             started.set(true);
                             break;
                         }
@@ -252,12 +271,12 @@ public class ValidationRunner {
                 LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
                 saveFailedPom(projectRoot, pomPath);
             }
-            saveLog(projectRoot, command, output);
+            appendLog(projectRoot, "startup (spring-boot:run)", command, output);
             return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
             saveFailedPom(projectRoot, pomPath);
-            saveLog(projectRoot, command, e.getMessage());
+            appendLog(projectRoot, "startup (spring-boot:run)", command, e.getMessage());
             return new ValidationResult(false, "startup", "", e.getMessage(), command);
         }
     }
@@ -321,25 +340,47 @@ public class ValidationRunner {
     }
 
     /**
-     * Writes the exact Maven command and its full output to {@code .redkite/work/build.log} under
-     * the project root (overwriting any previous one) — unconditionally, whether the build passed
-     * or failed, so the log always reflects the most recent validation run regardless of outcome
-     * (a failure like a duplicate-dependency error can then be diagnosed from the project directory
-     * even though the build ran through RedKite rather than a developer's own terminal). Unlike the
-     * failed-POM snapshot, this is never cleaned up by a later successful apply — see
-     * {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures to save are logged but never
-     * thrown.
+     * Appends one action's exact command and full output to {@code .redkite/work/build.log} under
+     * the project root, as its own clearly delimited entry (timestamp, label, command, then raw
+     * output) — unconditionally, whether that action passed or failed, so the log accumulates a
+     * complete transcript of every Maven (and git) action RedKite ran against this project, not
+     * just the last one. Used by every subprocess-invoking class in this package —
+     * {@link ValidationRunner} itself, {@link EnforcerRunner}, and {@link MavenProjectScanner} —
+     * so a build/dependency-tree/enforcer failure can be diagnosed from the project directory even
+     * though it ran through RedKite rather than a developer's own terminal.
+     *
+     * <p>The log is reset (see {@link #resetLog}) at the start of each fresh scan, so one file
+     * covers one scan-and-whatever-applies-follow-it session rather than growing unbounded across
+     * unrelated runs. Unlike the failed-POM snapshot, an existing log is never cleaned up by a
+     * successful apply — see {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures to
+     * save are logged but never thrown.
      */
-    private static void saveLog(Path projectRoot, List<String> command, String output) {
+    public static void appendLog(Path projectRoot, String label, List<String> command, String output) {
         Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
         String commandLine = command == null ? "(unavailable)" : String.join(" ", command);
-        String content = "$ " + commandLine + "\n\n" + (output == null ? "" : output);
+        String entry = "=== " + java.time.Instant.now() + " — " + label + " ===\n"
+                + "$ " + commandLine + "\n\n" + (output == null ? "" : output)
+                + (output != null && output.endsWith("\n") ? "" : "\n") + "\n";
         try {
             Files.createDirectories(logPath.getParent());
-            Files.writeString(logPath, content, StandardCharsets.UTF_8);
-            LOGGER.info(() -> "Saved build log to " + logPath);
+            Files.writeString(logPath, entry, StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (IOException e) {
-            LOGGER.warning(() -> "Could not save build log to " + logPath + ": " + e.getMessage());
+            LOGGER.warning(() -> "Could not append to build log " + logPath + ": " + e.getMessage());
+        }
+    }
+
+    /** Truncates {@code .redkite/work/build.log} to start a fresh transcript — called once at the
+     *  beginning of a scan, so each new "analyse" run's log doesn't run on forever accumulating
+     *  entries from unrelated earlier sessions. Best-effort: a failure to reset is logged, not
+     *  thrown — worst case an old scan's entries linger at the top of the file. */
+    public static void resetLog(Path projectRoot) {
+        Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
+        try {
+            Files.createDirectories(logPath.getParent());
+            Files.writeString(logPath, "", StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not reset build log " + logPath + ": " + e.getMessage());
         }
     }
 

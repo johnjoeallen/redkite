@@ -79,6 +79,7 @@ public class EnforcerRunner {
                     .start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exit = process.waitFor();
+            ValidationRunner.appendLog(projectRoot, "enforcer (" + String.join(" ", goals) + ")", command, output);
             if (exit == 0) {
                 LOGGER.info(() -> "Enforcer run passed for " + pomPath);
                 return EnforcerRunResult.passed(output);
@@ -88,6 +89,7 @@ public class EnforcerRunner {
             }
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Could not run enforcer: " + e.getMessage());
+            ValidationRunner.appendLog(projectRoot, "enforcer (" + String.join(" ", goals) + ")", command, e.getMessage());
             return EnforcerRunResult.unavailable(e.getMessage());
         }
     }

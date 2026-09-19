@@ -33,6 +33,10 @@ public class MavenProjectScanner {
         try {
             Path root = projectRoot.toAbsolutePath().normalize();
             LOGGER.info(() -> "Starting Maven scan for " + root);
+            // Fresh transcript for this scan (and whatever applies follow it) — see
+            // ValidationRunner.resetLog/appendLog, the shared .redkite/work/build.log every
+            // subprocess-invoking class in this package writes its actions to.
+            ValidationRunner.resetLog(root);
             progress.accept("Reading git metadata…");
             GitMetadata gitMetadata = readGitMetadata(root);
             LOGGER.info(() -> "Git metadata: branch=" + gitMetadata.branch() + ", head=" + gitMetadata.head() + ", clean=" + gitMetadata.clean());
@@ -256,6 +260,7 @@ public class MavenProjectScanner {
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             int exit = process.waitFor();
+            ValidationRunner.appendLog(root, "dependency:tree (" + sourceFile + ")", command, output);
             if (exit != 0) {
                 LOGGER.warning(() -> "mvn dependency:tree failed for " + root.relativize(pom) + " with exit " + exit + "\n" + output);
                 List<String> errors = new ArrayList<>();

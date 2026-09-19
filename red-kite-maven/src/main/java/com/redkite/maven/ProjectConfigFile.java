@@ -53,6 +53,13 @@ import java.util.logging.Logger;
  * mode — {@code true} omits {@code --no-transfer-progress}, so dependency download/upload activity
  * shows up in the raw build output, useful when a failure looks repository/network-related.
  *
+ * <p>{@code startedPattern} (default {@code null}, meaning Spring Boot's own
+ * {@code "Started .+ in [\d.]+ seconds"} banner) only matters for a {@link ValidationRunner.Mode#RUN}
+ * project whose {@code spring-boot-maven-plugin}-launched {@code mainClass} isn't actually a Spring
+ * Boot application — it's a regex matched against each line of the startup check's own output in
+ * place of the default banner, for a project (like RedKite itself) that only uses the plugin as a
+ * generic launcher/packager for a plain {@code main()}.
+ *
  * <pre>{@code
  * redkite:
  *   maven:
@@ -68,6 +75,7 @@ import java.util.logging.Logger;
  *       DB_PASS: pw
  *     spring:
  *       profiles: redkite-local
+ *     startedPattern: "Server listening on"
  * }</pre>
  *
  * {@code args} accepts either form: a real YAML list (as above — each entry is a single argument,
@@ -90,8 +98,9 @@ public final class ProjectConfigFile {
     private static final String YAML_RELATIVE_PATH = DIRECTORY + "/" + BASE_NAME + ".yaml";
 
     public record ProjectConfig(List<String> args, String profile, ValidationRunner.Mode mode,
-                                 Map<String, String> env, String springProfiles, boolean enableTests, boolean fullLogs) {
-        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, false, false);
+                                 Map<String, String> env, String springProfiles, boolean enableTests, boolean fullLogs,
+                                 String startedPattern) {
+        public static final ProjectConfig EMPTY = new ProjectConfig(List.of(), null, ValidationRunner.Mode.RUN, Map.of(), null, false, false, null);
 
         /** {@code args} and {@code profile} folded into one list, in a stable order — applies to
          *  every validation RedKite runs for this project. Does not include
@@ -136,6 +145,12 @@ public final class ProjectConfigFile {
             #      KEY: value
             #    spring:
             #      profiles: my-spring-profile
+            #    startedPattern: "Server listening on"  # only for a spring-boot-maven-plugin project
+            #                           # whose mainClass never prints Spring Boot's own startup
+            #                           # banner (e.g. it's used purely as a launcher for a plain
+            #                           # Java main(), not a real Spring Boot app) — a regex matched
+            #                           # against the app's own log line instead. Default matches
+            #                           # Spring Boot's own "Started X in N seconds" banner.
             """;
 
     private ProjectConfigFile() {
@@ -246,8 +261,9 @@ public final class ProjectConfigFile {
         Map<String, String> env = asStringMap(maven.get("env"));
         String springProfiles = maven.get("spring") instanceof Map<?, ?> spring ? asString(spring.get("profiles")) : null;
         boolean fullLogs = asBoolean(maven.get("fullLogs"), false);
+        String startedPattern = asString(maven.get("startedPattern"));
 
-        return new ProjectConfig(args, profile, mode, env, springProfiles, enableTests, fullLogs);
+        return new ProjectConfig(args, profile, mode, env, springProfiles, enableTests, fullLogs, startedPattern);
     }
 
     /** Accepts either a real YAML list (each entry becomes one argument as-is) or a single

@@ -30,6 +30,7 @@ class ProjectConfigFileTest {
                       DB_PASS: pw
                     spring:
                       profiles: redkite-local
+                    startedPattern: "Server listening on"
                 """;
         ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse(yaml);
 
@@ -40,6 +41,14 @@ class ProjectConfigFileTest {
         assertEquals("redkite-local", config.springProfiles());
         assertTrue(config.enableTests());
         assertTrue(config.fullLogs());
+        assertEquals("Server listening on", config.startedPattern());
+    }
+
+    @Test
+    void startedPatternDefaultsToNull() {
+        ProjectConfigFile.ProjectConfig config = ProjectConfigFile.parse("redkite:\n  maven:\n    mode: run\n");
+        assertNull(config.startedPattern());
+        assertNull(ProjectConfigFile.ProjectConfig.EMPTY.startedPattern());
     }
 
     @Test
@@ -357,14 +366,14 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsAppendsProfileFlagAfterArgs() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false, null);
         assertEquals(List.of("-Dfoo=bar", "-Pdev"), config.toBuildArgs());
     }
 
     @Test
     void springBootArgsOnlyContainsProfilesFlag() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false);
+                List.of("-Dfoo=bar"), "dev", ValidationRunner.Mode.RUN, Map.of(), "dev,local", false, false, null);
         assertEquals(List.of("-Dspring-boot.run.profiles=dev,local"), config.springBootArgs());
     }
 
@@ -376,7 +385,7 @@ class ProjectConfigFileTest {
     @Test
     void toBuildArgsSkipsBlankProfile() {
         ProjectConfigFile.ProjectConfig config = new ProjectConfigFile.ProjectConfig(
-                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, false, false);
+                List.of(), "", ValidationRunner.Mode.RUN, Map.of(), null, false, false, null);
         assertEquals(List.of(), config.toBuildArgs());
     }
 
