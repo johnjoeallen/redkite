@@ -159,18 +159,33 @@ public class RedKiteServerMain {
         volatile boolean noChanges = false;
 
         /** Last few lines of live build output, oldest first, so the "Applying changes" panel can
-         *  show a short scrolling tail without ever needing its own scrollbar. Bounded to
-         *  {@link #RECENT_LINES_MAX} — older lines just fall off the front. */
-        private final java.util.ArrayDeque<String> recentLines = new java.util.ArrayDeque<>();
-        private static final int RECENT_LINES_MAX = 7;
+         *  show a short scrolling tail without ever needing its own scrollbar. */
+        private final RecentLines recentLines = new RecentLines();
 
-        synchronized void appendLine(String line) {
-            recentLines.addLast(line);
-            while (recentLines.size() > RECENT_LINES_MAX) recentLines.removeFirst();
+        void appendLine(String line) {
+            recentLines.append(line);
         }
 
-        synchronized List<String> recentLinesSnapshot() {
-            return new ArrayList<>(recentLines);
+        List<String> recentLinesSnapshot() {
+            return recentLines.snapshot();
+        }
+    }
+
+    /** A bounded, thread-safe tail of the last few lines of some live process output — shared by
+     *  {@link ApplyJob} and {@link ScanJob} so the "Applying changes" and "Analysing" overlays can
+     *  each show a short scrolling log without ever needing their own scrollbar; older lines just
+     *  fall off the front once {@link #MAX} is exceeded. */
+    private static final class RecentLines {
+        private static final int MAX = 7;
+        private final java.util.ArrayDeque<String> lines = new java.util.ArrayDeque<>();
+
+        synchronized void append(String line) {
+            lines.addLast(line);
+            while (lines.size() > MAX) lines.removeFirst();
+        }
+
+        synchronized List<String> snapshot() {
+            return new ArrayList<>(lines);
         }
     }
 
@@ -187,6 +202,19 @@ public class RedKiteServerMain {
         volatile String phasesJson = scanPhases(0,"active",0,"pending",0,"pending",0,"pending",0,"pending");
         volatile String scanId;
         volatile String errorMessage;
+
+        /** Last few lines of live Maven output (dependency:tree, enforcer, and any validation
+         *  runs) across every stage of the scan, so the "Analysing" overlay can show a short
+         *  scrolling tail the same way the apply overlay does. */
+        private final RecentLines recentLines = new RecentLines();
+
+        void appendLine(String line) {
+            recentLines.append(line);
+        }
+
+        List<String> recentLinesSnapshot() {
+            return recentLines.snapshot();
+        }
     }
 
     private static String scanPhases(int p0, String s0, int p1, String s1, int p2, String s2,
@@ -513,8 +541,8 @@ public class RedKiteServerMain {
             // Scan overlay
             body.append(scanOverlayHtml());
             body.append("<script>");
-            body.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
-            body.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
+            body.append("function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';renderScanLog([]);fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}");
+            body.append("function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);renderScanLog(d.log);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}");
             body.append("function deleteProject(id,name){if(!confirm('Delete project \"'+name+'\" and all its analyses?\\n\\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}");
             body.append("</script>");
             sendHtml(exchange, 200, renderPage("project", project.name(), "Project dashboard", body.toString()));
@@ -706,7 +734,7 @@ public class RedKiteServerMain {
                         job.phasesJson = scanPhases(Math.min(pct, 95),"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     }
                 };
-                ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg);
+                ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg, job::appendLine);
 
                 job.phasesJson = scanPhases(100,"done",0,"active",0,"pending",0,"pending",0,"pending");
                 Consumer<String> buildProg = msg -> {
@@ -740,7 +768,7 @@ public class RedKiteServerMain {
                             job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",pct,"active");
                         } catch (Exception ignored) {}
                     }
-                });
+                }, job::appendLine);
                 job.phasesJson = scanPhases(100,"done",100,"done",100,"done",100,"done",100,"done");
 
                 job.scanId = report.scanId();
@@ -752,7 +780,7 @@ public class RedKiteServerMain {
         }, "redkite-scan-" + jobId).start();
     }
 
-    private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress) {
+    private void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress, Consumer<String> onLine) {
         try {
             Path pomPath = projectRoot.resolve("pom.xml");
             com.redkite.maven.TempPomAnalyzer analyzer = new com.redkite.maven.TempPomAnalyzer();
@@ -771,7 +799,7 @@ public class RedKiteServerMain {
             String projectId = scanEntry.projectId();
             List<ScanComponent> components = scanEntry.report().components();
             boolean skipDirectEnforce = store.getProjectEnforcerUseVerify(projectId);
-            EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath, skipDirectEnforce);
+            EnforcerRunner.EnforcerRunResult enfResult = new EnforcerRunner().run(projectRoot, pomPath, skipDirectEnforce, onLine);
             if (enfResult.usedVerifyFallback() && !skipDirectEnforce) {
                 store.setProjectEnforcerUseVerify(projectId);
             }
@@ -802,7 +830,7 @@ public class RedKiteServerMain {
             List<TransitiveConflictFinding> phase2Findings = null;
             List<String> phase2Pins = List.of();
             if (status == EnforcerStatus.ENFORCER_RUN_FAILED_WITH_FINDINGS) {
-                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings, skipDirectEnforce, components);
+                Phase2Result p2 = runPhase2Validation(projectRoot, pomPath, findings, skipDirectEnforce, components, onLine);
                 if (p2 != null) {
                     phase2Findings = p2.remainingFindings();
                     phase2Pins = p2.appliedPins();
@@ -840,7 +868,7 @@ public class RedKiteServerMain {
 
     private Phase2Result runPhase2Validation(
             Path projectRoot, Path pomPath, List<TransitiveConflictFinding> findings,
-            boolean skipDirectEnforce, List<ScanComponent> components) {
+            boolean skipDirectEnforce, List<ScanComponent> components, Consumer<String> onLine) {
         try {
             // The project's own (non-RedKite) dep-management entries are deliberate choices —
             // pristine analysis strips them, which resurfaces conflicts the project has already
@@ -882,7 +910,7 @@ public class RedKiteServerMain {
                     .toList();
             LOGGER.info(() -> "Phase 2: running enforcer with " + pins.size() + " computed dep-management pin(s)");
             EnforcerRunner.EnforcerRunResult r =
-                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins, skipDirectEnforce);
+                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins, skipDirectEnforce, onLine);
             if (r.passed()) {
                 LOGGER.info("Phase 2: all conflicts resolved by auto-fix");
                 return new Phase2Result(List.of(), pinsList);
@@ -1831,7 +1859,8 @@ public class RedKiteServerMain {
         ScanJob job = scanJobs.get(jobId);
         if (job == null) { sendText(exchange, 404, "Job not found"); return; }
         switch (job.status) {
-            case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"phases\":" + job.phasesJson + "}");
+            case RUNNING -> sendJson(exchange, 200, "{\"status\":\"running\",\"phases\":" + job.phasesJson
+                    + ",\"log\":" + jsonStrArray(job.recentLinesSnapshot()) + "}");
             case DONE -> {
                 scanJobs.remove(jobId);
                 sendJson(exchange, 200, "{\"status\":\"done\",\"scanId\":\"" + job.scanId + "\"}");
@@ -3119,6 +3148,8 @@ public class RedKiteServerMain {
              + "<span>Analysing…</span>"
              + "</div>"
              + "<div id=\"scan-phases\" style=\"width:300px;display:flex;flex-direction:column;gap:10px\"></div>"
+             + "<div id=\"scan-log-lines\" style=\"width:300px;height:8.4em;overflow:hidden;font-size:.72rem;"
+             + "line-height:1.2em;font-family:ui-monospace,monospace;color:var(--muted);text-align:left\"></div>"
              + "</div></div>";
     }
 

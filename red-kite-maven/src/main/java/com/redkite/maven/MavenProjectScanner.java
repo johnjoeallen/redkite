@@ -30,6 +30,13 @@ public class MavenProjectScanner {
     }
 
     public ScanInput scan(Path projectRoot, Consumer<String> progress) {
+        return scan(projectRoot, progress, null);
+    }
+
+    /** Same as {@link #scan(Path, Consumer)}, but invokes {@code onLine} (if non-null) with each
+     *  line of every {@code mvn dependency:tree} run's output as it's produced, so a caller can
+     *  show a live tail of the scan's own Maven activity while it runs. */
+    public ScanInput scan(Path projectRoot, Consumer<String> progress, Consumer<String> onLine) {
         try {
             Path root = projectRoot.toAbsolutePath().normalize();
             LOGGER.info(() -> "Starting Maven scan for " + root);
@@ -135,7 +142,7 @@ public class MavenProjectScanner {
                     }
                 } else {
                     progress.accept("Running dependency:tree for " + relativePom + "…");
-                    treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId, projectModuleKeys));
+                    treeParseWarnings.addAll(collectDependencyTree(root, pom, model, relativePom, componentsByKey, edges, nextId, projectModuleKeys, onLine));
                     // A non-aggregator module's own dependencyManagement entries were previously
                     // invisible as components entirely — including RedKite's own prior CVE-fix
                     // pins — surfacing only (if at all) as a plain dependency-tree node with no
@@ -245,7 +252,7 @@ public class MavenProjectScanner {
         }
     }
 
-    private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId, Set<String> projectModuleKeys) {
+    private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId, Set<String> projectModuleKeys, Consumer<String> onLine) {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
             String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
@@ -258,7 +265,16 @@ public class MavenProjectScanner {
                 command = List.of(mvn, "-f", pom.toString(), "-DskipTests", "dependency:tree");
             }
             Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            StringBuilder outputBuilder = new StringBuilder();
+            try (var reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    outputBuilder.append(line).append('\n');
+                    if (onLine != null) onLine.accept(line);
+                }
+            }
+            String output = outputBuilder.toString();
             int exit = process.waitFor();
             ValidationRunner.appendLog(root, "dependency:tree (" + sourceFile + ")", command, output);
             if (exit != 0) {

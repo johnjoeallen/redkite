@@ -7,6 +7,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
@@ -66,6 +67,12 @@ public class TempPomAnalyzer {
      * the project, then runs the enforcer against the temp tree.
      */
     public PristineResult runPristine(Path projectRoot, Path pomPath) throws IOException {
+        return runPristine(projectRoot, pomPath, null);
+    }
+
+    /** Same as {@link #runPristine(Path, Path)}, but invokes {@code onLine} (if non-null) with
+     *  each line of the enforcer run's output as it's produced. */
+    public PristineResult runPristine(Path projectRoot, Path pomPath, Consumer<String> onLine) throws IOException {
         List<Path> allPoms = findAllPoms(projectRoot);
 
         int exclusionsStripped = 0;
@@ -95,7 +102,7 @@ public class TempPomAnalyzer {
                 LOGGER.warning(() -> "Symlink creation failed, verify fallback may not compile: " + e.getMessage());
             }
             Path tempPomPath = tempRoot.resolve(projectRoot.relativize(pomPath));
-            EnforcerRunner.EnforcerRunResult result = runner.run(projectRoot, tempPomPath);
+            EnforcerRunner.EnforcerRunResult result = runner.run(projectRoot, tempPomPath, false, onLine);
             return new PristineResult(result, exclusionsStripped,
                     List.copyOf(depMgmtRemoved), List.copyOf(allRedkiteExclusions));
         } finally {
@@ -114,11 +121,18 @@ public class TempPomAnalyzer {
      */
     public EnforcerRunner.EnforcerRunResult runWithPins(Path projectRoot, Path pomPath,
             Map<String, String> pins) throws IOException {
-        return runWithPins(projectRoot, pomPath, pins, false);
+        return runWithPins(projectRoot, pomPath, pins, false, null);
     }
 
     public EnforcerRunner.EnforcerRunResult runWithPins(Path projectRoot, Path pomPath,
             Map<String, String> pins, boolean skipDirectEnforce) throws IOException {
+        return runWithPins(projectRoot, pomPath, pins, skipDirectEnforce, null);
+    }
+
+    /** Same as {@link #runWithPins(Path, Path, Map, boolean)}, but invokes {@code onLine} (if
+     *  non-null) with each line of the enforcer run's output as it's produced. */
+    public EnforcerRunner.EnforcerRunResult runWithPins(Path projectRoot, Path pomPath,
+            Map<String, String> pins, boolean skipDirectEnforce, Consumer<String> onLine) throws IOException {
         List<Path> allPoms = findAllPoms(projectRoot);
         Path tempRoot = Files.createTempDirectory("redkite-phase2-");
         try {
@@ -138,7 +152,7 @@ public class TempPomAnalyzer {
                 LOGGER.warning(() -> "Symlink creation failed, verify fallback may not compile: " + e.getMessage());
             }
             Path tempPomPath = tempRoot.resolve(projectRoot.relativize(pomPath));
-            return runner.run(projectRoot, tempPomPath, skipDirectEnforce);
+            return runner.run(projectRoot, tempPomPath, skipDirectEnforce, onLine);
         } finally {
             deleteQuietly(tempRoot);
         }
