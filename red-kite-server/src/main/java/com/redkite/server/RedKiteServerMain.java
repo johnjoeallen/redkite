@@ -1340,6 +1340,11 @@ public class RedKiteServerMain {
                     com.redkite.maven.ValidationRunner.ValidationResult post =
                             runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions, job::appendLine);
                     if (!post.passed()) {
+                        // Preserve every file as it stood when validation failed, BEFORE reverting
+                        // any of them — ValidationRunner already snapshots the root POM to
+                        // .redkite/work/pom.xml, but an apply can touch other files too (submodule
+                        // POMs, pomPatches), and those need to survive the revert just as much.
+                        saveFailedCopies(projectRoot, modified);
                         // Restore originals.
                         for (Map.Entry<Path, String> entry : originals.entrySet()) {
                             Files.writeString(entry.getKey(), entry.getValue(), StandardCharsets.UTF_8);
@@ -1654,17 +1659,50 @@ public class RedKiteServerMain {
     }
 
     /**
-     * Recursively deletes {@code .redkite/work/} under the project root — called once an apply job
-     * finishes successfully, since its pristine backups and any earlier failure snapshot are no
-     * longer needed. A failed apply leaves the directory in place for inspection instead of calling
-     * this. Best-effort: a failure to clean up is logged, never thrown.
+     * Preserves every file an apply job touched exactly as it stood when post-apply validation
+     * failed, mirrored to {@code .redkite/work/<relative path>} — called before the in-memory
+     * revert writes the originals back over them. Complements {@code ValidationRunner}'s own
+     * {@code .redkite/work/pom.xml} snapshot (which only ever covers the one POM path a build was
+     * actually invoked against): an apply can touch several files at once (submodule POMs,
+     * pomPatches), and every one of them needs to survive the revert for diagnosis, not just the
+     * root. Best-effort: a failure to save a file is logged, never thrown.
+     */
+    private static void saveFailedCopies(Path projectRoot, Map<Path, String> modified) {
+        Path workDir = com.redkite.maven.ValidationRunner.redkiteWorkDir(projectRoot);
+        for (Map.Entry<Path, String> entry : modified.entrySet()) {
+            Path relative = projectRoot.relativize(entry.getKey());
+            Path dest = workDir.resolve(relative);
+            try {
+                Files.createDirectories(dest.getParent());
+                Files.writeString(dest, entry.getValue(), StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                LOGGER.warning(() -> "Could not save failed copy of " + entry.getKey() + " to " + dest + ": " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Clears everything in {@code .redkite/work/} that only matters while an apply might still need
+     * to recover — pristine pre-apply backups and any failed-file snapshots — once an apply job
+     * finishes successfully; a failed apply leaves them in place for inspection instead of calling
+     * this. {@code build.log} is deliberately left alone: it always reflects the most recent
+     * validation run regardless of outcome (see {@code ValidationRunner.saveLog}), so it survives
+     * every cleanup, and so does the {@code work/} directory itself. Best-effort: a failure to clean
+     * up is logged, never thrown.
      */
     private static void cleanupWorkDir(Path projectRoot) {
         Path workDir = com.redkite.maven.ValidationRunner.redkiteWorkDir(projectRoot);
         if (!Files.exists(workDir)) return;
+        Path buildLog = workDir.resolve("build.log");
         try (var walk = Files.walk(workDir)) {
             walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                if (p.equals(workDir) || p.equals(buildLog)) return;
                 try {
+                    if (Files.isDirectory(p)) {
+                        try (var children = Files.list(p)) {
+                            if (children.findAny().isPresent()) return; // not empty (holds build.log or similar) — keep
+                        }
+                    }
                     Files.delete(p);
                 } catch (IOException e) {
                     LOGGER.warning(() -> "Could not delete " + p + ": " + e.getMessage());

@@ -122,13 +122,13 @@ public class ValidationRunner {
             } else {
                 LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
                 saveFailedPom(projectRoot, pomPath);
-                saveFailedLog(projectRoot, command, output);
             }
+            saveLog(projectRoot, command, output);
             return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
             saveFailedPom(projectRoot, pomPath);
-            saveFailedLog(projectRoot, command, e.getMessage());
+            saveLog(projectRoot, command, e.getMessage());
             return new ValidationResult(false, "build", "", e.getMessage(), command);
         }
     }
@@ -251,13 +251,13 @@ public class ValidationRunner {
             } else {
                 LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
                 saveFailedPom(projectRoot, pomPath);
-                saveFailedLog(projectRoot, command, output);
             }
+            saveLog(projectRoot, command, output);
             return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
             saveFailedPom(projectRoot, pomPath);
-            saveFailedLog(projectRoot, command, e.getMessage());
+            saveLog(projectRoot, command, e.getMessage());
             return new ValidationResult(false, "startup", "", e.getMessage(), command);
         }
     }
@@ -322,21 +322,24 @@ public class ValidationRunner {
 
     /**
      * Writes the exact Maven command and its full output to {@code .redkite/work/build.log} under
-     * the project root (overwriting any previous one), so a failure like a duplicate-dependency
-     * enforcer error can be diagnosed from the project directory even though the build ran through
-     * RedKite rather than a developer's own terminal. Left in place on failure. Best-effort:
-     * failures to save are logged but never thrown.
+     * the project root (overwriting any previous one) — unconditionally, whether the build passed
+     * or failed, so the log always reflects the most recent validation run regardless of outcome
+     * (a failure like a duplicate-dependency error can then be diagnosed from the project directory
+     * even though the build ran through RedKite rather than a developer's own terminal). Unlike the
+     * failed-POM snapshot, this is never cleaned up by a later successful apply — see
+     * {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures to save are logged but never
+     * thrown.
      */
-    private static void saveFailedLog(Path projectRoot, List<String> command, String output) {
+    private static void saveLog(Path projectRoot, List<String> command, String output) {
         Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
         String commandLine = command == null ? "(unavailable)" : String.join(" ", command);
         String content = "$ " + commandLine + "\n\n" + (output == null ? "" : output);
         try {
             Files.createDirectories(logPath.getParent());
             Files.writeString(logPath, content, StandardCharsets.UTF_8);
-            LOGGER.info(() -> "Saved failing build log to " + logPath);
+            LOGGER.info(() -> "Saved build log to " + logPath);
         } catch (IOException e) {
-            LOGGER.warning(() -> "Could not save failing build log to " + logPath + ": " + e.getMessage());
+            LOGGER.warning(() -> "Could not save build log to " + logPath + ": " + e.getMessage());
         }
     }
 

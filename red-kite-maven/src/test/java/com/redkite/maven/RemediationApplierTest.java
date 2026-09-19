@@ -268,6 +268,70 @@ class RemediationApplierTest {
     }
 
     @Test
+    void collapsesAStrayPlainDuplicateWhenTakingOverTheFirstEntry() {
+        // Two plain (non-RedKite) dependencyManagement entries for the same coordinate is already
+        // an invalid POM ("must be unique") — but if one slips in (bad merge, hand edit), taking
+        // over just the first one and leaving the second in place still leaves an unbuildable POM.
+        String pom = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.20</version>
+                      </dependency>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.25</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.38", "Fix");
+        assertEquals(1, countOccurrences(updated, "<artifactId>logback-core</artifactId>"),
+                "Both plain entries must collapse into the single one RedKite took over");
+        assertTrue(updated.contains("<version>1.5.38</version>"));
+        assertFalse(updated.contains("1.5.20"));
+        assertFalse(updated.contains("1.5.25"));
+    }
+
+    @Test
+    void collapsesAStrayDuplicateLeftAlongsideAnEarlierRedkitePin() {
+        // If RedKite's own marked entry already exists but a second, unrelated entry for the same
+        // coordinate was independently added later (manual edit, merge), updating only the marked
+        // entry (what step 1 alone would do) leaves the stray behind and the build still fails.
+        String pom = """
+                <project>
+                  <dependencyManagement>
+                    <dependencies>
+                      <!-- redkite:dependency-management pin groupId="ch.qos.logback" artifactId="logback-core" version="1.5.25" reason="Fix" — remove this comment to prevent RedKite managing this dependency -->
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.25</version>
+                      </dependency>
+                      <dependency>
+                        <groupId>ch.qos.logback</groupId>
+                        <artifactId>logback-core</artifactId>
+                        <version>1.5.30</version>
+                      </dependency>
+                    </dependencies>
+                  </dependencyManagement>
+                </project>
+                """;
+        String updated = applier.applyDependencyManagementPin(pom,
+                "ch.qos.logback", "logback-core", "1.5.38", "Fix");
+        assertEquals(1, countOccurrences(updated, "<artifactId>logback-core</artifactId>"),
+                "The stray unrelated entry must be removed, leaving only RedKite's updated pin");
+        assertTrue(updated.contains("<version>1.5.38</version>"));
+        assertFalse(updated.contains("1.5.30"));
+    }
+
+    @Test
     void stripsRedkiteExclusionsFromPom() {
         String withExclusion = applier.applyExclusion(POM_WITH_DEPENDENCIES,
                 "com.example", "service-b",

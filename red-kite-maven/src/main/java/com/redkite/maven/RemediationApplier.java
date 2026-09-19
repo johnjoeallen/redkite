@@ -174,9 +174,10 @@ public class RemediationApplier {
                 // forced, so there's no <dependency> to update. Converting it into a real pin
                 // needs one created fresh, or the rewritten comment would claim a version that
                 // nothing actually enforces.
-                existing.getParentNode().insertBefore(
-                        buildPinDependency(doc, groupId, artifactId, version), existing.getNextSibling());
+                dep = buildPinDependency(doc, groupId, artifactId, version);
+                existing.getParentNode().insertBefore(dep, existing.getNextSibling());
             }
+            collapseDuplicateDepMgmtEntries(doc, groupId, artifactId, dep);
             return serialize(doc);
         }
 
@@ -202,6 +203,7 @@ public class RemediationApplier {
                     return content;
                 }
                 if (kind == PinKind.USER) markPropertyPin(doc, property, version, true);
+                collapseDuplicateDepMgmtEntries(doc, groupId, artifactId, plain);
                 if (version.equals(property.getTextContent().trim())) {
                     return serialize(doc);
                 }
@@ -212,6 +214,7 @@ public class RemediationApplier {
             setChildText(doc, plain, "version", version);
             plain.getParentNode().insertBefore(
                     buildPinComment(doc, groupId, artifactId, version, reason, kind), plain);
+            collapseDuplicateDepMgmtEntries(doc, groupId, artifactId, plain);
             return serialize(doc);
         }
 
@@ -220,7 +223,9 @@ public class RemediationApplier {
             Element dependencies = directChild(depMgmt, "dependencies");
             if (dependencies != null) {
                 dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, kind));
-                dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
+                Element dep = buildPinDependency(doc, groupId, artifactId, version);
+                dependencies.appendChild(dep);
+                collapseDuplicateDepMgmtEntries(doc, groupId, artifactId, dep);
                 return serialize(doc);
             }
         }
@@ -597,6 +602,36 @@ public class RemediationApplier {
             }
         }
         return null;
+    }
+
+    /**
+     * Removes every {@code <dependency>} for {@code groupId:artifactId} in any
+     * {@code <dependencyManagement>} block OTHER than {@code keep} (its preceding comment, if any,
+     * goes with it) — collapsing them onto the one entry {@code applyDependencyManagementPin} just
+     * wrote or updated.
+     *
+     * <p>Maven rejects two {@code dependencyManagement} entries for the same coordinate with
+     * "must be unique", and none of {@code applyDependencyManagementPin}'s three placement paths
+     * (update RedKite's own marked entry, take over a plain entry, or append fresh) checks whether
+     * an unrelated duplicate already sits elsewhere — e.g. an older RedKite pin left behind
+     * alongside a later manually-added entry, or one reintroduced by a merge. RedKite already
+     * computed the version being pinned to; collapsing strays onto it closes that gap rather than
+     * leaving a build that can never pass no matter what version gets chosen.
+     */
+    private void collapseDuplicateDepMgmtEntries(Document doc, String groupId, String artifactId, Element keep) {
+        for (Element depMgmt : elementsByTag(doc, "dependencyManagement")) {
+            for (Element dep : elementsByTag(depMgmt, "dependency")) {
+                if (dep == keep || !coordMatches(dep, groupId, artifactId)) continue;
+                Node prev = dep.getPreviousSibling();
+                while (prev != null && prev.getNodeType() == Node.TEXT_NODE && prev.getTextContent().isBlank()) {
+                    prev = prev.getPreviousSibling();
+                }
+                if (prev instanceof Comment) {
+                    prev.getParentNode().removeChild(prev);
+                }
+                dep.getParentNode().removeChild(dep);
+            }
+        }
     }
 
     private boolean hasRedkiteExclusion(Element dep, String groupId, String artifactId) {

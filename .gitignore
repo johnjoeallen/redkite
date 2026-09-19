@@ -34,3 +34,6 @@ dependency-reduced-pom.xml
 
 # MkDocs build output
 /site/
+
+# RedKite build validation diagnostics
+.redkite/work/
