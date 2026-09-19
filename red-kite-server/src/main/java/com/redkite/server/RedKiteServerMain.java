@@ -149,14 +149,29 @@ public class RedKiteServerMain {
         volatile String failedVersion;
         volatile String failureSignature;
         /** Exact Maven command line run for the failing post-apply validation, so the UI can show
-         *  the user exactly what RedKite ran (also persisted to {@code pom.failed.log}). */
+         *  the user exactly what RedKite ran (also persisted to {@code .redkite/work/build.log}). */
         volatile String failureCommand;
-        /** Absolute path to the {@code pom.failed.log} file ValidationRunner wrote for this
-         *  failure, or {@code null} if it could not be determined. */
+        /** Absolute path to the {@code .redkite/work/build.log} file ValidationRunner wrote for
+         *  this failure, or {@code null} if it could not be determined. */
         volatile String failureLogPath;
         /** True when the fully-computed patched POM set turned out identical to what's already on
          *  disk — nothing was validated or written, since there was nothing to apply. */
         volatile boolean noChanges = false;
+
+        /** Last few lines of live build output, oldest first, so the "Applying changes" panel can
+         *  show a short scrolling tail without ever needing its own scrollbar. Bounded to
+         *  {@link #RECENT_LINES_MAX} — older lines just fall off the front. */
+        private final java.util.ArrayDeque<String> recentLines = new java.util.ArrayDeque<>();
+        private static final int RECENT_LINES_MAX = 7;
+
+        synchronized void appendLine(String line) {
+            recentLines.addLast(line);
+            while (recentLines.size() > RECENT_LINES_MAX) recentLines.removeFirst();
+        }
+
+        synchronized List<String> recentLinesSnapshot() {
+            return new ArrayList<>(recentLines);
+        }
     }
 
     private final ConcurrentHashMap<String, ApplyJob> applyJobs = new ConcurrentHashMap<>();
@@ -677,6 +692,7 @@ public class RedKiteServerMain {
             try {
                 store.reconfigureForProject(projectRoot);
                 com.redkite.maven.ProjectConfigFile.ensureDefaultExists(projectRoot);
+                com.redkite.maven.ProjectConfigFile.ensureGitignoreEntries(projectRoot);
 
                 // Phase 0: dependency scan
                 int[] scanMods = {0}, scanDone = {0};
@@ -1302,7 +1318,7 @@ public class RedKiteServerMain {
                     // authoritative gate.
                     job.phase = ApplyJob.Phase.PRE_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult pre =
-                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions, job::appendLine);
                     job.baselinePassed = pre.passed();
                     if (!pre.passed()) {
                         LOGGER.info(() -> "Pre-apply validation failed (baseline broken) — continuing with apply: " + pre.failureSignature());
@@ -1310,6 +1326,9 @@ public class RedKiteServerMain {
 
                     // --- APPLYING ---
                     job.phase = ApplyJob.Phase.APPLYING;
+
+                    // Back up what's about to be overwritten before touching any real project file.
+                    savePristineCopies(projectRoot, originals);
 
                     // Write all changes to disk.
                     for (Map.Entry<Path, String> entry : modified.entrySet()) {
@@ -1319,7 +1338,7 @@ public class RedKiteServerMain {
                     // --- POST-VALIDATE ---
                     job.phase = ApplyJob.Phase.POST_VALIDATE;
                     com.redkite.maven.ValidationRunner.ValidationResult post =
-                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions);
+                            runner.validateWithStartup(projectRoot, rootPom, 180, validationOptions, job::appendLine);
                     if (!post.passed()) {
                         // Restore originals.
                         for (Map.Entry<Path, String> entry : originals.entrySet()) {
@@ -1347,11 +1366,12 @@ public class RedKiteServerMain {
                         job.failureMessage = "Post-apply validation failed (" + post.phase() + ")" + baselineNote + ": " + post.failureSignature();
                         job.failureSignature = post.failureSignature();
                         job.failureCommand = post.command() != null ? String.join(" ", post.command()) : null;
-                        job.failureLogPath = rootPom.resolveSibling("pom.failed.log").toString();
+                        job.failureLogPath = com.redkite.maven.ValidationRunner.redkiteWorkDir(projectRoot).resolve("build.log").toString();
                         job.status = ApplyJob.Status.FAILED;
                         return;
                     }
 
+                    cleanupWorkDir(projectRoot);
                     job.status = ApplyJob.Status.DONE;
                 } catch (Throwable e) {
                     job.failureMessage = causeChain(e);
@@ -1573,7 +1593,8 @@ public class RedKiteServerMain {
                     case APPLYING -> "applying";
                     case POST_VALIDATE -> "post-validate";
                 };
-                sendJson(exchange, 200, "{\"status\":\"running\",\"phase\":" + jsonStr(phase) + "}");
+                sendJson(exchange, 200, "{\"status\":\"running\",\"phase\":" + jsonStr(phase)
+                        + ",\"log\":" + jsonStrArray(job.recentLinesSnapshot()) + "}");
             }
             case DONE -> {
                 boolean baselinePassed = job.baselinePassed;
@@ -1608,6 +1629,50 @@ public class RedKiteServerMain {
             return projectRoot.resolve(p).normalize();
         }
         return projectRoot.resolve("pom.xml");
+    }
+
+    /**
+     * Backs up every file an apply job is about to overwrite to
+     * {@code .redkite/work/pristine/<relative path>}, mirroring the project's own directory layout,
+     * before any real project file is touched. A safety net beyond the in-memory {@code originals}
+     * map the apply job already reverts from on a failed validation — if the server dies mid-apply
+     * (between writing changes and reverting them), these are what's left to restore from by hand.
+     * Best-effort: a failure to back up a file is logged, never thrown.
+     */
+    private static void savePristineCopies(Path projectRoot, Map<Path, String> originals) {
+        Path pristineDir = com.redkite.maven.ValidationRunner.redkiteWorkDir(projectRoot).resolve("pristine");
+        for (Map.Entry<Path, String> entry : originals.entrySet()) {
+            Path relative = projectRoot.relativize(entry.getKey());
+            Path dest = pristineDir.resolve(relative);
+            try {
+                Files.createDirectories(dest.getParent());
+                Files.writeString(dest, entry.getValue(), StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                LOGGER.warning(() -> "Could not save pristine copy of " + entry.getKey() + " to " + dest + ": " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Recursively deletes {@code .redkite/work/} under the project root — called once an apply job
+     * finishes successfully, since its pristine backups and any earlier failure snapshot are no
+     * longer needed. A failed apply leaves the directory in place for inspection instead of calling
+     * this. Best-effort: a failure to clean up is logged, never thrown.
+     */
+    private static void cleanupWorkDir(Path projectRoot) {
+        Path workDir = com.redkite.maven.ValidationRunner.redkiteWorkDir(projectRoot);
+        if (!Files.exists(workDir)) return;
+        try (var walk = Files.walk(workDir)) {
+            walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException e) {
+                    LOGGER.warning(() -> "Could not delete " + p + ": " + e.getMessage());
+                }
+            });
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not clean up " + workDir + ": " + e.getMessage());
+        }
     }
 
     private String enforcerResultToJson(Store.EnforcerResultEntry entry) {
@@ -3036,6 +3101,8 @@ public class RedKiteServerMain {
              + "</div>"
              + "<div id=\"apply-progress-text\" style=\"font-size:.78rem;color:var(--muted);font-weight:400;"
              + "font-family:ui-monospace,monospace;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\"></div>"
+             + "<div id=\"apply-log-lines\" style=\"width:300px;height:8.4em;overflow:hidden;font-size:.72rem;"
+             + "line-height:1.2em;font-family:ui-monospace,monospace;color:var(--muted);text-align:left\"></div>"
              + "</div></div>";
     }
 
@@ -4083,6 +4150,15 @@ public class RedKiteServerMain {
         if (value == null) return "null";
         return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"")
                 .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\"";
+    }
+
+    private static String jsonStrArray(List<String> values) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(jsonStr(values.get(i)));
+        }
+        return sb.append("]").toString();
     }
 
     private String severityBadgeHtml(AdvisorySeverity severity, boolean clean) {

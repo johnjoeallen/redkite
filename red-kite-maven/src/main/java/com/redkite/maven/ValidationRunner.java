@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
@@ -89,6 +90,13 @@ public class ValidationRunner {
      *  result. {@link ValidationOptions#enableTests()} decides whether {@code -DskipTests} is added
      *  — uniformly across all three modes, not just {@code RUN}. */
     public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options) {
+        return validate(projectRoot, pomPath, options, null);
+    }
+
+    /** Same as {@link #validate(Path, Path, ValidationOptions)}, but invokes {@code onLine} (if
+     *  non-null) with each line of build output as it's produced, so a caller can show a live tail
+     *  of the build while it runs rather than waiting for it to finish. */
+    public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options, Consumer<String> onLine) {
         String mvn = isMvnCmd();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         String goal = switch (options.mode()) {
@@ -106,23 +114,38 @@ public class ValidationRunner {
             ProcessBuilder builder = new ProcessBuilder(command).redirectErrorStream(true);
             builder.environment().putAll(options.env());
             Process process = builder.start();
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            String output = readOutput(process, onLine);
             int exit = process.waitFor();
             boolean passed = exit == 0;
             if (passed) {
                 LOGGER.info(() -> "Validation build passed for " + pomPath);
             } else {
                 LOGGER.warning(() -> "Validation build failed for " + pomPath + " (exit " + exit + "). Full output:\n" + output);
-                saveFailedPom(pomPath);
-                saveFailedLog(pomPath, command, output);
+                saveFailedPom(projectRoot, pomPath);
+                saveFailedLog(projectRoot, command, output);
             }
             return new ValidationResult(passed, "build", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Validation build could not run: " + e.getMessage());
-            saveFailedPom(pomPath);
-            saveFailedLog(pomPath, command, e.getMessage());
+            saveFailedPom(projectRoot, pomPath);
+            saveFailedLog(projectRoot, command, e.getMessage());
             return new ValidationResult(false, "build", "", e.getMessage(), command);
         }
+    }
+
+    /** Reads a process's (merged stdout/stderr) output to completion, line by line, invoking
+     *  {@code onLine} for each line as it arrives and returning the full text joined with {@code \n}. */
+    private static String readOutput(Process process, Consumer<String> onLine) throws IOException {
+        StringBuilder all = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                all.append(line).append('\n');
+                if (onLine != null) onLine.accept(line);
+            }
+        }
+        return all.toString();
     }
 
     /**
@@ -147,7 +170,14 @@ public class ValidationRunner {
      */
     public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds,
                                                  ValidationOptions options) {
-        ValidationResult buildResult = validate(projectRoot, pomPath, options);
+        return validateWithStartup(projectRoot, pomPath, timeoutSeconds, options, null);
+    }
+
+    /** Same as {@link #validateWithStartup(Path, Path, int, ValidationOptions)}, but invokes
+     *  {@code onLine} (if non-null) with each line of output — build or startup — as it's produced. */
+    public ValidationResult validateWithStartup(Path projectRoot, Path pomPath, int timeoutSeconds,
+                                                 ValidationOptions options, Consumer<String> onLine) {
+        ValidationResult buildResult = validate(projectRoot, pomPath, options, onLine);
         if (!buildResult.passed()) return buildResult;
         if (options.mode() != Mode.RUN) {
             Mode mode = options.mode();
@@ -200,6 +230,7 @@ public class ValidationRunner {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         startupOutput.append(line).append('\n');
+                        if (onLine != null) onLine.accept(line);
                         if (SPRING_STARTED.matcher(line).find()) {
                             started.set(true);
                             break;
@@ -219,14 +250,14 @@ public class ValidationRunner {
                 LOGGER.info(() -> "Startup validation passed for " + pomPath);
             } else {
                 LOGGER.warning(() -> "Startup validation failed/timed-out for " + pomPath + ". Full output:\n" + output);
-                saveFailedPom(pomPath);
-                saveFailedLog(pomPath, command, output);
+                saveFailedPom(projectRoot, pomPath);
+                saveFailedLog(projectRoot, command, output);
             }
             return new ValidationResult(passed, "startup", output, passed ? null : extractSignature(output), command);
         } catch (IOException | InterruptedException e) {
             LOGGER.warning(() -> "Startup validation could not run: " + e.getMessage());
-            saveFailedPom(pomPath);
-            saveFailedLog(pomPath, command, e.getMessage());
+            saveFailedPom(projectRoot, pomPath);
+            saveFailedLog(projectRoot, command, e.getMessage());
             return new ValidationResult(false, "startup", "", e.getMessage(), command);
         }
     }
@@ -272,12 +303,16 @@ public class ValidationRunner {
     }
 
     /**
-     * Copies the given POM to a sibling {@code pom.failed} file for later analysis, overwriting any
-     * previous one. Best-effort: failures to save are logged but never thrown.
+     * Copies the given POM to {@code .redkite/work/pom.xml} under the project root for later
+     * analysis, overwriting any previous one. Left in place on failure rather than cleaned up — the
+     * caller (an apply job) clears {@code .redkite/work/} on the next successful apply; a failed
+     * validation run outside an apply (e.g. a plain scan) just leaves it for inspection. Best-effort:
+     * failures to save are logged but never thrown.
      */
-    private static void saveFailedPom(Path pomPath) {
-        Path failedPath = pomPath.resolveSibling("pom.failed");
+    private static void saveFailedPom(Path projectRoot, Path pomPath) {
+        Path failedPath = redkiteWorkDir(projectRoot).resolve("pom.xml");
         try {
+            Files.createDirectories(failedPath.getParent());
             Files.copy(pomPath, failedPath, StandardCopyOption.REPLACE_EXISTING);
             LOGGER.info(() -> "Saved failing POM to " + failedPath);
         } catch (IOException e) {
@@ -286,21 +321,30 @@ public class ValidationRunner {
     }
 
     /**
-     * Writes the exact Maven command and its full output to a sibling {@code pom.failed.log} file
-     * (overwriting any previous one), so a failure like a duplicate-dependency enforcer error can
-     * be diagnosed from the project directory even though the build ran through RedKite rather than
-     * a developer's own terminal. Best-effort: failures to save are logged but never thrown.
+     * Writes the exact Maven command and its full output to {@code .redkite/work/build.log} under
+     * the project root (overwriting any previous one), so a failure like a duplicate-dependency
+     * enforcer error can be diagnosed from the project directory even though the build ran through
+     * RedKite rather than a developer's own terminal. Left in place on failure. Best-effort:
+     * failures to save are logged but never thrown.
      */
-    private static void saveFailedLog(Path pomPath, List<String> command, String output) {
-        Path logPath = pomPath.resolveSibling("pom.failed.log");
+    private static void saveFailedLog(Path projectRoot, List<String> command, String output) {
+        Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
         String commandLine = command == null ? "(unavailable)" : String.join(" ", command);
         String content = "$ " + commandLine + "\n\n" + (output == null ? "" : output);
         try {
+            Files.createDirectories(logPath.getParent());
             Files.writeString(logPath, content, StandardCharsets.UTF_8);
             LOGGER.info(() -> "Saved failing build log to " + logPath);
         } catch (IOException e) {
             LOGGER.warning(() -> "Could not save failing build log to " + logPath + ": " + e.getMessage());
         }
+    }
+
+    /** {@code .redkite/work/} — where every RedKite-generated scratch/diagnostic file for a
+     *  project lives (failed POM/log snapshots, pristine backups an apply job saves before writing
+     *  changes), so a project's own {@code .gitignore} only needs one directory entry. */
+    public static Path redkiteWorkDir(Path projectRoot) {
+        return projectRoot.resolve(".redkite").resolve("work");
     }
 
     /**

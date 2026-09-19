@@ -159,6 +159,44 @@ public final class ProjectConfigFile {
         }
     }
 
+    /** {@code .redkite/work/} — every RedKite scratch/diagnostic file for a project (failed POM and
+     *  build-log snapshots, pristine pre-apply backups) — never meant to be committed, since it's
+     *  per-run scratch state, not project configuration like {@code settings.yml}. See
+     *  {@link ValidationRunner#redkiteWorkDir(Path)}. */
+    private static final List<String> GITIGNORE_ENTRIES = List.of(DIRECTORY + "/work/");
+
+    /** Adds {@link #GITIGNORE_ENTRIES} to {@code <projectRoot>/.gitignore} if the project is a git
+     *  repository and either the file or those entries are missing — so RedKite's own build-failure
+     *  diagnostics never end up accidentally committed. Creates {@code .gitignore} if the project
+     *  has none. A no-op if every entry is already present (exact-line match; an existing broader
+     *  pattern like {@code *.log} is left alone rather than parsed). Best-effort: a failure to write
+     *  is logged, never thrown — this must never block a scan or apply.
+     */
+    public static void ensureGitignoreEntries(Path projectRoot) {
+        if (!Files.exists(projectRoot.resolve(".git"))) return;
+        Path gitignorePath = projectRoot.resolve(".gitignore");
+        try {
+            String existing = Files.exists(gitignorePath) ? Files.readString(gitignorePath, StandardCharsets.UTF_8) : "";
+            List<String> existingLines = existing.lines().map(String::trim).toList();
+            List<String> missing = new ArrayList<>();
+            for (String entry : GITIGNORE_ENTRIES) {
+                if (!existingLines.contains(entry)) missing.add(entry);
+            }
+            if (missing.isEmpty()) return;
+
+            StringBuilder sb = new StringBuilder(existing);
+            if (!existing.isEmpty() && !existing.endsWith("\n")) sb.append('\n');
+            if (!existing.isEmpty()) sb.append('\n');
+            sb.append("# RedKite build validation diagnostics\n");
+            for (String entry : missing) sb.append(entry).append('\n');
+            Files.writeString(gitignorePath, sb.toString(), StandardCharsets.UTF_8);
+            List<String> added = missing;
+            LOGGER.info(() -> "Added " + added + " to " + gitignorePath);
+        } catch (IOException e) {
+            LOGGER.warning(() -> "Could not update " + gitignorePath + ": " + e.getMessage());
+        }
+    }
+
     /** The project's actual config file, if either form exists — {@code settings.yaml} takes
      *  precedence over {@code settings.yml} on the rare occasion both are present. {@code null} if
      *  neither exists. */
