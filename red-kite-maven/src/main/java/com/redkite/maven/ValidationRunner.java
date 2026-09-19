@@ -349,11 +349,13 @@ public class ValidationRunner {
      * so a build/dependency-tree/enforcer failure can be diagnosed from the project directory even
      * though it ran through RedKite rather than a developer's own terminal.
      *
-     * <p>The log is reset (see {@link #resetLog}) at the start of each fresh scan, so one file
-     * covers one scan-and-whatever-applies-follow-it session rather than growing unbounded across
-     * unrelated runs. Unlike the failed-POM snapshot, an existing log is never cleaned up by a
-     * successful apply — see {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures to
-     * save are logged but never thrown.
+     * <p>Nothing resets this automatically (see {@link #resetLog} for a caller that explicitly
+     * wants a clean slate) — every analyse and apply action for this project keeps accumulating
+     * into the same file, deliberately, since RedKite auto-triggers a rescan right after an apply
+     * completes and an automatic reset there would wipe out that apply's own entries moments after
+     * they were written. Unlike the failed-POM snapshot, an existing log is never cleaned up by a
+     * successful apply either — see {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures
+     * to save are logged but never thrown.
      */
     public static void appendLog(Path projectRoot, String label, List<String> command, String output) {
         Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
@@ -370,10 +372,10 @@ public class ValidationRunner {
         }
     }
 
-    /** Truncates {@code .redkite/work/build.log} to start a fresh transcript — called once at the
-     *  beginning of a scan, so each new "analyse" run's log doesn't run on forever accumulating
-     *  entries from unrelated earlier sessions. Best-effort: a failure to reset is logged, not
-     *  thrown — worst case an old scan's entries linger at the top of the file. */
+    /** Truncates {@code .redkite/work/build.log} to start a fresh transcript. Not called
+     *  automatically by anything in this package (see {@link #appendLog} for why) — available for
+     *  a caller that explicitly wants to clear accumulated history, e.g. before analysing a
+     *  different project path. Best-effort: a failure to reset is logged, not thrown. */
     public static void resetLog(Path projectRoot) {
         Path logPath = redkiteWorkDir(projectRoot).resolve("build.log");
         try {

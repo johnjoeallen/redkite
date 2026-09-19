@@ -40,10 +40,13 @@ public class MavenProjectScanner {
         try {
             Path root = projectRoot.toAbsolutePath().normalize();
             LOGGER.info(() -> "Starting Maven scan for " + root);
-            // Fresh transcript for this scan (and whatever applies follow it) — see
-            // ValidationRunner.resetLog/appendLog, the shared .redkite/work/build.log every
-            // subprocess-invoking class in this package writes its actions to.
-            ValidationRunner.resetLog(root);
+            // Deliberately NOT reset here: RedKite auto-triggers a rescan right after every apply
+            // completes (see scripts.js's triggerScan(rk_scanPath) call), which would otherwise
+            // wipe out that apply's own build.log entries (pre-validate/applying/post-validate)
+            // moments after they were written, before anyone could look at them. build.log — see
+            // ValidationRunner.appendLog/resetLog — is meant to accumulate every action across a
+            // whole analyse-then-apply session; resetLog() is still available for a caller that
+            // explicitly wants a clean slate (e.g. starting analysis on a different project path).
             progress.accept("Reading git metadata…");
             GitMetadata gitMetadata = readGitMetadata(root);
             LOGGER.info(() -> "Git metadata: branch=" + gitMetadata.branch() + ", head=" + gitMetadata.head() + ", clean=" + gitMetadata.clean());
