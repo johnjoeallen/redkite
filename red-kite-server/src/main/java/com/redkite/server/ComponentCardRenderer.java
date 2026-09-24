@@ -4,6 +4,7 @@ import com.redkite.core.domain.*;
 import com.redkite.core.service.AdvisoryClassifier;
 import com.redkite.core.service.LicenseNormalizer;
 import com.redkite.core.service.LicensePermissiveness;
+import com.redkite.metadata.VulnerabilityProvider;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -18,10 +19,10 @@ import static com.redkite.server.ScanPageRenderer.*;
 
 /** One component's card on the analysis page: status, findings, recommendation and the version selector. */
 final class ComponentCardRenderer {
-    private final Store store;
+    private final VulnerabilityProvider vulnerabilities;
 
-    ComponentCardRenderer(Store store) {
-        this.store = store;
+    ComponentCardRenderer(VulnerabilityProvider vulnerabilities) {
+        this.vulnerabilities = vulnerabilities;
     }
 
     /**
@@ -706,7 +707,7 @@ final class ComponentCardRenderer {
         if (coordinate == null || candidateVersion == null || candidateVersion.isBlank()) {
             return AdvisorySeverity.NONE;
         }
-        return AdvisoryClassifier.highest(store.vulnerabilityProvider.vulnerabilities(coordinate, candidateVersion));
+        return AdvisoryClassifier.highest(vulnerabilities.vulnerabilities(coordinate, candidateVersion));
     }
 
     private List<String> versionChoices(MetadataResult versionMetadata, UpgradeRecommendation recommendation) {
@@ -728,6 +729,7 @@ final class ComponentCardRenderer {
                 }
             }
             if (versionMetadata.latestVersion() != null && !versionMetadata.latestVersion().isBlank()
+                    && !"unknown".equalsIgnoreCase(versionMetadata.latestVersion())
                     && !isPreRelease(versionMetadata.latestVersion())) {
                 choices.add(versionMetadata.latestVersion());
             }

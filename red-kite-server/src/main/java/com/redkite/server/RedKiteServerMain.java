@@ -32,7 +32,7 @@ public class RedKiteServerMain {
                 defaultDataDir.resolve("preferences.properties").toString())));
         EnforcerAnalysis analysis = new EnforcerAnalysis(store);
         PomChanges pomChanges = new PomChanges(store, analysis);
-        ScanPageRenderer scanPage = new ScanPageRenderer(store, new ComponentCardRenderer(store));
+        ScanPageRenderer scanPage = new ScanPageRenderer(store, new ComponentCardRenderer(store.vulnerabilityProvider));
         this.pageHandlers = new PageHandlers(store, pages, scanPage,
                 new EnforcerSectionRenderer(store, analysis), new LogModalRenderer(store, analysis));
         this.scanApi = new ScanApiHandlers(store, analysis, pomChanges);
