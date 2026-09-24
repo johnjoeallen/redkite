@@ -32,4 +32,67 @@ class VersionsTest {
             System.clearProperty("redkite.version.lookback");
         }
     }
+
+    @Test
+    void releaseLineMajorAndMinorComparisons() {
+        assertTrue(Versions.sameReleaseLine("1.5.2", "1.5.9"));
+        assertFalse(Versions.sameReleaseLine("1.5.2", "1.6.0"));
+
+        assertTrue(Versions.sameMajorMinor("1.2.3", "1.2.9"));
+        assertTrue(Versions.sameMajorMinor("1.2", "1.2"));
+        assertFalse(Versions.sameMajorMinor("1.2", "1.3"));
+        assertFalse(Versions.sameMajorMinor("1.2", "2.2"));
+        assertFalse(Versions.sameMajorMinor("1", "1"));
+        assertFalse(Versions.sameMajorMinor(null, "1.2"));
+        assertFalse(Versions.sameMajorMinor("1.2", null));
+
+        assertTrue(Versions.sameMajor("1", "1"));
+        assertTrue(Versions.sameMajor("2.0", "2-rc1"));
+        assertFalse(Versions.sameMajor("1.0", "2.0"));
+        assertFalse(Versions.sameMajor("-1", "-2"));
+        assertFalse(Versions.sameMajor(null, "1"));
+        assertFalse(Versions.sameMajor("1", null));
+
+        assertEquals(5, Versions.minor("1.5.2"));
+        assertEquals(0, Versions.minor("1"));
+        assertEquals(3, Versions.major("3_1"));
+        assertTrue(Versions.isMajorUpgrade("1.9", "2.0"));
+        assertFalse(Versions.isMajorUpgrade("2.0", "2.9"));
+    }
+
+    @Test
+    void compareVersionsPadsTheShorterVersionWithZeros() {
+        assertEquals(-1, Versions.compareVersions("1", "1.2"));
+        assertEquals(1, Versions.compareVersions("1.2", "1"));
+        assertEquals(0, Versions.compareVersions("1", "1.0"));
+        assertEquals(0, Versions.compareVersions("1.0", "1"));
+        assertEquals(-1, Versions.compareVersions(null, "1"));
+        assertEquals(1, Versions.compareVersions("1.0-2", "1.0.1"));
+    }
+
+    @Test
+    void findMatchingConflictPrefersTheOneForTheCurrentVersion() {
+        com.redkite.core.domain.TransitiveConflictFinding first = conflict("1.0");
+        com.redkite.core.domain.TransitiveConflictFinding second = conflict("2.0");
+        Map<String, List<com.redkite.core.domain.TransitiveConflictFinding>> byKey = Map.of("g:a", List.of(first, second), "g:none", List.of());
+
+        assertSame(second, Versions.findMatchingConflict(byKey, component("g", "a", "2.0")));
+        assertSame(first, Versions.findMatchingConflict(byKey, component("g", "a", "3.0")));
+        assertSame(first, Versions.findMatchingConflict(byKey, component("g", "a", null)));
+        assertSame(first, Versions.findMatchingConflict(byKey, component("g", "a", " ")));
+        assertNull(Versions.findMatchingConflict(byKey, component("g", "none", "1.0")));
+        assertNull(Versions.findMatchingConflict(byKey, component("g", "other", "1.0")));
+        assertNull(Versions.findMatchingConflict(null, component("g", "a", "1.0")));
+        assertNull(Versions.findMatchingConflict(byKey, null));
+    }
+
+    private static com.redkite.core.domain.TransitiveConflictFinding conflict(String resolved) {
+        return new com.redkite.core.domain.TransitiveConflictFinding("g", "a", resolved, List.of(), List.of(),
+                "dependencyConvergence", null, List.of());
+    }
+
+    private static com.redkite.core.domain.ScanComponent component(String g, String a, String version) {
+        return new com.redkite.core.domain.ScanComponent(1, new com.redkite.core.domain.ComponentCoordinate(g, a), version,
+                null, true, null, "pom.xml", null, Map.of(), false, null, "pom.xml");
+    }
 }

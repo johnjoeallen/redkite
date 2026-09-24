@@ -318,4 +318,120 @@ class RemediationClassifierTest {
         assertEquals(0, summary.needsRemediation());
         assertEquals(1, summary.clean());
     }
+
+    // --- exact reasons and edge cases ---
+
+    private static MetadataResult metadata(long componentId, boolean complete, MetadataStatus status, CacheState cacheState) {
+        return new MetadataResult("test-scan", componentId, MetadataType.VERSION, "maven",
+                "1.0.0", "2.0.0", "1.9.9", List.of(), List.of(), complete,
+                status, cacheState, Instant.now(), null, Instant.now(), null, "m");
+    }
+
+    @Test
+    void everyReasonIsListedInOrderAndARecommendationDefersToVulnerabilities() {
+        ScanComponent comp = component(1L, true, true, VersionSource.LITERAL);
+        RemediationStatus status = RemediationClassifier.classify(comp, List.of(finding("HIGH")),
+                List.of(recommendation(1L)), List.of(staleMetadata(1L)), null);
+        assertEquals(List.of("Snapshot dependency", "Declared inline version", "Known high severity advisory",
+                "Stale or incomplete metadata"), status.reasons());
+        assertTrue(status.hasUpgradeRecommendation());
+        assertEquals(1, status.vulnerabilityCount());
+
+        assertEquals(List.of("Update recommended"), RemediationClassifier.classify(releaseComponent(1L),
+                List.of(), List.of(recommendation(1L)), List.of(), null).reasons());
+        assertEquals(List.of("Snapshot dependency"), RemediationClassifier.classify(component(1L, true, false, VersionSource.PROPERTY),
+                List.of(), List.of(recommendation(1L)), List.of(), null).reasons());
+    }
+
+    @Test
+    void recommendationsMatchByIdOrByAffectedComponents() {
+        UpgradeRecommendation viaAffected = new UpgradeRecommendation(9L, COORD, "1.0.0", "2.0.0",
+                RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH, RecommendationConfidence.HIGH, List.of(), List.of(8L, 1L));
+        UpgradeRecommendation unrelated = new UpgradeRecommendation(9L, COORD, "1.0.0", "2.0.0",
+                RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH, RecommendationConfidence.HIGH, List.of(), null);
+        UpgradeRecommendation unrelatedIds = new UpgradeRecommendation(9L, COORD, "1.0.0", "2.0.0",
+                RecommendationReason.PATCH_AVAILABLE, RiskLevel.PATCH, RecommendationConfidence.HIGH, List.of(), List.of(8L));
+        ScanComponent comp = releaseComponent(1L);
+        assertTrue(RemediationClassifier.classify(comp, List.of(), List.of(unrelated, viaAffected), List.of()).hasUpgradeRecommendation());
+        assertFalse(RemediationClassifier.classify(comp, List.of(), List.of(unrelated, unrelatedIds), List.of()).hasUpgradeRecommendation());
+        assertFalse(RemediationClassifier.classify(comp, List.of(), null, List.of()).hasUpgradeRecommendation());
+    }
+
+    @Test
+    void metadataIsStaleWhenIncompleteOrInAProblemState() {
+        ScanComponent comp = releaseComponent(1L);
+        for (CacheState state : List.of(CacheState.STALE, CacheState.MISSING, CacheState.NEGATIVE_STALE, CacheState.ERROR_CACHED))
+            assertTrue(RemediationClassifier.classify(comp, List.of(), List.of(),
+                    List.of(metadata(1L, true, MetadataStatus.FRESH, state))).hasStaleMetadata(), state.name());
+        for (MetadataStatus status : List.of(MetadataStatus.RATE_LIMITED, MetadataStatus.PROVIDER_ERROR, MetadataStatus.OFFLINE_MISSING,
+                MetadataStatus.OFFLINE_STALE_USED, MetadataStatus.STALE_USED, MetadataStatus.MISSING))
+            assertTrue(RemediationClassifier.classify(comp, List.of(), List.of(),
+                    List.of(metadata(1L, true, status, CacheState.FRESH))).hasStaleMetadata(), status.name());
+        assertFalse(RemediationClassifier.classify(comp, List.of(), List.of(),
+                List.of(metadata(1L, true, null, null))).hasStaleMetadata());
+        assertFalse(RemediationClassifier.classify(comp, List.of(), List.of(),
+                List.of(metadata(2L, false, MetadataStatus.MISSING, CacheState.MISSING))).hasStaleMetadata());
+        assertFalse(RemediationClassifier.classify(comp, List.of(), List.of(), null).hasStaleMetadata());
+    }
+
+    @Test
+    void findingsMustMatchGroupArtifactAndVersion() {
+        ScanComponent comp = releaseComponent(1L);
+        List<VulnerabilityFinding> others = new java.util.ArrayList<>();
+        others.add(null);
+        others.add(new VulnerabilityFinding("A", "HIGH", null, "1.0.0", null, null, true, null, List.of(), null));
+        others.add(new VulnerabilityFinding("A", "HIGH", new ComponentCoordinate("other", "lib"), "1.0.0", null, null, true, null, List.of(), null));
+        others.add(new VulnerabilityFinding("A", "HIGH", new ComponentCoordinate("com.example", "other"), "1.0.0", null, null, true, null, List.of(), null));
+        others.add(new VulnerabilityFinding("A", "HIGH", COORD, "2.0.0", null, null, true, null, List.of(), null));
+        assertFalse(RemediationClassifier.classify(comp, others, List.of(), List.of()).hasVulnerability());
+        assertFalse(RemediationClassifier.classify(comp, null, List.of(), List.of()).hasVulnerability());
+        others.add(finding("LOW"));
+        assertEquals(1, RemediationClassifier.classify(comp, others, List.of(), List.of()).vulnerabilityCount());
+    }
+
+    @Test
+    void summaryCombinesModulesAndListsDependenciesPerReasonAndSeverity() {
+        // The same dependency in two modules: declared inline in one, managed in the other.
+        ScanComponent declared = componentAt(1L, "shared", false, true, VersionSource.LITERAL);
+        ScanComponent managed = componentAt(2L, "shared", false, true, VersionSource.PROPERTY);
+        ScanComponent snap = componentAt(3L, "snap", true, false, VersionSource.PROPERTY);
+        ScanComponent vuln = componentAt(4L, "vuln", false, false, VersionSource.PROPERTY);
+        ScanComponent upgradable = componentAt(5L, "upgradable", false, false, VersionSource.PROPERTY);
+        ScanComponent stale = componentAt(6L, "stale", false, false, VersionSource.PROPERTY);
+        ScanComponent clean = componentAt(7L, "clean", false, false, VersionSource.PROPERTY);
+        ComponentCoordinate vulnCoord = vuln.coordinate();
+        List<VulnerabilityFinding> findings = List.of(
+                new VulnerabilityFinding("A1", "CRITICAL", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding("A1", "CRITICAL", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding("A2", "MODERATE", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding("A3", "LOW", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding(null, "whatever", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding(null, "whatever", vulnCoord, "1.0.0", null, null, true, null, List.of(), null),
+                new VulnerabilityFinding("A4", "NONE", vulnCoord, "1.0.0", null, null, true, null, List.of(), null));
+        List<UpgradeRecommendation> recs = List.of(recommendation(3L), recommendation(4L), recommendation(5L));
+
+        ReportSummary summary = RemediationClassifier.summarize(minimalReport(
+                List.of(declared, managed, snap, vuln, upgradable, stale, clean), findings, recs, List.of(staleMetadata(6L))));
+
+        assertEquals(6, summary.totalComponents());
+        assertEquals(5, summary.needsRemediation());
+        assertEquals(1, summary.clean());
+        assertEquals(1, summary.snapshotCount());
+        assertEquals(1, summary.declaredVersionWarningCount());
+        assertEquals(1, summary.recommendationCount());
+        assertEquals(1, summary.staleMetadataCount());
+        assertEquals(Map.of(
+                RemediationReason.SNAPSHOT, List.of("com.example:snap@1.0.0"),
+                RemediationReason.DECLARED_VERSION, List.of("com.example:shared@1.0.0"),
+                RemediationReason.UPGRADE_RECOMMENDED, List.of("com.example:upgradable@1.0.0"),
+                RemediationReason.STALE_METADATA, List.of("com.example:stale@1.0.0")), summary.dependenciesByReason());
+
+        assertEquals(1, summary.criticalCount());
+        assertEquals(0, summary.highCount());
+        assertEquals(1, summary.mediumCount());
+        assertEquals(1, summary.lowCount());
+        assertEquals(1, summary.unknownCount());
+        assertEquals(List.of("com.example:vuln@1.0.0"), summary.dependenciesBySeverity().get(AdvisorySeverity.CRITICAL));
+        assertEquals(List.of("com.example:vuln@1.0.0"), summary.dependenciesBySeverity().get(AdvisorySeverity.NONE));
+    }
 }

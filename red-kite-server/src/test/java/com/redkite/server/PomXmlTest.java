@@ -67,4 +67,56 @@ class PomXmlTest {
         assertEquals("shallow", PomXml.rootPomXml(nested));
         assertEquals("", PomXml.rootPomXml(Map.of("readme", "x")));
     }
+
+    @Test
+    void lookupsFindTagsAtTheVeryStartOfTheText() {
+        assertEquals("1", PomXml.extractDepMgmtVersion(
+                "<dependencyManagement><dependency><groupId>g</groupId><artifactId>a</artifactId>"
+                        + "<version>1</version></dependency></dependencyManagement>", "g", "a"));
+        assertEquals("1", PomXml.resolvePomPropertyRef("<properties><p>1</p></properties>", "${p}"));
+        assertEquals("x", PomXml.extractArtifactId("<artifactId>x</artifactId>"));
+    }
+
+    @Test
+    void rootPomKeepsTheFirstOfEquallyShallowPoms() {
+        Map<String, String> poms = new LinkedHashMap<>();
+        poms.put("a/pom.xml", "first");
+        poms.put("b/pom.xml", "second");
+        assertEquals("first", PomXml.rootPomXml(poms));
+    }
+
+    @Test
+    void selectRootPomKeyPrefersFewestDirectoriesThenShortestPath() {
+        assertEquals("pom.xml", PomXml.selectRootPomKey(Map.of("a/pom.xml", "", "pom.xml", ""), "/w"));
+
+        Map<String, String> poms = new LinkedHashMap<>();
+        poms.put("notes.txt", "");
+        poms.put("a/b/pom.xml", "");
+        poms.put("long-name/pom.xml", "");
+        poms.put("ab/pom.xml", "");
+        poms.put("abc/pom.xml", "");
+        poms.put("xy/pom.xml", "");
+        assertEquals("ab/pom.xml", PomXml.selectRootPomKey(poms, "/w"));
+        Map<String, String> depthBeatsLength = new LinkedHashMap<>();
+        depthBeatsLength.put("a/b/pom.xml", "");
+        depthBeatsLength.put("long-name/pom.xml", "");
+        assertEquals("long-name/pom.xml", PomXml.selectRootPomKey(depthBeatsLength, "/w"));
+
+        Map<String, String> noPoms = new LinkedHashMap<>();
+        noPoms.put("x.txt", "");
+        noPoms.put("y.txt", "");
+        assertEquals("x.txt", PomXml.selectRootPomKey(noPoms, "/w"));
+        assertNull(PomXml.selectRootPomKey(Map.of(), "/w"));
+    }
+
+    @Test
+    void fileReadsReturnContentOrAFallback(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("pom.xml");
+        Files.writeString(file, "<project/>");
+        assertEquals("<project/>", PomXml.readFileQuietly(file));
+        assertEquals("", PomXml.readFileQuietly(dir.resolve("missing.xml")));
+        assertEquals("<project/>", PomXml.readIfExists(file));
+        assertNull(PomXml.readIfExists(dir.resolve("missing.xml")));
+        assertNull(PomXml.readIfExists(dir));
+    }
 }

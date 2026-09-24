@@ -38,7 +38,7 @@ final class Store {
     volatile String mavenSettingsPath;
     final LicenseLookup licenses = new LicenseLookup(this);
     private final StoreSchema schema = new StoreSchema(this);
-    private final ReportBuilder reports = new ReportBuilder(this, new CveFixFinder(this));
+    private final ReportBuilder reports;
 
     private Store(String jdbcUrl, String dbUser, String dbPassword) {
         this.jdbcUrl = jdbcUrl;
@@ -60,6 +60,7 @@ final class Store {
         LOGGER.info(() -> "Effective Maven repositories: " + effectiveMavenRepos);
         this.vulnerabilityProvider = new HttpVulnerabilityProvider(System.getProperty("redkite.osv.url", "https://api.osv.dev"), this::dbConnection);
         this.licenseResolver = new LicenseResolver(new PomFetcher(null));
+        this.reports = new ReportBuilder(this, new CveFixFinder(vulnerabilityProvider));
         schema.initializeSchema();
         schema.seedConfigDefaults();
         schema.seedLicenseRankDefaults();

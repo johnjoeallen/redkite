@@ -134,4 +134,101 @@ class CandidateUpdateResolverTest {
 
         assertEquals(UpdateAction.DOWNGRADE, results.get(0).action());
     }
+
+    // --- one selection per controller type ---
+
+    private static ScanComponent sourced(String artifactId, String version, VersionSource source, boolean direct, String owning) {
+        return new ScanComponent(nextId++, new ComponentCoordinate("g", artifactId), version,
+                DependencyScope.COMPILE, direct, source, "pom.xml", null, Map.of(), false, owning, "pom.xml");
+    }
+
+    private static CandidateUpdate single(ScanComponent component, String target) {
+        List<CandidateUpdate> results = CandidateUpdateResolver.resolve(List.of(component), Map.of(component.coordinate(), target), Map.of());
+        assertEquals(1, results.size());
+        return results.get(0);
+    }
+
+    @Test
+    void eachControllerTypeGetsItsOwnActionAndDescription() {
+        CandidateUpdate literal = single(sourced("a", "1.0", VersionSource.LITERAL, true, "pom.xml#dependency"), "1.1");
+        assertEquals(UpdateAction.UPGRADE, literal.action());
+        assertEquals("direct version", literal.editableDeclaration());
+
+        CandidateUpdate property = single(sourced("a", "1.0", VersionSource.PROPERTY, true, "pom.xml#a.version"), "1.1");
+        assertEquals(UpdateAction.CHANGE_PROPERTY, property.action());
+        assertEquals("property a.version", property.editableDeclaration());
+
+        CandidateUpdate localDm = single(sourced("a", "1.0", VersionSource.BOM_MANAGED, true, "sub/pom.xml"), "0.9");
+        assertEquals(UpdateAction.DOWNGRADE, localDm.action());
+        assertEquals("local dependencyManagement (sub/pom.xml)", localDm.editableDeclaration());
+        assertTrue(localDm.introducesDowngrade());
+        assertFalse(localDm.overridesPlatform());
+
+        CandidateUpdate parentLiteral = single(sourced("a", "1.0", VersionSource.PARENT_MANAGED, false, "org:parent:1#literal"), "1.1");
+        assertEquals(UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE, parentLiteral.action());
+        assertEquals("parent org:parent:1", parentLiteral.editableDeclaration());
+        assertTrue(parentLiteral.overridesPlatform());
+
+        CandidateUpdate parentProperty = single(sourced("a", "1.0", VersionSource.PARENT_MANAGED, false, "org:parent:1#a.version"), "1.1");
+        assertEquals(UpdateAction.CHANGE_PROPERTY, parentProperty.action());
+        assertFalse(parentProperty.overridesPlatform());
+
+        CandidateUpdate bomLiteral = single(sourced("a", "1.0", VersionSource.PLATFORM_MANAGED, false, "org:bom:1#literal"), "1.1");
+        assertEquals(UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE, bomLiteral.action());
+        assertEquals("imported BOM org:bom:1", bomLiteral.editableDeclaration());
+        assertTrue(bomLiteral.overridesPlatform());
+
+        CandidateUpdate bomProperty = single(sourced("a", "1.0", VersionSource.PLATFORM_MANAGED, false, "org:bom:1#a.version"), "1.1");
+        assertEquals(UpdateAction.CHANGE_PROPERTY, bomProperty.action());
+        assertFalse(bomProperty.overridesPlatform());
+
+        CandidateUpdate mediated = single(sourced("a", "1.0", VersionSource.UNKNOWN, false, null), "1.1");
+        assertEquals(UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE, mediated.action());
+        assertEquals("dependency mediation (unmanaged)", mediated.editableDeclaration());
+        assertFalse(mediated.overridesPlatform());
+
+        assertEquals("unmanaged", single(sourced("a", "1.0", VersionSource.UNKNOWN, true, null), "1.1").editableDeclaration());
+    }
+
+    @Test
+    void selectionForAnUnscannedCoordinateMovesFromUnknown() {
+        ComponentCoordinate ghost = new ComponentCoordinate("g", "ghost");
+        CandidateUpdate update = CandidateUpdateResolver.resolve(List.of(), Map.of(ghost, "1.0"), Map.of()).get(0);
+        assertEquals("unmanaged", update.editableDeclaration());
+        assertEquals("unknown", update.oldValue());
+        assertEquals(List.of(new ProposedChangeSet.DependencyMovement(ghost, "unknown", "1.0")), update.resultingChanges().movements());
+        assertEquals("Requested version change", update.reason());
+    }
+
+    @Test
+    void equivalentVersionSpellingIsNeitherADowngradeNorANoOp() {
+        CandidateUpdate update = single(sourced("a", "1.0", VersionSource.LITERAL, true, "pom.xml#dependency"), "1.0.0");
+        assertEquals(UpdateAction.UPGRADE, update.action());
+        assertFalse(update.introducesDowngrade());
+        assertEquals(1, update.resultingChanges().movements().size());
+        assertTrue(single(sourced("a", "1.0", VersionSource.LITERAL, true, "pom.xml#dependency"), "1.0").resultingChanges().movements().isEmpty());
+    }
+
+    @Test
+    void reasonListsEachDistinctFindingReasonOnce() {
+        ScanComponent component = literal("g", "r", "1.0");
+        List<DependencyFinding> findings = List.of(cve(component.id(), "a"), cve(component.id(), "b"),
+                new DependencyFinding(component.id(), DependencyFindingReason.OUTDATED, "c"));
+        CandidateUpdate update = CandidateUpdateResolver.resolve(List.of(component),
+                Map.of(component.coordinate(), "2.0"), Map.of(component.coordinate(), findings)).get(0);
+        assertEquals("CVE, OUTDATED", update.reason());
+    }
+
+    @Test
+    void versionComparisonHandlesLengthsQualifiersAndCase() {
+        assertTrue(CandidateUpdateResolver.compareVersions("1.10", "1.9") > 0);
+        assertTrue(CandidateUpdateResolver.compareVersions("1", "1.1") < 0);
+        assertTrue(CandidateUpdateResolver.compareVersions("1.1", "1") > 0);
+        assertEquals(0, CandidateUpdateResolver.compareVersions("1", "1.0"));
+        assertEquals(0, CandidateUpdateResolver.compareVersions("1.0", "1"));
+        assertTrue(CandidateUpdateResolver.compareVersions("1.0-alpha", "1.0-beta") < 0);
+        assertTrue(CandidateUpdateResolver.compareVersions("1.0.1", "1.0-rc") > 0);
+        assertTrue(CandidateUpdateResolver.compareVersions("1.0-rc", "1.0.1") < 0);
+        assertEquals(0, CandidateUpdateResolver.compareVersions("1.0-RC", "1.0-rc"));
+    }
 }

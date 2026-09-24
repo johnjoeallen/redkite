@@ -2,6 +2,7 @@ package com.redkite.server;
 
 import com.redkite.core.domain.*;
 import com.redkite.core.service.AdvisoryClassifier;
+import com.redkite.metadata.VulnerabilityProvider;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -9,10 +10,10 @@ import static com.redkite.server.Versions.*;
 
 /** Searches a vulnerable component's published versions for the nearest one that clears its CVEs: an upgrade, a downgrade, or the lowest remaining severity. */
 final class CveFixFinder {
-    private final Store store;
+    private final VulnerabilityProvider vulnerabilities;
 
-    CveFixFinder(Store store) {
-        this.store = store;
+    CveFixFinder(VulnerabilityProvider vulnerabilities) {
+        this.vulnerabilities = vulnerabilities;
     }
 
     record CveFixResult(String target, RecommendationReason reason) {}
@@ -109,7 +110,7 @@ final class CveFixFinder {
         int checked = 0;
         for (String candidate : candidates) {
             if (checked++ >= MAX_FIX_VERIFY_CANDIDATES) break;
-            if (store.vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate).isEmpty()) {
+            if (vulnerabilities.vulnerabilities(component.coordinate(), candidate).isEmpty()) {
                 return candidate;
             }
         }
@@ -153,14 +154,14 @@ final class CveFixFinder {
         List<String> belowWindow = below.subList(0, Math.min(3, below.size()));
 
         AdvisorySeverity currentSeverity = AdvisoryClassifier.highest(
-                store.vulnerabilityProvider.vulnerabilities(component.coordinate(), current));
+                vulnerabilities.vulnerabilities(component.coordinate(), current));
         String best = null;
         AdvisorySeverity bestSeverity = null;
 
         // Upgrades first (closest-first) — ties with current severity are acceptable.
         for (String candidate : aboveWindow) {
             AdvisorySeverity candidateSeverity = AdvisoryClassifier.highest(
-                    store.vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate));
+                    vulnerabilities.vulnerabilities(component.coordinate(), candidate));
             if (candidateSeverity.ordinal() > currentSeverity.ordinal()) continue; // never regress
             if (bestSeverity == null || candidateSeverity.ordinal() < bestSeverity.ordinal()) {
                 best = candidate;
@@ -171,7 +172,7 @@ final class CveFixFinder {
         // upgrade was already found — no free pass for ties in this direction.
         for (String candidate : belowWindow) {
             AdvisorySeverity candidateSeverity = AdvisoryClassifier.highest(
-                    store.vulnerabilityProvider.vulnerabilities(component.coordinate(), candidate));
+                    vulnerabilities.vulnerabilities(component.coordinate(), candidate));
             if (candidateSeverity.ordinal() >= currentSeverity.ordinal()) continue;
             if (bestSeverity == null || candidateSeverity.ordinal() < bestSeverity.ordinal()) {
                 best = candidate;

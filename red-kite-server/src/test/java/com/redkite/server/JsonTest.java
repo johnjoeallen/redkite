@@ -89,4 +89,43 @@ class JsonTest {
         assertEquals("[\"a\",null]", Json.jsonStrArray(java.util.Arrays.asList("a", null)));
         assertEquals("[]", Json.jsonStrArray(List.of()));
     }
+
+    @Test
+    void parseJsonObjectToleratesMissingBracesAndUnterminatedValues() {
+        assertEquals(Map.of("a", "b"), Json.parseJsonObject("\"a\":\"b\""));
+        assertEquals(Map.of("a", "1"), Json.parseJsonObject("\"a\":1"));
+        assertEquals(Map.of("a", "12"), Json.parseJsonObject("{\"a\":12"));
+        assertEquals(Map.of("a", "xy"), Json.parseJsonObject("{\"a\":\"xy"));
+        assertEquals(Map.of("a:b", "c"), Json.parseJsonObject("{\"a:b\":\"c\"}"));
+        assertEquals(Map.of("k:", "c"), Json.parseJsonObject("{\"k:\":\"c\"}"));
+    }
+
+    @Test
+    void fieldLookupsHandleKeysAtTheStartAndKeysContainingColons() {
+        assertEquals("x", Json.parseJsonField("\"id\":\"x\"", "id"));
+        assertEquals("v", Json.parseJsonField("{\"a:b\":\"v\"}", "a:b"));
+
+        assertEquals("x", Json.parseJsonPath("\"path\":\"x\""));
+        assertEquals("p", Json.parseJsonPath("{\"a\":\"b\",\"path\":\"p\"}"));
+        assertEquals("abc", Json.parseJsonPath("{\"path\":\"abc"));
+        assertEquals("a\\", Json.parseJsonPath("{\"path\":\"a\\"));
+
+        assertEquals("[1]", Json.extractJsonValue("\"k\":[1]", "k"));
+        assertEquals("[1]", Json.extractJsonValue("{\"a:b\":[1]}", "a:b"));
+    }
+
+    @Test
+    void parseJsonObjectArrayAcceptsASingleObjectAndKeepsNumbersWhole() {
+        assertEquals(List.of(Map.of("a", "1")), Json.parseJsonObjectArray("{\"k\":{\"a\":\"1\"}}", "k"));
+        assertEquals(List.of(Map.of("a", "12")), Json.parseJsonObjectArray("{\"k\":[{\"a\":12}]}", "k"));
+    }
+
+    @Test
+    void parseJsonStringMapHandlesEdgeCases() {
+        assertEquals(Map.of("k", "v"), Json.parseJsonStringMap("\"k\":\"v\""));
+        assertEquals(Map.of("a:b", "v"), Json.parseJsonStringMap("{\"a:b\":\"v\"}"));
+        assertEquals(Map.of("k:", "v"), Json.parseJsonStringMap("{\"k:\":\"v\"}"));
+        assertEquals(Map.of("k", "v"), Json.parseJsonStringMap("{\"k\":\"v"));
+        assertEquals(Map.of("k", "v\\"), Json.parseJsonStringMap("{\"k\":\"v\\"));
+    }
 }

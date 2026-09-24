@@ -112,4 +112,36 @@ class UpdatePlanBuilderTest {
         return plan.candidates().stream().filter(c -> c.action() == action).findFirst()
                 .orElseThrow(() -> new AssertionError("No candidate with action " + action));
     }
+
+    @Test
+    void overrideAlternativeDescribesItselfAndFlagsDowngradesAndPlatformOverrides() {
+        ScanComponent core = propertyBacked("ch.qos.logback", "logback-core", "1.5.18", "logback.version");
+        UpdatePlan plan = UpdatePlanBuilder.buildForCoordinate(
+                List.of(core), core.coordinate(), "1.5.10", cve(core.id()), Set.of());
+        CandidateUpdate override = findByAction(plan, UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE);
+        assertEquals("ch.qos.logback:logback-core dependencyManagement override", override.editableDeclaration());
+        assertEquals("CVE (local override — leaves any shared property/declaration untouched)", override.reason());
+        assertTrue(override.introducesDowngrade());
+        assertFalse(override.overridesPlatform());
+        assertFalse(override.conflictsWithUserPin());
+
+        ScanComponent bom = new ScanComponent(nextId++, new ComponentCoordinate("org.x", "y"), "2.0",
+                DependencyScope.COMPILE, false, VersionSource.PLATFORM_MANAGED, "pom.xml", null,
+                Map.of(), false, "org.x:bom:1#y.version", "pom.xml");
+        CandidateUpdate bomOverride = findByAction(UpdatePlanBuilder.buildForCoordinate(
+                List.of(bom), bom.coordinate(), "2.0.0", List.of(), Set.of()), UpdateAction.ADD_DEPENDENCY_MANAGEMENT_OVERRIDE);
+        assertTrue(bomOverride.overridesPlatform());
+        assertFalse(bomOverride.introducesDowngrade());
+        assertEquals("Requested version change (local override — leaves any shared property/declaration untouched)", bomOverride.reason());
+    }
+
+    @Test
+    void unscannedCoordinateGetsOnlyTheNaturalOverrideAndAPinFromUnknown() {
+        ComponentCoordinate ghost = new ComponentCoordinate("g", "ghost");
+        UpdatePlan plan = UpdatePlanBuilder.buildForCoordinate(List.of(), ghost, "1.0", List.of(), Set.of());
+        assertEquals(2, plan.candidates().size());
+        CandidateUpdate pin = findByAction(plan, UpdateAction.PIN_TEMPORARILY);
+        assertEquals("g:ghost", pin.editableDeclaration());
+        assertEquals("unknown", pin.oldValue());
+    }
 }

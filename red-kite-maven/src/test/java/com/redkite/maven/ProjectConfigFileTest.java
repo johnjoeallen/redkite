@@ -403,4 +403,43 @@ class ProjectConfigFileTest {
         assertEquals(ValidationRunner.Mode.TEST, config.mode());
         assertEquals("localhost", config.env().get("DB_HOST"));
     }
+
+    @Test
+    void loadReadsTheSettingsFile(@TempDir Path tempDir) throws IOException {
+        Files.createDirectories(tempDir.resolve(".redkite"));
+        Files.writeString(tempDir.resolve(".redkite/settings.yml"), "redkite:\n  maven:\n    profile: dev\n");
+        assertEquals("dev", ProjectConfigFile.load(tempDir).profile());
+    }
+
+    @Test
+    void gitignoreIsOnlyTouchedInsideAGitRepository(@TempDir Path tempDir) {
+        ProjectConfigFile.ensureGitignoreEntries(tempDir);
+        assertFalse(Files.exists(tempDir.resolve(".gitignore")));
+    }
+
+    @Test
+    void gitignoreIsCreatedWithTheWorkDirectoryEntry(@TempDir Path tempDir) throws IOException {
+        Files.createDirectories(tempDir.resolve(".git"));
+        ProjectConfigFile.ensureGitignoreEntries(tempDir);
+        assertEquals("# RedKite build validation diagnostics\n.redkite/work/\n",
+                Files.readString(tempDir.resolve(".gitignore")));
+    }
+
+    @Test
+    void gitignoreEntriesAreAppendedAfterABlankLine(@TempDir Path tempDir) throws IOException {
+        Files.createDirectories(tempDir.resolve(".git"));
+        Path gitignore = tempDir.resolve(".gitignore");
+        Files.writeString(gitignore, "target/");
+        ProjectConfigFile.ensureGitignoreEntries(tempDir);
+        assertEquals("target/\n\n# RedKite build validation diagnostics\n.redkite/work/\n", Files.readString(gitignore));
+
+        Files.writeString(gitignore, "target/\n");
+        ProjectConfigFile.ensureGitignoreEntries(tempDir);
+        assertEquals("target/\n\n# RedKite build validation diagnostics\n.redkite/work/\n", Files.readString(gitignore));
+
+        // Already present (whitespace around the line is ignored): left exactly as it was.
+        Files.writeString(gitignore, "target/\n  .redkite/work/  \n");
+        ProjectConfigFile.ensureGitignoreEntries(tempDir);
+        assertEquals("target/\n  .redkite/work/  \n", Files.readString(gitignore));
+    }
 }

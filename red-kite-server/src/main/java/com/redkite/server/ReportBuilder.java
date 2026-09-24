@@ -151,7 +151,7 @@ final class ReportBuilder {
         return new ScanReport(scanId, projectId, complete, message, Instant.now(), input.components(), input.dependencyEdges(), List.copyOf(vulnerabilityFindings), recs, snapshotRisks, metadata, treeWarnings);
     }
 
-    private String selectUpgradeTarget(String currentVersion, VersionMetadata versionMetadata) {
+    static String selectUpgradeTarget(String currentVersion, VersionMetadata versionMetadata) {
         if (versionMetadata == null) {
             return null;
         }
@@ -192,14 +192,14 @@ final class ReportBuilder {
         return null;
     }
 
-    private boolean isUpgradeable(String currentVersion, String latestVersion) {
+    private static boolean isUpgradeable(String currentVersion, String latestVersion) {
         if (currentVersion == null || currentVersion.isBlank() || latestVersion == null || latestVersion.isBlank()) {
             return false;
         }
         return compareVersions(currentVersion, latestVersion) < 0;
     }
 
-    private RecommendationReason upgradeReason(String currentVersion, String targetVersion) {
+    static RecommendationReason upgradeReason(String currentVersion, String targetVersion) {
         if (isMajorUpgrade(currentVersion, targetVersion)) {
             return RecommendationReason.MAJOR_AVAILABLE;
         }
@@ -211,7 +211,7 @@ final class ReportBuilder {
         return RecommendationReason.PATCH_AVAILABLE;
     }
 
-    private RiskLevel upgradeRisk(String currentVersion, String targetVersion) {
+    static RiskLevel upgradeRisk(String currentVersion, String targetVersion) {
         if (isMajorUpgrade(currentVersion, targetVersion)) {
             return RiskLevel.MAJOR;
         }

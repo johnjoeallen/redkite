@@ -164,6 +164,130 @@ class OsvPackageVulnerabilitiesTest {
         assertTrue(ids.size() >= 4);
     }
 
+    // ---------------------------------------------------------------- synthetic advisories
+
+    private static final ComponentCoordinate LIB = new ComponentCoordinate("com.example", "lib");
+
+    /** One advisory for com.example:lib with the given extra top-level fields and range events. */
+    private static String advisory(String extra, String events) {
+        return "{\"vulns\": [{\"id\": \"GHSA-x\"" + extra + ", \"affected\": [{\"package\": {\"name\": \"com.example:lib\"}, "
+                + "\"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": [" + events + "]}]}]}]}";
+    }
+
+    private static String cvss(String vector) {
+        return ", \"severity\": [{\"type\": \"CVSS_V3\", \"score\": \"" + vector + "\"}]";
+    }
+
+    private static VulnerabilityFinding only(String json, String version) {
+        List<VulnerabilityFinding> found = OsvPackageVulnerabilities.findingsForVersion(json, LIB, version);
+        assertEquals(1, found.size(), "expected exactly one finding for " + version);
+        return found.get(0);
+    }
+
+    private static final String ALWAYS = "{\"introduced\": \"0\"}, {\"fixed\": \"9.0\"}";
+
+    @Test
+    void severityFallsBackToTheCvssVector() {
+        assertEquals("CRITICAL", only(advisory(cvss("CVSS:3.1/AV:N/C:H/I:H/A:H"), ALWAYS), "1.0").severity());
+        assertEquals("HIGH", only(advisory(cvss("CVSS:3.1/AV:N/C:H/I:H/A:N"), ALWAYS), "1.0").severity());
+        assertEquals("HIGH", only(advisory(cvss("CVSS:3.1/AV:N/C:H/I:N/A:H"), ALWAYS), "1.0").severity());
+        assertEquals("HIGH", only(advisory(cvss("CVSS:3.1/AV:N/C:N/I:H/A:H"), ALWAYS), "1.0").severity());
+        assertEquals("HIGH", only(advisory(cvss("CVSS:3.1/AV:N/C:N/I:N/A:H"), ALWAYS), "1.0").severity());
+        assertEquals("MEDIUM", only(advisory(cvss("CVSS:3.1/AV:N/C:M/I:N/A:N"), ALWAYS), "1.0").severity());
+        assertEquals("MEDIUM", only(advisory(cvss("CVSS:3.1/AV:N/C:N/I:M/A:N"), ALWAYS), "1.0").severity());
+        assertEquals("MEDIUM", only(advisory(cvss("CVSS:3.1/AV:N/C:N/I:N/A:M"), ALWAYS), "1.0").severity());
+        assertEquals("LOW", only(advisory(cvss("CVSS:3.1/AV:N/C:L/I:N/A:N"), ALWAYS), "1.0").severity());
+        // A blank label defers to the vector; a vector of another type, or a blank score, is ignored.
+        assertEquals("HIGH", only(advisory(", \"database_specific\": {\"severity\": \" \"}" + cvss("C:N/I:H/A:N"), ALWAYS), "1.0").severity());
+        assertEquals("UNKNOWN", only(advisory(", \"severity\": [{\"type\": \"Ubuntu\", \"score\": \"/C:H\"}]", ALWAYS), "1.0").severity());
+        assertEquals("UNKNOWN", only(advisory(", \"severity\": [{\"type\": \"CVSS_V3\", \"score\": \" \"}]", ALWAYS), "1.0").severity());
+        assertEquals("UNKNOWN", only(advisory("", ALWAYS), "1.0").severity());
+    }
+
+    @Test
+    void cvesComeFromAliasesOrFromACveId() {
+        assertEquals(List.of("CVE-1"), only(advisory(", \"aliases\": [\"GHSA-y\", \"CVE-1\"]", ALWAYS), "1.0").cves());
+        assertEquals(List.of(), only(advisory(", \"aliases\": [\"GHSA-y\"]", ALWAYS), "1.0").cves());
+        String cveId = "{\"vulns\": [{\"id\": \"CVE-2\", \"aliases\": [\"GHSA-z\"], \"affected\": [{\"package\": {\"name\": \"com.example:lib\"}, "
+                + "\"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": [" + ALWAYS + "]}]}]}]}";
+        assertEquals(List.of("CVE-2"), only(cveId, "1.0").cves());
+        String cveIdWithCveAlias = cveId.replace("GHSA-z", "CVE-3");
+        assertEquals(List.of("CVE-3"), only(cveIdWithCveAlias, "1.0").cves());
+        String noId = "{\"vulns\": [{\"affected\": [{\"package\": {\"name\": \"com.example:lib\"}, "
+                + "\"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": [" + ALWAYS + "]}]}]}]}";
+        VulnerabilityFinding anonymous = only(noId, "1.0");
+        assertEquals("UNKNOWN", anonymous.advisoryId());
+        assertEquals(List.of(), anonymous.cves());
+    }
+
+    @Test
+    void advisoryWithoutAffectedEntriesNeverMatches() {
+        assertEquals(List.of(), OsvPackageVulnerabilities.findingsForVersion(
+                "{\"vulns\": [{\"id\": \"GHSA-x\"}]}", LIB, "1.0"));
+    }
+
+    @Test
+    void overlappingSegmentsReportTheWidestBounds() {
+        String narrowFirst = advisory("", "{\"introduced\": \"1.0\"}, {\"fixed\": \"2.0\"}, {\"introduced\": \"0.5\"}, {\"fixed\": \"3.0\"}");
+        VulnerabilityFinding a = only(narrowFirst, "1.5");
+        assertEquals("0.5", a.introducedVersion());
+        assertEquals("3.0", a.fixedVersion());
+
+        String wideFirst = advisory("", "{\"introduced\": \"0.5\"}, {\"fixed\": \"3.0\"}, {\"introduced\": \"1.0\"}, {\"fixed\": \"2.0\"}");
+        VulnerabilityFinding b = only(wideFirst, "1.5");
+        assertEquals("0.5", b.introducedVersion());
+        assertEquals("3.0", b.fixedVersion());
+
+        // Only the segment containing the version counts.
+        VulnerabilityFinding c = only(narrowFirst, "2.5");
+        assertEquals("0.5", c.introducedVersion());
+        assertEquals("3.0", c.fixedVersion());
+        VulnerabilityFinding d = only(advisory("", "{\"introduced\": \"1.0\"}, {\"fixed\": \"2.0\"}, {\"introduced\": \"3.0\"}, {\"fixed\": \"4.0\"}"), "1.5");
+        assertEquals("1.0", d.introducedVersion());
+        assertEquals("2.0", d.fixedVersion());
+    }
+
+    @Test
+    void openEndedSegmentsAffectEveryVersionFromTheirIntroduction() {
+        String json = advisory("", "{\"introduced\": \"1.0\"}");
+        VulnerabilityFinding atStart = only(json, "1.0");
+        assertEquals("1.0", atStart.introducedVersion());
+        assertEquals(null, atStart.fixedVersion());
+        assertEquals("1.0", only(json, "7.0").introducedVersion());
+        assertEquals(List.of(), OsvPackageVulnerabilities.findingsForVersion(json, LIB, "0.9"));
+
+        // An open-ended segment wins over a fixed one: there is no fixed version to offer.
+        String mixed = advisory("", "{\"introduced\": \"0.5\"}, {\"fixed\": \"3.0\"}, {\"introduced\": \"1.0\"}");
+        VulnerabilityFinding m = only(mixed, "1.5");
+        assertEquals("0.5", m.introducedVersion());
+        assertEquals(null, m.fixedVersion());
+    }
+
+    @Test
+    void lastAffectedSegmentsRespectTheirIntroducedBound() {
+        String json = advisory("", "{\"introduced\": \"1.0\"}, {\"last_affected\": \"2.0\"}");
+        assertEquals(List.of(), OsvPackageVulnerabilities.findingsForVersion(json, LIB, "0.9"));
+        VulnerabilityFinding hit = only(json, "1.0");
+        assertEquals("1.0", hit.introducedVersion());
+        assertEquals(null, hit.fixedVersion());
+
+        VulnerabilityFinding sinceInception = only(advisory("", "{\"last_affected\": \"2.0\"}"), "0.1");
+        assertEquals(null, sinceInception.introducedVersion());
+    }
+
+    @Test
+    void blankFixedBoundNeverMatchesAndExplicitListingOffersTheFirstFixedVersion() {
+        assertEquals(List.of(), OsvPackageVulnerabilities.findingsForVersion(
+                advisory("", "{\"introduced\": \"0\"}, {\"fixed\": \"\"}"), LIB, "1.0"));
+
+        String listed = "{\"vulns\": [{\"id\": \"GHSA-x\", \"affected\": [{\"package\": {\"name\": \"com.example:lib\"}, "
+                + "\"versions\": [\"1.1\"], \"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": ["
+                + "{\"introduced\": \"2.0\"}, {\"fixed\": \"2.1\"}, {\"introduced\": \"3.0\"}, {\"fixed\": \"3.1\"}]}]}]}]}";
+        VulnerabilityFinding f = only(listed, "1.1");
+        assertEquals("2.1", f.fixedVersion());
+        assertEquals(null, f.introducedVersion());
+    }
+
     private List<VulnerabilityFinding> findings(String version) {
         return OsvPackageVulnerabilities.findingsForVersion(LOGBACK_CORE_RESPONSE, LOGBACK_CORE, version);
     }
