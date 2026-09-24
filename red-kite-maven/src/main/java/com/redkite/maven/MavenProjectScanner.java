@@ -258,7 +258,7 @@ public class MavenProjectScanner {
     private List<String> collectDependencyTree(Path root, Path pom, PomModel model, String sourceFile, Map<String, ScanComponent> componentsByKey, List<DependencyEdge> edges, AtomicLong nextId, Set<String> projectModuleKeys, Consumer<String> onLine) {
         try {
             LOGGER.info(() -> "Running mvn dependency:tree for " + root.relativize(pom));
-            String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
+            String mvn = MavenExecutable.resolve();
             java.nio.file.Path settings = MavenSettingsReader.resolveSettingsFile(root);
             List<String> command;
             if (settings != null && MavenSettingsReader.isProjectLocalSettings(settings, root)) {

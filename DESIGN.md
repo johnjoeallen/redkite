@@ -62,12 +62,12 @@ External data providers with two-level caching (in-memory + H2).
 
 ### `red-kite-server`
 
-Single class `RedKiteServerMain` (~5000 lines) containing:
-- HTTP server setup and request routing
-- Scan job orchestration (background thread pool)
-- `Store` inner class: all H2 persistence
-- All HTML rendering (Thymeleaf shells; card/row content built as strings)
-- POM patching (`generatePomPatches`, `patchPomXml`)
+Package `com.redkite.server`, wired together in `RedKiteServerMain`:
+- HTTP server setup and request routing — `RedKiteServerMain`, with handlers in `PageHandlers`, `ScanApiHandlers`, `RemediationHandlers` and `ConfigHandlers`
+- Scan and apply job orchestration (background threads) — `ScanApiHandlers`/`ScanJob`, `RemediationHandlers`/`ApplyJob`
+- H2 persistence — `Store`, `StoreSchema`; report building — `ReportBuilder`, `CveFixFinder`, `LicenseLookup`
+- HTML rendering (Thymeleaf shells; card/row content built as strings) — `Pages`, `ScanPageRenderer`, `ComponentCardRenderer`, `EnforcerSectionRenderer`, `LogModalRenderer`
+- POM patching — `PomChanges.generatePomPatches`, `PomPatcher.patchPomXml`
 
 ---
 
@@ -611,7 +611,7 @@ All endpoints are unauthenticated. The server is intended for local use only.
 
 When the user clicks **Apply selected**, the browser first calls `POST /api/scans/pom` to compute the patched POM XML, then immediately submits it to `POST /api/scans/remediation/apply-batch`, which enqueues a background job and returns `{"jobId":"..."}`. The browser polls `GET /api/scans/remediation/apply-status?jobId=...` every 500 ms and updates the overlay text to reflect the current phase.
 
-There is no longer a preview step between computing the patch and applying it — the patched POM XML is not shown to the user before the apply job runs. The client-side preview modal (`showPomModal`/`writePomFiles`/`copyPomContent` in `scripts.js`, the `#pom-modal` markup in `RedKiteServerMain`) and the `GET /api/scans/pom` / `POST /api/scans/pom/write` handlers it used are still present in the code but are dead — nothing in the current UI opens the modal or links to them.
+There is no longer a preview step between computing the patch and applying it — the patched POM XML is not shown to the user before the apply job runs. The client-side preview modal (`showPomModal`/`writePomFiles`/`copyPomContent` in `scripts.js`, the `#pom-modal` markup in `ScanPageRenderer`) and the `GET /api/scans/pom` / `POST /api/scans/pom/write` handlers it used are still present in the code but are dead — nothing in the current UI opens the modal or links to them.
 
 ### Job phases
 

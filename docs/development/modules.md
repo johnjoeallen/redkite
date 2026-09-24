@@ -60,4 +60,20 @@ External data providers, each with in-memory and database-backed caching.
 
 ## `red-kite-server`
 
-A single main class, `RedKiteServerMain`, containing HTTP routing, scan job orchestration, all H2 persistence (a `Store` inner class), and all HTML rendering. It's intentionally not split further — see [Architecture](architecture.md) for why the project avoids a web framework in the first place.
+Plain JDK `HttpServer` plus Thymeleaf, no web framework — see [Architecture](architecture.md) for why. All classes live in `com.redkite.server`:
+
+| Class | Purpose |
+|---|---|
+| `RedKiteServerMain` | Entry point: startup configuration, wiring, HTTP routing and error handling |
+| `PageHandlers` | The dashboard, project and analysis pages |
+| `ScanApiHandlers` | Starting and polling analyses, enforcer results, POM download/preview/write, project deletion, cache clearing |
+| `RemediationHandlers` | Applying remediations — single fixes and validated batch applies with revert on failure — plus read-only resolve/plan queries |
+| `ConfigHandlers` | The `/config` page and the settings and theme APIs |
+| `ScanJob`, `ApplyJob`, `RecentLines` | State of a running analysis or apply job, polled by the UI |
+| `EnforcerAnalysis` | Runs the enforcer for an analysis, verifies the computed dependency-management auto-fix (phase 2) and plans its pins |
+| `PomChanges`, `PomPatcher` | Turn version selections and pin toggles into patched POM files |
+| `Store`, `StoreSchema` | H2 persistence: projects, analyses, source POMs, enforcer results, configuration |
+| `ReportBuilder`, `CveFixFinder`, `LicenseLookup` | Build an analysis report from scan input: metadata, CVE fixes, upgrade recommendations, licenses |
+| `Pages` | Page layout: Thymeleaf shell, inline CSS/JS, logo, theme preference |
+| `ScanPageRenderer`, `ComponentCardRenderer`, `EnforcerSectionRenderer`, `LogModalRenderer` | HTML for the analysis page (card and row content built as strings) |
+| `Http`, `Json`, `Html`, `PomXml`, `Versions`, `CacheTtlSettings` | Shared helpers and constants |

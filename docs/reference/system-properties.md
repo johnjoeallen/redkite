@@ -14,5 +14,7 @@ Set with `-D` at launch, e.g. `java -Dredkite.port=8080 -jar red-kite.jar`.
 | `redkite.maven.repositories` | *(unset)* | Comma-separated repository URLs; bypasses `settings.xml` discovery when set — see [Maven Settings](../configuration/maven-settings.md) |
 | `redkite.osv.url` | `https://api.osv.dev` | Base URL for OSV vulnerability queries |
 | `redkite.version.lookback` | `10` | Number of prior versions considered when searching for a candidate fix |
+| `redkite.mvn` | `mvn` (`mvn.cmd` on Windows) from the `PATH` | Maven executable RedKite runs for `dependency:tree`, enforcer checks and build validation — set it to use a specific Maven installation |
+| `redkite.maven.central.url` | `https://repo1.maven.org/maven2` | Maven Central base URL for the check of whether an artifact is published there, which decides how long its version metadata is cached |
 
 See [Application Settings](../configuration/application-settings.md) for usage guidance on the properties most people need.

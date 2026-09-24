@@ -107,7 +107,7 @@ public class ValidationRunner {
      *  non-null) with each line of build output as it's produced, so a caller can show a live tail
      *  of the build while it runs rather than waiting for it to finish. */
     public ValidationResult validate(Path projectRoot, Path pomPath, ValidationOptions options, Consumer<String> onLine) {
-        String mvn = isMvnCmd();
+        String mvn = MavenExecutable.resolve();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         String goal = switch (options.mode()) {
             case RUN -> "install";
@@ -218,7 +218,7 @@ public class ValidationRunner {
         }
         LOGGER.info(() -> "Running startup validation (spring-boot:run, port " + port + ") for " + pomPath
                 + " with timeout " + timeoutSeconds + "s");
-        String mvn = isMvnCmd();
+        String mvn = MavenExecutable.resolve();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
         List<String> startupArgs = new java.util.ArrayList<>(options.mavenArgs());
         startupArgs.addAll(options.springBootArgs());
@@ -354,7 +354,7 @@ public class ValidationRunner {
      * into the same file, deliberately, since RedKite auto-triggers a rescan right after an apply
      * completes and an automatic reset there would wipe out that apply's own entries moments after
      * they were written. Unlike the failed-POM snapshot, an existing log is never cleaned up by a
-     * successful apply either — see {@code RedKiteServerMain.cleanupWorkDir}. Best-effort: failures
+     * successful apply either — see {@code RemediationHandlers.cleanupWorkDir} in red-kite-server. Best-effort: failures
      * to save are logged but never thrown.
      */
     public static void appendLog(Path projectRoot, String label, List<String> command, String output) {
@@ -437,10 +437,6 @@ public class ValidationRunner {
             if (lineEnd > lineStart) return output.substring(lineStart, lineEnd).trim();
         }
         return output.length() > 500 ? output.substring(output.length() - 500).trim() : output.trim();
-    }
-
-    private static String isMvnCmd() {
-        return System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
     }
 
     private static List<String> buildCommand(String mvn, Path settings, Path projectRoot, Path pomPath,

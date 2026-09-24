@@ -12,6 +12,7 @@
     <h2.version>2.5.250</h2.version>
     <thymeleaf.version>3.1.5.RELEASE</thymeleaf.version>
     <maven-shade-plugin.version>3.6.2</maven-shade-plugin.version>
+    <junit-jupiter.version>5.14.4</junit-jupiter.version>
   </properties>
   <dependencies>
     <dependency>
@@ -39,6 +40,12 @@
       <groupId>com.redkite</groupId>
       <artifactId>red-kite-maven</artifactId>
       <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit-jupiter.version}</version>
+      <scope>test</scope>
     </dependency>
   </dependencies>
   <build>

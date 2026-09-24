@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>RedKite - Maven Dependency Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg"/>
+    <style><CSS></style>
+    <script><JS></script>
+</head>
+<body>
+<div class="shell">
+    <div class="topbar">
+        <div class="brand">
+            <a class="brand-logo" href="/">
+                <img class="brand-icon" src="/logo.svg" alt="RedKite logo"/>
+                <div class="brand-text">
+                    <span class="brand-logo-name">RedKite</span>
+                    <span class="brand-logo-tag">Maven Dependency Assistant &mdash; local dependency analysis and update planning for Maven based projects.</span>
+                </div>
+            </a>
+        </div>
+        <div class="nav">
+            <a class="button theme-btn" href="/config" title="Configuration" aria-label="Configuration">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+            </a>
+            <div class="theme-picker" id="theme-picker">
+                <button class="button theme-btn" type="button" onclick="toggleThemePicker()" title="Change theme" aria-label="Change theme">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                        <circle cx="4" cy="9.5" r="2.5"/>
+                        <circle cx="10" cy="9.5" r="2.5"/>
+                        <circle cx="7" cy="3.5" r="2.5"/>
+                    </svg>
+                </button>
+                <div class="theme-swatches" id="theme-swatches">
+                    <button class="swatch" data-theme="dark" onclick="setTheme('dark')" title="Dark" style="background:#818cf8"></button>
+                    <button class="swatch" data-theme="light" onclick="setTheme('light')" title="Light" style="background:#3b6bec"></button>
+                    <button class="swatch" data-theme="ocean" onclick="setTheme('ocean')" title="Ocean" style="background:#7dd3fc"></button>
+                    <button class="swatch" data-theme="dusk" onclick="setTheme('dusk')" title="Dusk" style="background:#e879f9"></button>
+                    <button class="swatch" data-theme="forest" onclick="setTheme('forest')" title="Forest" style="background:#34d399"></button>
+                    <button class="swatch" data-theme="ember" onclick="setTheme('ember')" title="Ember" style="background:#fbbf24"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="subhead muted">Project dashboard</div>
+
+    <!-- Page-specific body content injected here -->
+    <div><div class="page-grid"><section class="card span-2"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap"><div><h1>demo</h1><p class="muted" style="margin:2px 0 0"><TMP>/demo</p></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="button primary" type="button" onclick="triggerScan('<TMP>/demo')">Analyse</button><button class="button danger" type="button" onclick="deleteProject('<UUID>','demo')">Delete project</button></div></div><div class="proj-meta"><div class="proj-meta-row"><span class="proj-meta-label">Settings</span><code class="proj-meta-val"><TMP>/home/.m2/settings.xml</code></div><div class="proj-meta-row"><span class="proj-meta-label">Repositories</span><div class="proj-meta-repos"><code class="proj-meta-val">file://<TMP>/file-repo</code></div></div></div></section><section class="card span-2"><h2>Project configuration</h2><p class="muted">Extra Maven arguments, profile, and environment variables used when validating this project's build — read from <code>.redkite/settings.yml</code> in the project itself.</p><div class="proj-meta"><div class="proj-meta-row"><span class="proj-meta-label">File</span><code class="proj-meta-val"><TMP>/demo/.redkite/settings.yml</code></div><div class="proj-meta-row"><span class="proj-meta-label">Maven arguments</span><span class="proj-meta-val muted">none</span></div><div class="proj-meta-row"><span class="proj-meta-label">Profile</span><span class="proj-meta-val muted">none</span></div><div class="proj-meta-row"><span class="proj-meta-label">Mode</span><code class="proj-meta-val">run</code></div><div class="proj-meta-row"><span class="proj-meta-label">Tests enabled</span><code class="proj-meta-val">false</code></div><div class="proj-meta-row"><span class="proj-meta-label">Full logs</span><code class="proj-meta-val">false</code></div><div class="proj-meta-row"><span class="proj-meta-label">Spring Boot profiles</span><span class="proj-meta-val muted">none</span></div><div class="proj-meta-row"><span class="proj-meta-label">Environment variables</span><span class="proj-meta-val muted">none</span></div></div></section><section class="card"><h2>Latest analysis</h2><p class="proj-meta-val muted" style="margin-bottom:10px"><DATE></p><div class="stat-grid"><div class="stat"><div class="muted">Components</div><strong>11</strong></div><div class="stat"><div class="muted">Recommendations</div><strong>7</strong></div><div class="stat"><div class="muted">Status</div><strong>Failed</strong></div></div><p class="muted">Build failed. Maven could not resolve the project model — check the analysis log for details and re-analyse after fixing the POM.</p></section><section class="card"><h2>Analysis history</h2><div class="scan-history-list"><a class="scan-history-row" href="/scans/<UUID>"><span class="scan-history-ts"><DATE></span><div style="display:flex;gap:6px;align-items:center"><span class="badge scan-failed">Failed</span></div><span class="scan-history-latest">latest</span></a></div></section></div><div id="scan-overlay" class="scan-overlay" style="display:none"><div class="scan-overlay-box"><div style="display:flex;align-items:center;gap:10px"><img src="/logo.svg" class="scan-spinner" alt="" /><span>Analysing…</span></div><div id="scan-phases" style="width:300px;display:flex;flex-direction:column;gap:10px"></div><div id="scan-log-lines" style="width:300px;height:8.4em;overflow:hidden;font-size:.72rem;line-height:1.2em;font-family:ui-monospace,monospace;color:var(--muted);text-align:left"></div></div></div><script>function triggerScan(path){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='flex';renderScanLog([]);fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:path})}).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){pollScan(d.jobId);}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Scan failed.');});}function pollScan(jobId){fetch('/api/scan-status?jobId='+encodeURIComponent(jobId)).then(function(r){return r.ok?r.json():r.text().then(function(t){throw new Error(t);});}).then(function(d){if(d.status==='running'){if(d.phases)renderScanPhases(d.phases);renderScanLog(d.log);setTimeout(function(){pollScan(jobId);},500);}else if(d.status==='done'){window.location.href='/scans/'+d.scanId;}else{var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(d.message||'Scan failed.');}}).catch(function(err){var ov=document.getElementById('scan-overlay');if(ov)ov.style.display='none';alert(err.message||'Status check failed.');});}function deleteProject(id,name){if(!confirm('Delete project "'+name+'" and all its analyses?\n\nThis cannot be undone.'))return;fetch('/api/projects/'+encodeURIComponent(id),{method:'DELETE'}).then(function(r){if(r.ok){window.location.href='/';}else{r.text().then(function(t){alert('Delete failed: '+t);});}}).catch(function(err){alert('Delete failed: '+(err.message||err));});}</script></div>
+
+    <div class="footer">RedKite &mdash; Maven Dependency Assistant</div>
+</div>
+</body>
+</html>

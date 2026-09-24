@@ -14,7 +14,7 @@ import java.util.logging.Logger;
  * without a restart — TTL lookups are already infrequent relative to the network calls they gate.
  *
  * <p>This class only ever reads. Seeding {@code rk_config} with the current defaults on first
- * startup, and updating rows from the config page, is RedKiteServerMain's responsibility.
+ * startup, and updating rows from the config page, is red-kite-server's responsibility ({@code StoreSchema} and {@code ConfigHandlers}).
  */
 final class CacheTtlConfig {
     private static final Logger LOGGER = Logger.getLogger(CacheTtlConfig.class.getName());

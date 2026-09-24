@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html data-theme="dark">
+<head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1"/>
+    <title>RedKite - Maven Dependency Assistant</title>
+    <link rel="icon" type="image/svg+xml" href="/logo.svg"/>
+    <style><CSS></style>
+    <script><JS></script>
+</head>
+<body>
+<div class="shell">
+    <div class="topbar">
+        <div class="brand">
+            <a class="brand-logo" href="/">
+                <img class="brand-icon" src="/logo.svg" alt="RedKite logo"/>
+                <div class="brand-text">
+                    <span class="brand-logo-name">RedKite</span>
+                    <span class="brand-logo-tag">Maven Dependency Assistant &mdash; local dependency analysis and update planning for Maven based projects.</span>
+                </div>
+            </a>
+        </div>
+        <div class="nav">
+            <a class="button theme-btn" href="/config" title="Configuration" aria-label="Configuration">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                </svg>
+            </a>
+            <div class="theme-picker" id="theme-picker">
+                <button class="button theme-btn" type="button" onclick="toggleThemePicker()" title="Change theme" aria-label="Change theme">
+                    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+                        <circle cx="4" cy="9.5" r="2.5"/>
+                        <circle cx="10" cy="9.5" r="2.5"/>
+                        <circle cx="7" cy="3.5" r="2.5"/>
+                    </svg>
+                </button>
+                <div class="theme-swatches" id="theme-swatches">
+                    <button class="swatch" data-theme="dark" onclick="setTheme('dark')" title="Dark" style="background:#818cf8"></button>
+                    <button class="swatch" data-theme="light" onclick="setTheme('light')" title="Light" style="background:#3b6bec"></button>
+                    <button class="swatch" data-theme="ocean" onclick="setTheme('ocean')" title="Ocean" style="background:#7dd3fc"></button>
+                    <button class="swatch" data-theme="dusk" onclick="setTheme('dusk')" title="Dusk" style="background:#e879f9"></button>
+                    <button class="swatch" data-theme="forest" onclick="setTheme('forest')" title="Forest" style="background:#34d399"></button>
+                    <button class="swatch" data-theme="ember" onclick="setTheme('ember')" title="Ember" style="background:#fbbf24"></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="subhead muted">Local Maven dependency analysis, version checks, and upgrade planning.</div>
+
+    <!-- Page-specific body content injected here -->
+    <div><section class="card" style="margin-bottom:18px"><h2>Analyse project</h2><div class="scan-path-row"><input id="scan-path" class="scan-path-input" type="text" placeholder="/full/path/to/project" autocomplete="off" spellcheck="false" onkeydown="if(event.key==='Enter')startScan()"/><button class="button primary" type="button" onclick="startScan()">Analyse</button></div><div id="scan-error" class="scan-error" style="display:none"></div></section><section class="card"><h2>Projects</h2><div class="list"><div class="list-row"><a href="/projects/<UUID>" class="list-row-link"><span class="list-title">demo</span><span class="list-meta"><TMP>/demo</span></a><button class="button" type="button" onclick="triggerScan('<TMP>/demo')">Analyse</button></div></div></section><div id="scan-overlay" class="scan-overlay" style="display:none"><div class="scan-overlay-box"><div style="display:flex;align-items:center;gap:10px"><img src="/logo.svg" class="scan-spinner" alt="" /><span>Analysing…</span></div><div id="scan-phases" style="width:300px;display:flex;flex-direction:column;gap:10px"></div><div id="scan-log-lines" style="width:300px;height:8.4em;overflow:hidden;font-size:.72rem;line-height:1.2em;font-family:ui-monospace,monospace;color:var(--muted);text-align:left"></div></div></div><script>function startScan(){var path=document.getElementById('scan-path').value.trim();if(!path){showScanError('Enter the full path to the project.');return;}hideScanError();triggerScan(path);}function showScanError(msg){var el=document.getElementById('scan-error');if(el){el.textContent=msg;el.style.display='block';}}function hideScanError(){var el=document.getElementById('scan-error');if(el){el.textContent='';el.style.display='none';}}</script></div>
+
+    <div class="footer">RedKite &mdash; Maven Dependency Assistant</div>
+</div>
+</body>
+</html>

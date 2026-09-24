@@ -40,6 +40,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     public static final Duration DEFAULT_NEGATIVE_TTL = Duration.ofHours(6);
     public static final Duration DEFAULT_ERROR_TTL = Duration.ofMinutes(15);
     private static final String MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
+    /** Overrides the Maven Central base URL used for the "is this artifact on Central?" check. */
+    public static final String CENTRAL_URL_PROPERTY = "redkite.maven.central.url";
 
     private final List<String> repositoryBaseUrls;
     private final Map<String, CacheEntry> cache = new LinkedHashMap<>();
@@ -431,7 +433,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     /** HEAD against Maven Central; returns true if the artifact exists there. Defaults to false on error. */
     private static boolean existsOnCentral(ComponentCoordinate coordinate) {
-        String url = metadataUrl(MAVEN_CENTRAL_BASE, coordinate);
+        String url = metadataUrl(System.getProperty(CENTRAL_URL_PROPERTY, MAVEN_CENTRAL_BASE), coordinate);
         try {
             java.net.http.HttpResponse<Void> resp = CLIENT.send(
                     java.net.http.HttpRequest.newBuilder(java.net.URI.create(url))
@@ -548,21 +550,6 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         return fallbackLatest == null || fallbackLatest.isBlank() ? "unknown" : fallbackLatest;
     }
 
-    private static String familyLabel(String version) {
-        if (version == null || version.isBlank()) {
-            return "unknown";
-        }
-        String normalized = version.trim().replace('_', '.').replace('-', '.');
-        String[] parts = normalized.split("\\.");
-        if (parts.length >= 2) {
-            return parts[0] + "." + parts[1] + ".x";
-        }
-        if (parts.length == 1) {
-            return parts[0] + ".x";
-        }
-        return "unknown";
-    }
-
     private static String familyKey(String version) {
         if (version == null || version.isBlank()) {
             return "";
@@ -641,23 +628,6 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     }
 
     private static int majorNumber(String version) {
-        if (version == null || version.isBlank()) {
-            return 0;
-        }
-        String normalized = version.trim().replace('_', '.').replace('-', '.');
-        String[] parts = normalized.split("\\.");
-        if (parts.length == 0) {
-            return 0;
-        }
-        try {
-            String digits = parts[0].replaceAll("[^0-9].*$", "");
-            return digits.isBlank() ? 0 : Integer.parseInt(digits);
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private static int major(String version) {
         if (version == null || version.isBlank()) {
             return 0;
         }

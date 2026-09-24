@@ -44,7 +44,7 @@ public class EnforcerRunner {
     /** Same as {@link #run(Path, Path, boolean)}, but invokes {@code onLine} (if non-null) with
      *  each line of output as it's produced, so a caller can show a live tail while it runs. */
     public EnforcerRunResult run(Path projectRoot, Path pomPath, boolean skipDirectEnforce, Consumer<String> onLine) {
-        String mvn = System.getProperty("os.name", "").toLowerCase().contains("win") ? "mvn.cmd" : "mvn";
+        String mvn = MavenExecutable.resolve();
         Path settings = MavenSettingsReader.resolveSettingsFile(projectRoot);
 
         if (skipDirectEnforce) {
