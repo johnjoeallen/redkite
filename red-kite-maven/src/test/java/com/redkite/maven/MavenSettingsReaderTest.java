@@ -39,6 +39,57 @@ class MavenSettingsReaderTest {
         return settings;
     }
 
+    @Test
+    void incompleteEntriesAreSkipped() throws Exception {
+        Path settings = writeFile(tempDir.resolve("edge.xml"), """
+                <settings>
+                  <servers>
+                    <server><username>no-id</username></server>
+                    <server><id> </id><username>blank-id</username></server>
+                    <server><id>m1</id><username>u</username><password>p</password></server>
+                  </servers>
+                  <mirrors>
+                    <mirror><id>no-url</id><mirrorOf>central</mirrorOf></mirror>
+                    <mirror><id>blank-url</id><mirrorOf>central</mirrorOf><url> </url></mirror>
+                    <mirror><id>no-mirror-of</id><url>https://nowhere.example</url></mirror>
+                    <mirror><id>other</id><mirrorOf>internal-repo</mirrorOf><url>https://internal.example</url></mirror>
+                    <mirror><id>m1</id><mirrorOf>internal, central</mirrorOf><url>https://m1.example/</url></mirror>
+                  </mirrors>
+                  <activeProfiles><activeProfile> </activeProfile><activeProfile>listed</activeProfile></activeProfiles>
+                  <profiles>
+                    <profile><repositories><repository><url>https://no-id.example</url></repository></repositories></profile>
+                    <profile><id>listed</id></profile>
+                    <profile><id>default</id><activation><activeByDefault>TRUE</activeByDefault></activation>
+                      <repositories>
+                        <repository><id>no-url</id></repository>
+                        <repository><url> </url></repository>
+                        <repository><url>https://default.example/</url></repository>
+                      </repositories>
+                    </profile>
+                    <profile><id>inactive</id><activation><activeByDefault>false</activeByDefault></activation>
+                      <repositories><repository><url>https://inactive.example</url></repository></repositories>
+                    </profile>
+                  </profiles>
+                </settings>
+                """);
+        assertEquals(List.of("https://m1.example", "https://default.example"), MavenSettingsReader.parse(settings));
+        assertEquals(List.of(new MavenSettingsReader.RepoConfig("https://m1.example", "u", "p"),
+                        new MavenSettingsReader.RepoConfig("https://default.example", null, null)),
+                MavenSettingsReader.parseConfigs(settings));
+    }
+
+    @Test
+    void withoutAnyMirrorsActiveProfileRepositoriesAreUsed() throws Exception {
+        Path settings = writeFile(tempDir.resolve("profiles-only.xml"), """
+                <settings>
+                  <activeProfiles><activeProfile>p</activeProfile></activeProfiles>
+                  <profiles><profile><id>p</id><repositories><repository><url>https://p.example</url></repository></repositories></profile></profiles>
+                </settings>
+                """);
+        assertEquals(List.of(new MavenSettingsReader.RepoConfig("https://p.example", null, null),
+                new MavenSettingsReader.RepoConfig(CENTRAL, null, null)), MavenSettingsReader.parseConfigs(settings));
+    }
+
     private Path writeFile(Path path, String content) throws Exception {
         Files.createDirectories(path.getParent());
         Files.writeString(path, content);

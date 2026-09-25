@@ -162,6 +162,25 @@ class ServerPagesTest {
     }
 
     @Test
+    void projectPageShowsAConfiguredProfileAndMissingSettings() throws Exception {
+        java.nio.file.Path config = fx.project.resolve(".redkite/settings.yml");
+        java.nio.file.Path settings = fx.home.resolve(".m2/settings.xml");
+        String savedConfig = Files.readString(config), savedSettings = Files.readString(settings);
+        try {
+            Files.writeString(config, "redkite:\n  maven:\n    args: -X\n    profile: ci\n    spring:\n      profiles: smoke\n");
+            Files.delete(settings);
+            String t = text(fx.get("/projects/" + projectId).body());
+            assertTrue(t.contains("Settings none (using Maven Central)"), t);
+            assertTrue(t.contains("Maven arguments -X"), t);
+            assertTrue(t.contains("Profile ci"), t);
+            assertTrue(t.contains("Spring Boot profiles smoke"), t);
+        } finally {
+            Files.writeString(config, savedConfig);
+            Files.writeString(settings, savedSettings);
+        }
+    }
+
+    @Test
     void scanPageSummarisesTheAnalysis() {
         String t = text(scanPage);
         assertTrue(t.contains("demo Complete"), t);

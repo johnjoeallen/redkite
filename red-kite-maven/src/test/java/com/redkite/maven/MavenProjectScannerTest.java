@@ -324,6 +324,9 @@ class MavenProjectScannerTest {
         assertEquals(3, mvn.calls().size());
         mvn.calls().forEach(c -> assertTrue(c.startsWith("-s "), "project-local settings are passed: " + c));
         assertTrue(progress.contains("Running dependency:tree for app/pom.xml…"));
+        assertEquals("Reading git metadata…", progress.get(0));
+        assertTrue(progress.contains("Found 4 module(s) — parsing POMs…"), progress.toString());
+        assertTrue(progress.contains("Resolving parent/BOM version provenance…"), progress.toString());
         assertTrue(progress.get(progress.size() - 1).startsWith("Dependency scan complete"));
         assertTrue(lines.contains("[INFO] +- org.a:direct:jar:1.5:compile"));
         assertTrue(Files.readString(ValidationRunner.redkiteWorkDir(project.toAbsolutePath()).resolve("build.log"))
@@ -456,6 +459,103 @@ class MavenProjectScannerTest {
         assertNull(model.version());
         assertFalse(model.isAggregator());
         assertFalse(model.properties().containsKey("project.groupId"));
+
+        PomModel own = new MavenProjectScanner().parsePomXml("<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version></project>", null);
+        assertEquals("g", own.properties().get("project.parent.groupId"), "without a parent, its own coordinates stand in");
+        assertEquals("1", own.properties().get("project.parent.version"));
+    }
+
+    @Test
+    void treeVersionsCorrectThePomAndOddPomShapesAreHandled() throws Exception {
+        write(project.resolve("pom.xml"), """
+                <project>
+                  <parent><groupId>org.ext</groupId><artifactId>ext-parent</artifactId><version>${parent.version}</version></parent>
+                  <artifactId>odd</artifactId>
+                  <properties><parent.version>5.0</parent.version><plugin.version>2.0</plugin.version></properties>
+                  <dependencyManagement><dependencies>
+                    <dependency><groupId>org.bom</groupId><artifactId>bom</artifactId><version>1.0</version><type>pom</type><scope>import</scope></dependency>
+                    <dependency><groupId>org.m</groupId><artifactId>managed-by-prop</artifactId><version>${plugin.version}</version></dependency>
+                  </dependencies></dependencyManagement>
+                  <dependencies>
+                    <dependency><groupId>org.a</groupId><artifactId>a</artifactId><version>1.0</version><scope> </scope></dependency>
+                    <dependency><groupId>org.b</groupId><artifactId>bom-managed</artifactId></dependency>
+                  </dependencies>
+                  <build>
+                    <pluginManagement><plugins>
+                      <plugin><groupId>org.p</groupId><artifactId>managed-plugin</artifactId><version>${plugin.version}</version></plugin>
+                    </plugins></pluginManagement>
+                    <plugins>
+                      <plugin><groupId>org.p</groupId><artifactId>snap-plugin</artifactId><version>1.0-SNAPSHOT</version></plugin>
+                      <plugin><groupId>org.p</groupId><artifactId>unversioned</artifactId></plugin>
+                      <plugin><groupId>org.p</groupId><artifactId>managed-plugin</artifactId></plugin>
+                    </plugins>
+                  </build>
+                </project>
+                """);
+        mvn.output("dependency:tree", """
+                [INFO] org.ext:odd:jar:5.0
+                [INFO] +- org.a:a:jar:1.1:compile
+                [INFO] |  \\- org.t:t:jar:2.0:compile
+                [WARNING] \\- org.b:bom-managed:jar:3.0:compile
+                [ERROR]    \\- org.t:t:jar:2.0:runtime
+                [INFO] some unrelated log line: with a colon
+                """);
+
+        ScanInput input = new MavenProjectScanner().scan(project);
+
+        ScanComponent parent = one(input, "org.ext", "ext-parent");
+        assertEquals("5.0", parent.version());
+        assertEquals(VersionSource.PROPERTY, parent.versionSource());
+        assertEquals("1.1", one(input, "org.a", "a").version(), "the tree's resolved version wins over the POM's");
+        assertEquals(DependencyScope.COMPILE, one(input, "org.a", "a").scope());
+        assertEquals("3.0", one(input, "org.b", "bom-managed").version(), "a BOM-managed version is filled in from the tree");
+        assertEquals(1, find(input, "org.t", "t").size(), "a repeated transitive entry is one component");
+        assertTrue(one(input, "org.p", "snap-plugin").snapshot());
+        assertTrue(find(input, "org.p", "unversioned").isEmpty());
+        assertEquals("2.0", one(input, "org.p", "managed-plugin").version());
+        assertEquals("2.0", one(input, "org.m", "managed-by-prop").version());
+    }
+
+    @Test
+    void externalParentsNeedAFullCoordinateAndAreNotDuplicated() throws Exception {
+        // A parent without a version is not a component; a POM with no groupId still scans.
+        Path versionless = Files.createDirectories(tempDir.resolve("versionless"));
+        write(versionless.resolve("pom.xml"), """
+                <project><parent><groupId>org.ext</groupId><artifactId>p</artifactId></parent><artifactId>a</artifactId>
+                  <dependencies><dependency><groupId>org.a</groupId><artifactId>a</artifactId><version>1.0</version></dependency></dependencies>
+                </project>
+                """);
+        ScanInput first = new MavenProjectScanner().scan(versionless);
+        assertTrue(find(first, "org.ext", "p").isEmpty());
+
+        // A literal parent version that is also declared as a dependency keeps the dependency's entry.
+        Path literal = Files.createDirectories(tempDir.resolve("literal"));
+        write(literal.resolve("pom.xml"), """
+                <project><parent><groupId>org.ext</groupId><artifactId>p</artifactId><version>3.0</version></parent><artifactId>b</artifactId>
+                  <dependencies><dependency><groupId>org.ext</groupId><artifactId>p</artifactId><version>2.0</version></dependency></dependencies>
+                </project>
+                """);
+        ScanInput second = new MavenProjectScanner().scan(literal);
+        ScanComponent p = one(second, "org.ext", "p");
+        assertEquals("2.0", p.version());
+        assertEquals(VersionSource.LITERAL, p.versionSource());
+    }
+
+    @Test
+    void aModulesDependencyOnItselfAndUnusedManagedEntriesAreHandled() throws Exception {
+        write(project.resolve("pom.xml"), """
+                <project><groupId>com.example</groupId><artifactId>self</artifactId><version>1</version>
+                  <dependencyManagement><dependencies>
+                    <dependency><groupId>org.m</groupId><artifactId>snap</artifactId><version>2.0-SNAPSHOT</version></dependency>
+                    <dependency><groupId>org.m</groupId><artifactId>release</artifactId><version>3.0</version></dependency>
+                  </dependencies></dependencyManagement>
+                  <dependencies><dependency><groupId>com.example</groupId><artifactId>self</artifactId><version>1</version></dependency></dependencies>
+                </project>
+                """);
+        ScanInput input = new MavenProjectScanner().scan(project);
+        assertTrue(find(input, "com.example", "self").isEmpty(), "a module never depends on itself");
+        assertTrue(one(input, "org.m", "snap").snapshot());
+        assertFalse(one(input, "org.m", "release").snapshot());
     }
 
     private void git(String... args) throws Exception {

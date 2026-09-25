@@ -29,7 +29,7 @@ final class Versions {
         if (v1 == null || v2 == null) return false;
         String[] p1 = v1.split("[.\\-]", 2);
         String[] p2 = v2.split("[.\\-]", 2);
-        return p1.length >= 1 && p2.length >= 1 && !p1[0].isBlank() && p1[0].equals(p2[0]);
+        return !p1[0].isBlank() && p1[0].equals(p2[0]); // split always yields at least one part
     }
 
     static TransitiveConflictFinding findMatchingConflict(Map<String, List<TransitiveConflictFinding>> conflictsByKey, ScanComponent component) {

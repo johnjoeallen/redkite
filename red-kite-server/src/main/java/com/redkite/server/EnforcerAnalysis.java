@@ -132,7 +132,7 @@ final class EnforcerAnalysis {
             for (TransitiveConflictFinding f : findings) {
                 String key = f.groupId() + ":" + f.artifactId();
                 ManagedVersionResolver.ManagedVersion managed = declared.get(key);
-                String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), managed != null ? managed.version() : null);
+                String winner = reconcileWithDeclared(computeWinnerVersion(f), managed != null ? managed.version() : null);
                 if (winner != null && !winner.isBlank()) {
                     rawPins.put(key, winner);
                 }
@@ -217,7 +217,7 @@ final class EnforcerAnalysis {
         for (TransitiveConflictFinding f : findings) {
             String key = f.groupId() + ":" + f.artifactId();
             ManagedVersionResolver.ManagedVersion managed = projectManaged.get(key);
-            String winner = reconcileWithDeclared(computeWinnerVersion(f, ""), managed != null ? managed.version() : null);
+            String winner = reconcileWithDeclared(computeWinnerVersion(f), managed != null ? managed.version() : null);
             if (winner != null && !winner.isBlank()) {
                 pins.put(key, winner);
             }
@@ -277,20 +277,11 @@ final class EnforcerAnalysis {
         return declaredVersion;
     }
 
-    /**
-     * Computes the version to pin for a conflict finding.
-     * Prefers an existing explicit dep-management entry in the POM; falls back to the max version.
-     */
-    private String computeWinnerVersion(TransitiveConflictFinding f, String pomContent) {
-        // Use the max of resolvedVersion, all conflicting versions, and any existing dep-management pin.
-        // The pin is a candidate, not an override — if child POMs have a higher version it wins.
+    /** The version to pin for a conflict finding: the highest of its resolved and conflicting versions. */
+    private String computeWinnerVersion(TransitiveConflictFinding f) {
         String winner = f.resolvedVersion() != null ? f.resolvedVersion() : "";
         for (String v : f.conflictingVersions()) {
             if (compareVersionsSemantic(v, winner) > 0) winner = v;
-        }
-        String pinned = extractDepMgmtVersion(pomContent, f.groupId(), f.artifactId());
-        if (pinned != null && !pinned.isBlank() && compareVersionsSemantic(pinned, winner) > 0) {
-            winner = pinned;
         }
         return winner.isBlank() ? null : winner;
     }

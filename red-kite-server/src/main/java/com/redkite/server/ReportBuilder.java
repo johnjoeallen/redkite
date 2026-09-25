@@ -103,7 +103,7 @@ final class ReportBuilder {
                     vulnerabilityFindings.add(new VulnerabilityFinding(f.advisoryId(), f.severity(), f.coordinate(), f.affectedVersion(), f.fixedVersion(), f.introducedVersion(), component.direct(), component.owningVersionControlPoint(), f.cves(), null));
                 }
 
-                if (versionMetadata.complete() && canPlanUpgrade(component) && hasVulns) {
+                if (versionMetadata.complete() && hasVulns) {
                     CveFixFinder.CveFixResult fix = cveFixes.resolveCveFix(component, compVulns, versionMetadata, input.allowMajorUpgrades());
                     if (fix != null) {
                         RiskLevel risk = component.direct() ? upgradeRisk(component.version(), fix.target()) : RiskLevel.ELEVATED;
@@ -113,7 +113,7 @@ final class ReportBuilder {
                     } else {
                         LOGGER.info(() -> "No CVE fix found (upgrade, downgrade, or best-effort) for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId());
                     }
-                } else if (versionMetadata.complete() && canPlanUpgrade(component)) {
+                } else if (versionMetadata.complete()) {
                     String target = selectUpgradeTarget(component.version(), versionMetadata);
                     if (target != null && isUpgradeable(component.version(), target)) {
                         if (!input.allowMajorUpgrades() && isMajorUpgrade(component.version(), target)) {
@@ -130,8 +130,6 @@ final class ReportBuilder {
                     }
                 } else if (!component.direct()) {
                     LOGGER.info(() -> "Transitive dependency " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " is reported without an edit recommendation");
-                } else if (versionMetadata.complete()) {
-                    LOGGER.info(() -> "Maven dependency is up to date for " + component.coordinate().groupId() + ":" + component.coordinate().artifactId() + " at version " + component.version());
                 }
             }
         }
@@ -230,9 +228,5 @@ final class ReportBuilder {
             case TEST -> "LOW";
             default -> "UNKNOWN";
         };
-    }
-
-    private static boolean canPlanUpgrade(ScanComponent component) {
-        return component != null;
     }
 }

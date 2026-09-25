@@ -527,12 +527,6 @@ public class MavenProjectScanner {
         int marker = line.indexOf("+-");
         int backslash = line.indexOf("\\-");
         if (marker < 0) {
-            marker = -1;
-        }
-        if (backslash < 0) {
-            backslash = -1;
-        }
-        if (marker < 0) {
             return backslash;
         }
         if (backslash < 0) {
@@ -754,7 +748,7 @@ public class MavenProjectScanner {
         List<PomModel.PomDependency> result = new ArrayList<>();
         NodeList items = plugins.getElementsByTagName("plugin");
         for (int i = 0; i < items.getLength(); i++) {
-            if (!(items.item(i) instanceof Element plugin)) continue;
+            Element plugin = (Element) items.item(i);
             if (plugin.getParentNode() != plugins) continue;
             String groupId = optionalText(plugin, "groupId");
             String artifactId = optionalText(plugin, "artifactId");
@@ -778,30 +772,9 @@ public class MavenProjectScanner {
         if (value == null || !value.startsWith("${") || !value.endsWith("}")) {
             return value;
         }
-        String key = value.substring(2, value.length() - 1);
-        String resolved = properties.get(key);
-        if (resolved != null) {
-            return resolved;
-        }
-        if ("project.version".equals(key)) {
-            return properties.get("project.version");
-        }
-        if ("project.groupId".equals(key)) {
-            return properties.get("project.groupId");
-        }
-        if ("project.artifactId".equals(key)) {
-            return properties.get("project.artifactId");
-        }
-        if ("project.packaging".equals(key)) {
-            return properties.get("project.packaging");
-        }
-        if ("project.parent.version".equals(key)) {
-            return properties.get("project.parent.version");
-        }
-        if ("project.parent.groupId".equals(key)) {
-            return properties.get("project.parent.groupId");
-        }
-        return null;
+        // project.version, project.groupId etc. are seeded into the properties map alongside
+        // the POM's own <properties>, so one lookup covers both.
+        return properties.get(value.substring(2, value.length() - 1));
     }
 
     private DependencyScope parseScope(String scope) {

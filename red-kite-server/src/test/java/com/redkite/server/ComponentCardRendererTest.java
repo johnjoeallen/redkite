@@ -441,4 +441,129 @@ class ComponentCardRendererTest {
         assertFalse(renderer.isCardClean(view(component(false, "1.0"), status(true, false, false, false, AdvisorySeverity.NONE), null, null)));
         assertFalse(renderer.isCardClean(view(component(false, "1.0"), status(false, false, false, true, AdvisorySeverity.NONE), null, null)));
     }
+
+    // ---------------------------------------------------------------- incomplete data
+
+    @Test
+    void selectorSkipsBlankAndPreReleaseCandidates() {
+        MetadataResult meta = metadata("1.0", null, "2.0-rc1", java.util.Arrays.asList(null, "", "1.1-beta", "1.2"), null);
+        String html = render(view(component(true, "1.0"), clean(), meta, null));
+        assertTrue(html.contains("<option value=\"\" selected>No change</option><option value=\"1.2\">1.2</option></select>"), html);
+
+        MetadataResult noCurrent = metadata(null, "1.0", null, List.of(), List.of("0.8", "0.9"));
+        assertFalse(render(view(component(true, "1.0"), clean(), noCurrent, null)).contains("0.9"),
+                "older releases need the metadata's own current version to compare against");
+    }
+
+    @Test
+    void preReleaseRecommendationIsStillOfferedAndLabelled() {
+        String html = render(view(component(true, "1.0"), recommended(), metadata("1.0", "1.0", null, List.of(), List.of()),
+                recommendation("1.0", "1.1-rc1", RecommendationReason.MINOR_AVAILABLE)));
+        assertTrue(html.contains("<option value=\"1.1-rc1\" selected>1.1-rc1 — recommended, pre-release</option>"), html);
+    }
+
+    @Test
+    void unknownCurrentVersionHasNoCurrentChip() {
+        String html = render(view(component(true, null), clean(), metadata(null, "1.0", null, List.of(), List.of()), null));
+        assertTrue(html.contains("<span>Current: <strong>unknown</strong></span>"), html);
+        assertTrue(html.contains("data-dep-key=\"g:lib@null\""), html);
+        assertFalse(html.contains("version-current"), html);
+        assertTrue(html.contains("<option value=\"1.0\">1.0 — latest</option>"), html);
+    }
+
+    @Test
+    void directConflictDefaultIgnoresFindingsThatCannotApply() {
+        Map<String, List<VulnerabilityFinding>> vulnsByKey = new java.util.LinkedHashMap<>();
+        vulnsByKey.put("g:lib@1.1", List.of(
+                // another major line: irrelevant to 1.x
+                finding("1.1", "HIGH", "2.1", List.of()),
+                // affects only from 1.5 on: 1.1 is below its range
+                new VulnerabilityFinding("GHSA-r", "HIGH", LIB, "1.5", "1.6", null, false, null, List.of(), null),
+                // a different artifact filed under this key
+                new VulnerabilityFinding("GHSA-o", "HIGH", new ComponentCoordinate("g", "other"), "1.1", "1.9", null, false, null, List.of(), null),
+                new VulnerabilityFinding("GHSA-n", "HIGH", null, "1.1", "1.9", null, false, null, List.of(), null),
+                // two fixes: the lower one is taken first
+                finding("1.1", "HIGH", "1.4", List.of()),
+                finding("1.1", "HIGH", "1.3", List.of())));
+        TransitiveConflictFinding finding = conflict("1.0", List.of("1.1"), List.of());
+        // No upgrade path: each fix version itself is used.
+        String html = render(view(component(true, "1.0"), clean(), metadata("1.0", "1.3", null, null, List.of()), null, List.of(), finding),
+                Set.of(), "", vulnsByKey);
+        // 1.1 -> 1.3 (lowest fix) -> 1.4 (1.3 is still inside the 1.1..1.4 range) -> clean.
+        assertTrue(html.contains("<option value=\"1.4\" selected>1.4</option>"), html);
+    }
+
+    @Test
+    void blankVersionsFromMetadataOrTheRecommendationAreNeverOffered() {
+        // Blank latest / latest-same-major and a blank recommended target contribute nothing.
+        String direct = render(view(component(true, "1.0"), recommended(), metadata("1.0", " ", " ", List.of("1.1"), List.of()),
+                new UpgradeRecommendation(7, LIB, null, " ", RecommendationReason.MINOR_AVAILABLE, RiskLevel.PATCH,
+                        RecommendationConfidence.HIGH, List.of(), List.of(7L))));
+        assertFalse(direct.contains("(Latest:"), direct);
+        assertFalse(direct.contains("data-recommended"), direct);
+        assertTrue(direct.contains("<option value=\"\" selected>No change</option><option value=\"1.1\">1.1</option></select>"), direct);
+
+        // A transitive dependency with blank metadata: nothing newer is known to exist.
+        assertTrue(render(view(component(false, "1.0"), clean(), metadata("1.0", " ", null, List.of(), List.of()), null))
+                .contains("<span class=\"reason-chip\">No upgrade available</span>"));
+    }
+
+    @Test
+    void preReleaseConflictVersionsAreLabelled() {
+        TransitiveConflictFinding finding = conflict("1.0", List.of("1.1-alpha", "1.1-beta", "1.1-SNAPSHOT"), List.of());
+        String html = render(view(component(false, "1.0"), clean(), null, null, List.of(), finding));
+        assertTrue(html.contains("<option value=\"1.1-SNAPSHOT\">1.1-SNAPSHOT — conflict, pre-release</option>"
+                + "<option value=\"1.1-alpha\">1.1-alpha — conflict, pre-release</option>"
+                + "<option value=\"1.1-beta\" selected>1.1-beta — recommended, conflict, pre-release</option>"), html);
+    }
+
+    @Test
+    void olderReleasesSkipBlankAndMissingEntries() {
+        String html = render(view(component(true, "2.0"), clean(),
+                metadata("2.0", "2.0", null, List.of(), java.util.Arrays.asList(null, " ", "1.0-beta", "1.5")), null));
+        assertTrue(html.contains("<option value=\"1.5\">1.5</option>"), html);
+        assertFalse(html.contains("1.0-beta"), html);
+    }
+
+    // ---------------------------------------------------------------- versions that compare equal but are spelled differently
+
+    private String selected(ScanComponent comp, TransitiveConflictFinding conflict, List<String> path,
+            List<VulnerabilityFinding> vulns, UpgradeRecommendation rec) {
+        Map<String, List<VulnerabilityFinding>> vulnsByKey = new java.util.LinkedHashMap<>();
+        for (VulnerabilityFinding v : vulns) vulnsByKey.computeIfAbsent("g:lib@" + v.affectedVersion(), k -> new java.util.ArrayList<>()).add(v);
+        String html = render(view(comp, clean(), metadata(comp.version(), "9.0", null, path, List.of()), rec, List.of(), conflict),
+                Set.of(), "", vulnsByKey);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("<option value=\"([^\"]*)\" selected>").matcher(html);
+        assertTrue(m.find(), html);
+        return m.group(1);
+    }
+
+    @Test
+    void equalButDifferentlySpelledVersionsKeepTheFirstSeen() {
+        ScanComponent direct = component(true, "1.0");
+        assertEquals("1.3", selected(direct, conflict("1.3", List.of("1.3.0"), List.of()), List.of(), List.of(), null),
+                "the resolved version beats an equal conflicting one");
+        assertEquals("1.3", selected(component(true, "1.3.0"), conflict("1.3", List.of("1.0"), List.of()), List.of(), List.of(), null),
+                "the current version only wins when strictly newer");
+        assertEquals("1.3", selected(direct, conflict("1.0", List.of("1.3"), List.of()), List.of(), List.of(),
+                recommendation("1.0", "1.3.0", RecommendationReason.MINOR_AVAILABLE)), "an equal recommendation does not replace the default");
+        assertEquals("1.4", selected(direct, conflict("1.0", List.of("1.1"), List.of()), List.of(),
+                List.of(finding("1.1", "HIGH", "1.4", List.of()), finding("1.1", "HIGH", "1.4.0", List.of())), null),
+                "the first of two equal fix versions is used");
+        assertEquals("1.4", selected(direct, conflict("1.0", List.of("1.1"), List.of()), List.of("1.4", "1.5"),
+                List.of(finding("1.1", "HIGH", "1.4.0", List.of())), null), "a path version equal to the fix is accepted");
+        assertEquals("1.2", selected(direct, conflict("1.0", List.of("1.1"), List.of()), List.of("1.1.0", "1.2"),
+                List.of(finding("1.1.0", "HIGH", null, List.of())), null),
+                "an affected version equal to the candidate bumps it, past a path entry equal to it");
+
+        TransitiveConflictFinding transitive = conflict("1.2", List.of("1.2.0"), List.of());
+        assertEquals("1.2", renderer.transitiveRecommendedVersion(view(component(false, "1.0"), clean(), null, null, List.of(), transitive), ""));
+    }
+
+    @Test
+    void aBestEffortTargetEqualToTheCurrentVersionIsNeitherAnUpgradeNorADowngrade() {
+        String html = render(view(component(true, "1.0"), vulnerable(AdvisorySeverity.HIGH), null,
+                recommendation("1.0", "1.0.0", RecommendationReason.CVE_BEST_EFFORT)));
+        assertTrue(html.contains("data-cveupgrade=\"false\" data-cvedowngrade=\"false\""), html);
+    }
 }

@@ -108,4 +108,21 @@ class LicenseResolverTest {
 
         assertEquals(List.of(), resolver.resolve("org.example", "a", "1.0.0"));
     }
+
+    @Test
+    void unnamedLicensesAndIncompleteParentsContributeNothing() {
+        FakePomSource source = new FakePomSource()
+                .with("org.example", "unnamed", "1", "<project><licenses><license/><license><name> </name></license></licenses>"
+                        + "<parent><groupId>org.example</groupId><version>1</version></parent></project>");
+        assertEquals(List.of(), new LicenseResolver(source).resolve("org.example", "unnamed", "1"));
+    }
+
+    @Test
+    void parentChainsAreFollowedOnlySoFar() {
+        FakePomSource source = new FakePomSource();
+        for (int i = 0; i < 12; i++) source.with("org.example", "p" + i, "1", pomWithParent("org.example", "p" + (i + 1), "1"));
+        source.with("org.example", "p12", "1", pomWithLicense("MIT"));
+        assertEquals(List.of(), new LicenseResolver(source).resolve("org.example", "p0", "1"));
+        assertEquals(List.of("MIT"), new LicenseResolver(source).resolve("org.example", "p5", "1"));
+    }
 }

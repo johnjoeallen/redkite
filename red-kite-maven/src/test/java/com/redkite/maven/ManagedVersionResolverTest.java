@@ -226,4 +226,91 @@ class ManagedVersionResolverTest {
         assertTrue(outcome.declaredProperties().contains("app.own.version"),
                 "The starting module's own properties are included too");
     }
+
+    @Test
+    void unparsableParentPomIsReportedAndStopsThatBranch() {
+        FakePomSource source = new FakePomSource().with("org.example", "parent-pom", "1.0.0", "<project>");
+        ManagedVersionResolver.ResolutionOutcome outcome = new ManagedVersionResolver(source)
+                .resolveWithDiagnostics(module("org.example", "parent-pom", "1.0.0", Map.of(), List.of()));
+        assertEquals(Map.of(), outcome.managed());
+        assertEquals(1, outcome.unresolved().size());
+        assertTrue(outcome.unresolved().get(0).detail().startsWith("unparsable POM: "), outcome.unresolved().toString());
+    }
+
+    @Test
+    void incompleteEntriesAreIgnoredAndProjectCoordinatesComeFromTheParent() {
+        // The fetched parent declares no groupId/version of its own: ${project.version} resolves via its parent.
+        FakePomSource source = new FakePomSource()
+                .with("org.example", "parent-pom", "1.0.0", """
+                        <project>
+                          <parent><groupId>org.example</groupId><artifactId>grandparent</artifactId><version>7.0</version></parent>
+                          <artifactId>parent-pom</artifactId>
+                          <properties><!-- a comment --><lib.version>${project.version}</lib.version></properties>
+                          <dependencyManagement><dependencies>
+                            <dependency><artifactId>no-group</artifactId><version>1</version></dependency>
+                            <dependency><groupId>org.example</groupId><version>1</version></dependency>
+                            <dependency><groupId>org.example</groupId><artifactId>no-version</artifactId></dependency>
+                            <dependency><groupId>org.example</groupId><artifactId>lib</artifactId><version>${lib.version}</version></dependency>
+                            <dependency><groupId>org.example</groupId><artifactId>pom-not-imported</artifactId><version>2</version><type>pom</type></dependency>
+                          </dependencies></dependencyManagement>
+                        </project>
+                        """)
+                .with("org.example", "grandparent", "7.0", "<project><dependencyManagement/></project>");
+        Map<String, ManagedVersionResolver.ManagedVersion> result = new ManagedVersionResolver(source)
+                .resolve(module("org.example", "parent-pom", "1.0.0", Map.of(), List.of()));
+        assertEquals("7.0", result.get("org.example:lib").version());
+        assertEquals("lib.version", result.get("org.example:lib").propertyName());
+        assertFalse(result.get("org.example:pom-not-imported").bomImport());
+        assertEquals(java.util.Set.of("org.example:lib", "org.example:pom-not-imported"), result.keySet());
+    }
+
+    @Test
+    void overlyLongPropertyChainsAndParentChainsAreCutOff() {
+        // A property chain longer than the resolver will follow.
+        StringBuilder props = new StringBuilder();
+        for (int i = 0; i < 12; i++) props.append("<p").append(i).append(">${p").append(i + 1).append("}</p").append(i).append(">");
+        props.append("<p12>1.0</p12>");
+        FakePomSource chain = new FakePomSource().with("org.example", "parent-pom", "1.0.0",
+                "<project><properties>" + props + "</properties><dependencyManagement><dependencies>"
+                        + managedDep("org.example", "deep", "${p0}") + managedDep("org.example", "shallow", "${p11}")
+                        + "</dependencies></dependencyManagement></project>");
+        Map<String, ManagedVersionResolver.ManagedVersion> result = new ManagedVersionResolver(chain)
+                .resolve(module("org.example", "parent-pom", "1.0.0", Map.of(), List.of()));
+        assertNull(result.get("org.example:deep"));
+        assertEquals("1.0", result.get("org.example:shallow").version());
+
+        // A parent chain deeper than the resolver will walk.
+        FakePomSource parents = new FakePomSource();
+        for (int i = 0; i < 14; i++) {
+            parents.with("org.example", "p" + i, "1", "<project><parent><groupId>org.example</groupId><artifactId>p" + (i + 1)
+                    + "</artifactId><version>1</version></parent><dependencyManagement><dependencies>"
+                    + managedDep("org.example", "from-p" + i, "1") + "</dependencies></dependencyManagement></project>");
+        }
+        Map<String, ManagedVersionResolver.ManagedVersion> deep = new ManagedVersionResolver(parents)
+                .resolve(module("org.example", "p0", "1", Map.of(), List.of()));
+        assertTrue(deep.containsKey("org.example:from-p0"));
+        assertFalse(deep.containsKey("org.example:from-p13"), deep.keySet().toString());
+    }
+
+    @Test
+    void projectAndParentCoordinatesAreAvailableAsProperties() {
+        FakePomSource source = new FakePomSource().with("org.example", "parent-pom", "1.0.0", """
+                <project>
+                  <parent><groupId>org.gp</groupId><artifactId>gp</artifactId><version>7.0</version></parent>
+                  <groupId>org.own</groupId><artifactId>parent-pom</artifactId><version>2.0</version>
+                  <dependencyManagement><dependencies>
+                    <dependency><groupId>org.example</groupId><artifactId>own-version</artifactId><version>${project.version}</version></dependency>
+                    <dependency><groupId>org.example</groupId><artifactId>parent-version</artifactId><version>${project.parent.version}</version></dependency>
+                    <dependency><groupId>org.example</groupId><artifactId>own-group</artifactId><version>${project.groupId}</version></dependency>
+                    <dependency><groupId>org.example</groupId><artifactId>parent-group</artifactId><version>${project.parent.groupId}</version></dependency>
+                  </dependencies></dependencyManagement>
+                </project>
+                """);
+        Map<String, ManagedVersionResolver.ManagedVersion> result = new ManagedVersionResolver(source)
+                .resolve(module("org.example", "parent-pom", "1.0.0", Map.of(), List.of()));
+        assertEquals("2.0", result.get("org.example:own-version").version());
+        assertEquals("7.0", result.get("org.example:parent-version").version());
+        assertEquals("org.own", result.get("org.example:own-group").version());
+        assertEquals("org.gp", result.get("org.example:parent-group").version());
+    }
 }

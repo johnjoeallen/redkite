@@ -136,6 +136,27 @@ class ServerMutationsTest {
     }
 
     @Test
+    void batchActionsMissingTheirCoordinatesAreSkipped() throws Exception {
+        // Seed the POM with its pin summary so the only possible changes come from the actions below.
+        fx.awaitApply(startBatch("", "{\"pom.xml\":" + json(ServerFixture.DEMO_POM) + "}"));
+        String seeded = fx.projectPom();
+        int buildsBefore = fx.mvnCalls().size();
+
+        String actions = String.join(",",
+                "{\"actionType\":\"ADD_EXCLUSION\",\"groupId\":\"g\",\"artifactId\":\"a\",\"pomFile\":\"pom.xml\"}",
+                "{\"actionType\":\"ADD_EXCLUSION\",\"parentGroupId\":\"p\",\"parentArtifactId\":\"q\",\"groupId\":\"g\",\"pomFile\":\"pom.xml\"}",
+                "{\"actionType\":\"ADD_DEPENDENCY_MANAGEMENT\",\"groupId\":\"g\",\"artifactId\":\"a\",\"pomFile\":\"pom.xml\"}",
+                "{\"actionType\":\"ADD_DEPENDENCY_MANAGEMENT\",\"artifactId\":\"a\",\"version\":\"1\",\"pomFile\":\"pom.xml\"}",
+                "{\"actionType\":\"ADD_DEPENDENCY_MANAGEMENT\",\"groupId\":\"g\",\"version\":\"1\",\"pomFile\":\"pom.xml\"}",
+                "{\"actionType\":\"SOMETHING_ELSE\",\"groupId\":\"g\",\"artifactId\":\"a\",\"pomFile\":\"pom.xml\"}");
+        String status = fx.awaitApply(startBatch(actions, "{\"../outside/pom.xml\":\"<project/>\"}"));
+
+        assertEquals("{\"status\":\"done\",\"baselinePassed\":true,\"noChanges\":true}", status);
+        assertEquals(seeded, fx.projectPom());
+        assertEquals(buildsBefore, fx.mvnCalls().size());
+    }
+
+    @Test
     void batchApplyWithNothingToChangeSkipsTheBuild() throws Exception {
         // The pin-summary refresh is itself a change, so seed the POM with the summary it would write.
         String patches = "{\"pom.xml\":" + json(ServerFixture.DEMO_POM) + "}";
@@ -266,6 +287,10 @@ class ServerMutationsTest {
         String t = text(fx.get("/config").body());
         assertTrue(t.contains("WTFPL"), t);
         assertTrue(fx.get("/config").body().contains("value=\"MIT\"><label>MIT</label><div class=\"config-row-input\"><input type=\"number\" name=\"rank_"));
+        assertTrue(java.util.regex.Pattern.compile("value=\"MIT\"><label>MIT</label><div class=\"config-row-input\"><input type=\"number\" name=\"rank_\\d+\" value=\"7\"")
+                .matcher(fx.get("/config").body()).find(), "MIT's rank was saved");
+        assertTrue(java.util.regex.Pattern.compile("value=\"WTFPL\"><label>WTFPL</label><div class=\"config-row-input\"><input type=\"number\" name=\"rank_\\d+\" value=\"0\"")
+                .matcher(fx.get("/config").body()).find(), "the new license was added with its rank");
         assertEquals(303, fx.post("/api/config/license-ranks", "license_new=X&rank_new=nope").status());
         assertFalse(text(fx.get("/config").body()).contains(" X "));
     }

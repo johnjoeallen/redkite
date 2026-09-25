@@ -112,8 +112,6 @@ public final class LicenseResolver {
 
     private static String childText(Element parent, String tag) {
         Element child = directChild(parent, tag);
-        if (child == null) return null;
-        String text = child.getTextContent();
-        return text == null ? null : text.trim();
+        return child == null ? null : child.getTextContent().trim();
     }
 }

@@ -472,4 +472,89 @@ class HttpVersionMetadataProviderTest {
         // "4" sorts above "4.1c" because a textual token ("1c") ranks below the implicit 0.
         assertEquals(List.of("4", "4.1.2", "5.0"), metadata.upgradePathVersions());
     }
+
+    private VersionMetadata lookup(String metadataXml, String currentVersion) {
+        responses.put(LIB_PATH, new Response(200, metadataXml));
+        return provider(base + "/repo").latestVersion(LIB, currentVersion);
+    }
+
+    private static String versions(String... versions) {
+        StringBuilder xml = new StringBuilder("<metadata><versioning><versions>");
+        for (String v : versions) xml.append("<version>").append(v).append("</version>");
+        return xml.append("</versions><release> </release><latest></latest></versioning></metadata>").toString();
+    }
+
+    @Test
+    void withoutACurrentVersionEveryFamilysLatestIsOnThePath() {
+        VersionMetadata metadata = lookup(versions("1.0", "1.1", "2.0", "2.1"), " ");
+        assertEquals("2.1", metadata.latestVersion());
+        assertEquals("2.1", metadata.latestSameMajorVersion());
+        assertEquals(List.of("1.1", "2.1"), metadata.upgradePathVersions());
+    }
+
+    @Test
+    void onlyPreReleasesAreStillUsableAndSnapshotsAreNotReleases() {
+        VersionMetadata metadata = lookup(versions("1.0-rc1", "1.1-SNAPSHOT"), "1.0-rc1");
+        assertEquals("1.1-SNAPSHOT", metadata.latestVersion());
+        assertFalse(metadata.release());
+    }
+
+    @Test
+    void singleSegmentCurrentVersionIsItsMajorsZeroFamily() {
+        VersionMetadata metadata = lookup(versions("3.9", "5.0", "5.0.1", "5.2", "6.0"), "5");
+        assertEquals("5.0.1", metadata.latestSameMajorVersion());
+        assertEquals(List.of("5.0.1", "5.2", "6.0"), metadata.upgradePathVersions(), "older majors are never on the path");
+    }
+
+    @Test
+    void nonNumericCurrentVersionIsTreatedAsZero() {
+        VersionMetadata metadata = lookup(versions("0.0.1", "0.2", "1.0"), "abc");
+        assertEquals("0.0.1", metadata.latestSameMajorVersion(), metadata.toString());
+    }
+
+    @Test
+    void noVersionInTheCurrentFamilyFallsBackToTheLatest() {
+        VersionMetadata metadata = lookup(versions("2.0", "2.1"), "1.5");
+        assertEquals("2.1", metadata.latestSameMajorVersion());
+    }
+
+    @Test
+    void artifactoryIntegrationFlagWithASpaceIsSkipped() {
+        responses.put("/artifactory/api/search/versions?g=org.example&a=lib", new Response(200,
+                "{\"results\":[{\"version\":\"1.0\",\"integration\": true},{\"version\":\"1.1\"}]}"));
+        assertEquals(List.of("1.1"), provider(base + "/artifactory/r").latestVersion(LIB, "1.0").allStableVersions());
+    }
+
+    @Test
+    void repositoriesThatAreCentralMirrorsSkipTheCentralCheck() {
+        for (String host : List.of("repo1.maven.org", "central.maven.org", "repo.maven.apache.org")) {
+            requests.clear();
+            responses.put("/" + host + "/org/example/" + host + "/maven-metadata.xml", new Response(200, versions("1.0")));
+            provider(base + "/" + host).latestVersion(new ComponentCoordinate("org.example", host), "1.0");
+            assertFalse(requests.stream().anyMatch(r -> r.startsWith("HEAD ")), host + " " + requests);
+        }
+    }
+
+    @Test
+    void versionsAreSortedAndEqualSpellingsKeepTheFirstSeen() {
+        VersionMetadata metadata = lookup(versions("2.0", "1.5", "1.2.0", "1.2", "1.0"), "1.0");
+        assertEquals(List.of("1.0", "1.2.0", "1.2", "1.5", "2.0"), metadata.allStableVersions());
+        assertEquals(List.of("1.2.0", "1.5", "2.0"), metadata.upgradePathVersions(), "1.2 and 1.2.0 are the same release: the first listed stands");
+    }
+
+    @Test
+    void latestInTheFamilyKeepsTheFirstOfEqualSpellings() {
+        assertEquals("1.2", lookup(versions("1.2", "1.2.0", "1.1"), "1.2.0").latestSameMajorVersion());
+    }
+
+    @Test
+    void clearErrorCacheKeepsAFreshInMemoryEntry() {
+        responses.put(LIB_PATH, new Response(200, versions("1.0", "1.1")));
+        HttpVersionMetadataProvider noDb = new HttpVersionMetadataProvider(base + "/repo", null, null);
+        noDb.latestVersion(LIB, "1.0");
+        long gets = requests.stream().filter(r -> r.startsWith("GET ")).count();
+        noDb.clearErrorCache();
+        assertEquals("1.1", noDb.latestVersion(LIB, "1.0").latestVersion());
+        assertEquals(gets, requests.stream().filter(r -> r.startsWith("GET ")).count(), "served from memory: " + requests);
+    }
 }

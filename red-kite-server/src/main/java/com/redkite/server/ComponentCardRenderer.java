@@ -337,7 +337,7 @@ final class ComponentCardRenderer {
                 // transitiveRecommendedVersion), never merely because something newer was
                 // published. "No upgrade available" must be reserved for when that's actually
                 // true, not used as a catch-all for "not offering one."
-                String latestVersion = view.versionMetadata() != null ? view.versionMetadata().latestVersion() : null;
+                String latestVersion = view.versionMetadata().latestVersion();
                 boolean newerVersionExists = latestVersion != null && !latestVersion.isBlank()
                         && !"unknown".equalsIgnoreCase(latestVersion)
                         && compareVersionsSemantic(latestVersion, comp.version()) > 0;
@@ -386,9 +386,9 @@ final class ComponentCardRenderer {
                     selectedVersion = view.recommendation().targetVersion();
                 }
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), view.recommendation(), false, directConflictVersions,
+                        view.versionMetadata(), view.recommendation(), directConflictVersions,
                         view.convergenceFinding() != null));
-            } else if (showVersionSelector && (view.versionMetadata() != null || view.convergenceFinding() != null)) {
+            } else if (showVersionSelector) {
                 // Transitive: the selector's default is exactly transitiveTarget's 3-tier result
                 // (existing pin > highest version already in the conflict > current/no-op) — never
                 // conflictDefaultVersion's CVE-driven walk beyond what's already in the tree, and
@@ -397,9 +397,9 @@ final class ComponentCardRenderer {
                 List<String> conflictVersions = view.convergenceFinding() != null
                         ? view.convergenceFinding().conflictingVersions()
                         : List.of();
-                String selectedVersion = transitiveTarget != null ? transitiveTarget : comp.version();
+                String selectedVersion = transitiveTarget;
                 html.append(renderVersionSelect(selectorId, comp.coordinate(), comp.version(), selectedVersion,
-                        view.versionMetadata(), effectiveRecommendation, false,
+                        view.versionMetadata(), effectiveRecommendation,
                         conflictVersions, true));
             }
             if (!actionableConvergence) {
@@ -467,7 +467,7 @@ final class ComponentCardRenderer {
 
     private String renderVersionSelect(String selectorId, ComponentCoordinate coordinate, String currentVersion,
             String selectedVersion, MetadataResult versionMetadata, UpgradeRecommendation recommendation,
-            boolean includeNameAttr, List<String> conflictVersions,
+            List<String> conflictVersions,
             boolean includeCurrentOption) {
         List<String> choices = versionChoices(versionMetadata, recommendation);
         // Build deduplicated ordered set: recommended first, then choices, then latest
@@ -479,12 +479,10 @@ final class ComponentCardRenderer {
             ordered.add(recommendation.targetVersion());
         }
         ordered.addAll(choices);
-        if (conflictVersions != null) {
-            ordered.addAll(conflictVersions);
-            // Guarantee the conflict-default version is always selectable
-            if (!conflictVersions.isEmpty() && selectedVersion != null && !selectedVersion.isBlank()) {
-                ordered.add(selectedVersion);
-            }
+        ordered.addAll(conflictVersions);
+        // Guarantee the conflict-default version is always selectable
+        if (!conflictVersions.isEmpty() && selectedVersion != null && !selectedVersion.isBlank()) {
+            ordered.add(selectedVersion);
         }
         if (versionMetadata != null && versionMetadata.latestVersion() != null
                 && !versionMetadata.latestVersion().isBlank()
@@ -521,19 +519,18 @@ final class ComponentCardRenderer {
         String recommendedVersion = recommendation != null ? recommendation.targetVersion() : null;
         String latestVersion = versionMetadata != null ? versionMetadata.latestVersion() : null;
         String latestSameMajor = versionMetadata != null ? versionMetadata.latestSameMajorVersion() : null;
-        java.util.Set<String> conflictSet = conflictVersions == null ? java.util.Set.of() : new java.util.LinkedHashSet<>(conflictVersions);
+        java.util.Set<String> conflictSet = new java.util.LinkedHashSet<>(conflictVersions);
 
         // Explicit selectedVersion (e.g. conflict default) takes priority over the recommendation.
         // For conflict cards, allow the current version to be selected (current may already be the resolution target).
-        boolean hasConflict = conflictVersions != null && !conflictVersions.isEmpty();
+        boolean hasConflict = !conflictVersions.isEmpty();
         boolean hasExplicitSelection = selectedVersion != null && !selectedVersion.isBlank()
                 && (hasConflict || !selectedVersion.equals(currentVersion)) && ordered.contains(selectedVersion);
         boolean hasPreSelection = hasExplicitSelection
                 || (recommendedVersion != null && !recommendedVersion.isBlank()
                     && !recommendedVersion.equals(currentVersion) && ordered.contains(recommendedVersion));
         String preSelectedVersion = hasExplicitSelection ? selectedVersion : recommendedVersion;
-        String nameAttr = includeNameAttr ? " name=\"" + escape(selectorId) + "\"" : "";
-        html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"").append(nameAttr)
+        html.append("<select class=\"version-sel\" id=\"").append(escape(selectorId)).append("\"")
                 .append(" onchange=\"onVersionSelect(this)\"");
         if (recommendedVersion != null && !recommendedVersion.isBlank()) {
             html.append(" data-recommended=\"").append(escape(recommendedVersion)).append("\"");
@@ -574,7 +571,7 @@ final class ComponentCardRenderer {
         }
         // Show the actual severity level rather than a generic "vulnerable" flag, so a Low CVE
         // doesn't read the same as a Critical one when comparing candidates in the dropdown.
-        if (severity != null && severity != AdvisorySeverity.NONE) {
+        if (severity != AdvisorySeverity.NONE) {
             tags.add(severity.label().toLowerCase() + " severity");
         }
         if (isConflictVersion) tags.add("conflict");
@@ -582,11 +579,6 @@ final class ComponentCardRenderer {
             tags.add("pre-release");
         }
         return tags.isEmpty() ? version : version + " — " + String.join(", ", tags);
-    }
-
-    private String conflictDefaultVersion(TransitiveConflictFinding f, ScanComponent comp,
-            List<VulnerabilityFinding> vulnFindings, Map<String, List<VulnerabilityFinding>> vulnsByKey) {
-        return conflictDefaultVersion(f, comp, vulnFindings, vulnsByKey, null);
     }
 
     private String conflictDefaultVersion(TransitiveConflictFinding f, ScanComponent comp,
@@ -599,25 +591,19 @@ final class ComponentCardRenderer {
         if (comp.version() != null && compareVersionsSemantic(comp.version(), newest) > 0) {
             newest = comp.version();
         }
-        if (comp.coordinate() == null) return newest.isBlank() ? null : newest;
-
         // Collect all known vulnerability findings for this artifact across all affected versions.
         // This lets us do range-based checking: if affectedVersion <= candidate < fixedVersion,
         // the candidate is still vulnerable even if we have no finding keyed exactly to it.
         String ga = comp.coordinate().groupId() + ":" + comp.coordinate().artifactId();
-        List<VulnerabilityFinding> allArtifactVulns = new ArrayList<>();
-        if (vulnFindings != null) allArtifactVulns.addAll(vulnFindings);
-        if (vulnsByKey != null) {
-            String prefix = ga + "@";
-            for (Map.Entry<String, List<VulnerabilityFinding>> e : vulnsByKey.entrySet()) {
-                if (e.getKey().startsWith(prefix)) {
-                    for (VulnerabilityFinding vf : e.getValue()) {
-                        if (vf.coordinate() != null
-                                && comp.coordinate().groupId().equals(vf.coordinate().groupId())
-                                && comp.coordinate().artifactId().equals(vf.coordinate().artifactId())) {
-                            allArtifactVulns.add(vf);
-                        }
-                    }
+        List<VulnerabilityFinding> allArtifactVulns = new ArrayList<>(vulnFindings);
+        String prefix = ga + "@";
+        for (Map.Entry<String, List<VulnerabilityFinding>> e : vulnsByKey.entrySet()) {
+            if (!e.getKey().startsWith(prefix)) continue;
+            for (VulnerabilityFinding vf : e.getValue()) {
+                if (vf.coordinate() != null
+                        && comp.coordinate().groupId().equals(vf.coordinate().groupId())
+                        && comp.coordinate().artifactId().equals(vf.coordinate().artifactId())) {
+                    allArtifactVulns.add(vf);
                 }
             }
         }
@@ -704,7 +690,7 @@ final class ComponentCardRenderer {
      *  the actual severity level rather than a boolean so the dropdown can distinguish a Low
      *  residual CVE from a Critical one instead of showing them identically. */
     private AdvisorySeverity severityForVersion(ComponentCoordinate coordinate, String candidateVersion) {
-        if (coordinate == null || candidateVersion == null || candidateVersion.isBlank()) {
+        if (candidateVersion == null || candidateVersion.isBlank()) {
             return AdvisorySeverity.NONE;
         }
         return AdvisoryClassifier.highest(vulnerabilities.vulnerabilities(coordinate, candidateVersion));

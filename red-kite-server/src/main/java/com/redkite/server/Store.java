@@ -547,16 +547,10 @@ final class Store {
     }
 
     private static List<String> fromJsonStringArray(String json) {
-        if (json == null || json.isBlank() || "[]".equals(json.trim())) return List.of();
-        String inner = json.trim();
-        if (inner.startsWith("[")) inner = inner.substring(1);
-        if (inner.endsWith("]")) inner = inner.substring(0, inner.length() - 1);
+        if (json == null || json.isBlank()) return List.of();
         List<String> result = new ArrayList<>();
-        for (String part : inner.split(",")) {
-            String s = part.trim();
-            if (s.startsWith("\"")) s = s.substring(1);
-            if (s.endsWith("\"")) s = s.substring(0, s.length() - 1);
-            if (!s.isEmpty()) result.add(s);
+        for (com.google.gson.JsonElement e : com.google.gson.JsonParser.parseString(json).getAsJsonArray()) {
+            result.add(e.getAsString());
         }
         return result;
     }

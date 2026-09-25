@@ -64,8 +64,8 @@ final class PomPatcher {
         NodeList allElements = doc.getElementsByTagName("*");
         List<Element> patchTargets = new ArrayList<>();
         for (int i = 0; i < allElements.getLength(); i++) {
-            Node n = allElements.item(i);
-            if (n instanceof Element e && ("parent".equals(e.getNodeName()) || "dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName()))) {
+            Element e = (Element) allElements.item(i);
+            if ("parent".equals(e.getNodeName()) || "dependency".equals(e.getNodeName()) || "plugin".equals(e.getNodeName())) {
                 if (isRedkiteDepMgmtPin(e)) continue;
                 patchTargets.add(e);
             }
@@ -194,8 +194,8 @@ final class PomPatcher {
         // version (and the version= attribute on its marker comment, so the comment stays
         // truthful) in place, without touching who owns it or why.
         for (int i = 0; i < allElements.getLength(); i++) {
-            Node n = allElements.item(i);
-            if (!(n instanceof Element e) || !"dependency".equals(e.getNodeName()) || !isRedkiteDepMgmtPin(e)) continue;
+            Element e = (Element) allElements.item(i);
+            if (!"dependency".equals(e.getNodeName()) || !isRedkiteDepMgmtPin(e)) continue;
             String pg = childText(e, "groupId"), pa = childText(e, "artifactId");
             if (pg == null || pa == null) continue;
             String upgrade = versionUpdates.get(pg.trim() + ":" + pa.trim());
@@ -358,10 +358,12 @@ final class PomPatcher {
             if (n instanceof Element e && "properties".equals(e.getNodeName())) return e;
         }
         Element propertiesEl = doc.createElement("properties");
+        // Anchor on <project>'s own children only: a <dependencies> nested in a <profile> is not
+        // a child of root, and inserting before it would throw.
         Node insertBefore = null;
         for (String anchor : List.of("dependencyManagement", "dependencies", "build")) {
-            NodeList nl = root.getElementsByTagName(anchor);
-            if (nl.getLength() > 0) { insertBefore = nl.item(0); break; }
+            insertBefore = directChild(root, anchor);
+            if (insertBefore != null) break;
         }
         if (insertBefore != null) {
             root.insertBefore(doc.createTextNode("\n  "), insertBefore);
@@ -394,6 +396,13 @@ final class PomPatcher {
             prop.setTextContent(value);
             propertiesEl.appendChild(prop);
         }
+    }
+
+    private static Element directChild(Element parent, String tagName) {
+        for (Node n = parent.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n instanceof Element e && tagName.equals(e.getNodeName())) return e;
+        }
+        return null;
     }
 
     static String childText(Element parent, String tagName) {

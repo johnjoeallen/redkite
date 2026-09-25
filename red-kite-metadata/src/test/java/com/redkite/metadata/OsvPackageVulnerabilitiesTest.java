@@ -9,6 +9,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -286,6 +287,35 @@ class OsvPackageVulnerabilitiesTest {
         VulnerabilityFinding f = only(listed, "1.1");
         assertEquals("2.1", f.fixedVersion());
         assertEquals(null, f.introducedVersion());
+    }
+
+    @Test
+    void oddlyShapedAffectedEntriesAndRangesAreSkippedOrTolerated() {
+        String json = "{\"vulns\": [{\"id\": \"GHSA-x\", \"severity\": [{}], \"affected\": ["
+                // no package at all: applies to whatever was queried
+                + "{\"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": [{\"introduced\": \"0\"}, {\"fixed\": \"2.0\"}]}]},"
+                // a package without a name never matches
+                + "{\"package\": {}, \"ranges\": [{\"type\": \"ECOSYSTEM\", \"events\": [{\"introduced\": \"0\"}, {\"fixed\": \"9.0\"}]}]},"
+                // untyped, non-ECOSYSTEM and event-less ranges, and an event with neither bound, are ignored
+                + "{\"package\": {\"name\": \"com.example:lib\"}, \"ranges\": ["
+                + "{\"events\": [{\"introduced\": \"0\"}, {\"fixed\": \"8.0\"}]},"
+                + "{\"type\": \"GIT\", \"events\": [{\"introduced\": \"0\"}, {\"fixed\": \"7.0\"}]},"
+                + "{\"type\": \"ECOSYSTEM\"},"
+                + "{\"type\": \"ECOSYSTEM\", \"events\": [{\"limit\": \"6.0\"}]}]}"
+                + "]}]}";
+        VulnerabilityFinding finding = only(json, "1.0");
+        assertEquals("2.0", finding.fixedVersion());
+        assertEquals("UNKNOWN", finding.severity());
+        assertEquals(List.of(), OsvPackageVulnerabilities.findingsForVersion(json, LIB, "2.5"));
+    }
+
+    @Test
+    void aBlankIntroducedBoundMeansSinceInceptionAndAnUnlabelledDatabaseEntryUsesTheVector() {
+        VulnerabilityFinding fixed = only(advisory(", \"database_specific\": {\"cwe_ids\": []}" + cvss("CVSS:3.1/C:H/I:N/A:N"),
+                "{\"introduced\": \"\"}, {\"fixed\": \"2.0\"}"), "1.0");
+        assertNull(fixed.introducedVersion());
+        assertEquals("HIGH", fixed.severity());
+        assertNull(only(advisory("", "{\"introduced\": \"\"}, {\"last_affected\": \"2.0\"}"), "1.0").introducedVersion());
     }
 
     private List<VulnerabilityFinding> findings(String version) {

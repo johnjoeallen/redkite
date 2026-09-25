@@ -88,9 +88,9 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     // ---- persistent cache helpers ----
 
-    private boolean putCache(String cacheKey, CacheEntry entry) {
+    private void putCache(String cacheKey, CacheEntry entry) {
         cache.put(cacheKey, entry);
-        return dbWrite(cacheKey, entry);
+        dbWrite(cacheKey, entry);
     }
 
     private CacheEntry tryLoadFromDb(String cacheKey) {
@@ -116,8 +116,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         }
     }
 
-    private boolean dbWrite(String cacheKey, CacheEntry entry) {
-        if (dbConnectionFactory == null) return true;
+    private void dbWrite(String cacheKey, CacheEntry entry) {
+        if (dbConnectionFactory == null) return;
         try (Connection c = dbConnectionFactory.get();
              PreparedStatement ps = c.prepareStatement(
                      "merge into rk_version_cache " +
@@ -132,10 +132,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             ps.setString(6, entry.status().name());
             ps.setBoolean(7, entry.complete());
             ps.executeUpdate();
-            return true;
         } catch (Exception e) {
             LOGGER.warning(() -> "DB version cache write failed for " + cacheKey + ": " + e.getMessage());
-            return false;
         }
     }
 
@@ -355,12 +353,8 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         Duration ttl = central
                 ? CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_FRESH_TTL, DEFAULT_FRESH_TTL)
                 : CacheTtlConfig.read(dbConnectionFactory, CONFIG_KEY_LOCAL_TTL, DEFAULT_LOCAL_TTL);
-        boolean persisted = putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
-        if (persisted) {
-            LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
-        } else {
-            LOGGER.warning(() -> "Retrieved Maven version metadata but failed to persist cache for " + cacheKey + " => " + latest);
-        }
+        putCache(cacheKey, CacheEntry.fresh(allVersions, latest, source, now.plus(ttl), MetadataStatus.FRESH, true));
+        LOGGER.info(() -> "Cached Maven version metadata for " + cacheKey + " => " + latest + " ttl=" + ttl.toHours() + "h");
         return metadata;
     }
 
@@ -450,7 +444,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     private static String artifactoryVersionsUrl(String repoUrl, ComponentCoordinate coordinate) {
         String lower = repoUrl.toLowerCase();
         int idx = lower.indexOf("/artifactory");
-        String base = idx >= 0 ? repoUrl.substring(0, idx + "/artifactory".length()) : repoUrl;
+        String base = repoUrl.substring(0, idx + "/artifactory".length()); // only called for isArtifactoryUrl URLs
         // Omit repos= so the search covers all accessible repositories — both internal
         // and external cached ones. Passing a virtual repo name (e.g. maven-all) restricts
         // results to that repo's index and misses internal artifacts not present in it.
@@ -537,7 +531,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
 
     private static String latestSameMajorVersion(List<String> versions, String currentVersion, String fallbackLatest) {
         if (versions == null || versions.isEmpty()) {
-            return fallbackLatest == null || fallbackLatest.isBlank() ? "unknown" : fallbackLatest;
+            return fallbackLatest;
         }
         if (currentVersion == null || currentVersion.isBlank()) {
             return versions.stream().max(HttpVersionMetadataProvider::compareVersions).orElse("unknown");
@@ -547,7 +541,7 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
         if (latestInFamily != null && !latestInFamily.isBlank()) {
             return latestInFamily;
         }
-        return fallbackLatest == null || fallbackLatest.isBlank() ? "unknown" : fallbackLatest;
+        return fallbackLatest; // never blank: callers pass a real latest or "unknown"
     }
 
     private static String familyKey(String version) {

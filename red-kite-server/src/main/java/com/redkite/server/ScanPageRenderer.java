@@ -461,7 +461,7 @@ final class ScanPageRenderer {
                     Document pdoc = dbf2.newDocumentBuilder().parse(new InputSource(new StringReader(pomEntry.getValue())));
                     NodeList nl = pdoc.getElementsByTagName("*");
                     for (int i = 0; i < nl.getLength(); i++) {
-                        if (!(nl.item(i) instanceof Element de)) continue;
+                        Element de = (Element) nl.item(i);
                         if (!"dependency".equals(de.getNodeName()) && !"plugin".equals(de.getNodeName())) continue;
                         String pg = childText(de, "groupId"), pa = childText(de, "artifactId");
                         if (pg == null || pa == null) continue;
@@ -605,6 +605,6 @@ final class ScanPageRenderer {
     /** Whether a card shows up in the default view (Findings) — used only to pick which module
      *  tab is initially selected, so it should match exactly what the Findings view itself shows. */
     private boolean isDefaultVisibleRemediationCard(ComponentView view) {
-        return view != null && !cards.isCardClean(view);
+        return !cards.isCardClean(view);
     }
 }

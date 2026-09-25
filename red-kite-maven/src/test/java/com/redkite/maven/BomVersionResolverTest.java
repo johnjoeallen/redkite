@@ -91,4 +91,15 @@ class BomVersionResolverTest {
 
         assertNull(declared.get("org.example:lib"), "A RedKite-applied pin must not be read back as project intent");
     }
+
+    @Test
+    void declaredPropertyNamesIncludeTheProjectsOwnAndSkipRedkiteMarkers() throws Exception {
+        BomVersionResolver resolver = new BomVersionResolver(new FakePomSource());
+        assertEquals(java.util.Set.of(), resolver.resolveProjectDeclaredPropertyNames(java.nio.file.Path.of("pom.xml"), null));
+        assertEquals(java.util.Set.of(), resolver.resolveProjectDeclaredPropertyNames(java.nio.file.Path.of("pom.xml"), " "));
+        java.util.Set<String> names = resolver.resolveProjectDeclaredPropertyNames(java.nio.file.Path.of("pom.xml"),
+                "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>"
+                        + "<properties><own.version>2</own.version></properties></project>");
+        assertTrue(names.contains("own.version"), names.toString());
+    }
 }

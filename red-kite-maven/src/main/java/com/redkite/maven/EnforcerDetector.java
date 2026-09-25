@@ -62,7 +62,7 @@ public class EnforcerDetector {
         NodeList plugins = pluginsEl.getChildNodes();
         for (int i = 0; i < plugins.getLength(); i++) {
             if (!(plugins.item(i) instanceof Element plugin)) continue;
-            if (!"plugin".equals(plugin.getLocalName()) && !"plugin".equals(plugin.getNodeName())) continue;
+            if (!"plugin".equals(plugin.getNodeName())) continue;
             String groupId = text(plugin, "groupId");
             String artifactId = text(plugin, "artifactId");
             if (ENFORCER_ARTIFACT_ID.equals(artifactId)
@@ -116,7 +116,7 @@ public class EnforcerDetector {
         NodeList children = rules.getChildNodes();
         for (int i = 0; i < children.getLength(); i++) {
             if (!(children.item(i) instanceof Element rule)) continue;
-            String name = rule.getLocalName() != null ? rule.getLocalName() : rule.getNodeName();
+            String name = rule.getNodeName();
             if ("dependencyConvergence".equalsIgnoreCase(name)
                     || "requireUpperBoundDeps".equalsIgnoreCase(name)) {
                 return true;
@@ -141,8 +141,7 @@ public class EnforcerDetector {
         NodeList nodes = parent.getChildNodes();
         for (int i = 0; i < nodes.getLength(); i++) {
             if (nodes.item(i) instanceof Element el) {
-                String n = el.getLocalName() != null ? el.getLocalName() : el.getNodeName();
-                if (name.equals(n)) return el;
+                if (name.equals(el.getNodeName())) return el;
             }
         }
         return null;

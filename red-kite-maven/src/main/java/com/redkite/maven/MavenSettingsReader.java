@@ -237,7 +237,7 @@ public class MavenSettingsReader {
         if (mirrorsEl == null) return entries;
         NodeList mirrors = mirrorsEl.getElementsByTagName("mirror");
         for (int i = 0; i < mirrors.getLength(); i++) {
-            if (!(mirrors.item(i) instanceof Element mirror)) continue;
+            Element mirror = (Element) mirrors.item(i);
             String mirrorOf = text(mirror, "mirrorOf");
             String url = text(mirror, "url");
             String id = text(mirror, "id");
@@ -256,7 +256,7 @@ public class MavenSettingsReader {
         if (serversEl == null) return servers;
         NodeList serverNodes = serversEl.getElementsByTagName("server");
         for (int i = 0; i < serverNodes.getLength(); i++) {
-            if (!(serverNodes.item(i) instanceof Element server)) continue;
+            Element server = (Element) serverNodes.item(i);
             String id = text(server, "id");
             String username = resolveCredential("username", text(server, "username"), id);
             String password = resolveCredential("password", text(server, "password"), id);
@@ -304,7 +304,7 @@ public class MavenSettingsReader {
         if (mirrorsEl == null) return urls;
         NodeList mirrors = mirrorsEl.getElementsByTagName("mirror");
         for (int i = 0; i < mirrors.getLength(); i++) {
-            if (!(mirrors.item(i) instanceof Element mirror)) continue;
+            Element mirror = (Element) mirrors.item(i);
             String mirrorOf = text(mirror, "mirrorOf");
             String url = text(mirror, "url");
             if (url == null || url.isBlank()) continue;
@@ -332,7 +332,7 @@ public class MavenSettingsReader {
         if (mirrorsEl == null) return false;
         NodeList mirrors = mirrorsEl.getElementsByTagName("mirror");
         for (int i = 0; i < mirrors.getLength(); i++) {
-            if (!(mirrors.item(i) instanceof Element mirror)) continue;
+            Element mirror = (Element) mirrors.item(i);
             String mirrorOf = text(mirror, "mirrorOf");
             if (mirrorOf == null) continue;
             for (String part : mirrorOf.split(",")) {
@@ -348,7 +348,7 @@ public class MavenSettingsReader {
         if (mirrorsEl == null) return false;
         NodeList mirrors = mirrorsEl.getElementsByTagName("mirror");
         for (int i = 0; i < mirrors.getLength(); i++) {
-            if (!(mirrors.item(i) instanceof Element mirror)) continue;
+            Element mirror = (Element) mirrors.item(i);
             String mirrorOf = text(mirror, "mirrorOf");
             if (mirrorOf != null && coversCentral(mirrorOf)) return true;
         }
@@ -373,7 +373,7 @@ public class MavenSettingsReader {
         if (profilesEl == null) return urls;
         NodeList profiles = profilesEl.getElementsByTagName("profile");
         for (int i = 0; i < profiles.getLength(); i++) {
-            if (!(profiles.item(i) instanceof Element profile)) continue;
+            Element profile = (Element) profiles.item(i);
             String id = text(profile, "id");
             boolean explicitlyActive = id != null && activeProfileIds.contains(id);
             boolean activationDefault = isDefaultActive(profile);
@@ -382,7 +382,7 @@ public class MavenSettingsReader {
             if (reposEl == null) continue;
             NodeList repos = reposEl.getElementsByTagName("repository");
             for (int j = 0; j < repos.getLength(); j++) {
-                if (!(repos.item(j) instanceof Element repo)) continue;
+                Element repo = (Element) repos.item(j);
                 String url = text(repo, "url");
                 if (url != null && !url.isBlank()) {
                     String trimmed = url.trim().replaceAll("/$", "");

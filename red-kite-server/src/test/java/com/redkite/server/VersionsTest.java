@@ -68,6 +68,10 @@ class VersionsTest {
         assertEquals(0, Versions.compareVersions("1.0", "1"));
         assertEquals(-1, Versions.compareVersions(null, "1"));
         assertEquals(1, Versions.compareVersions("1.0-2", "1.0.1"));
+        assertEquals(0, Versions.compareVersions(" ", "0"));
+        assertEquals(0, Versions.compareVersions("1.a", "1.0"), "a non-numeric part counts as 0");
+        assertEquals(0, Versions.major(null));
+        assertEquals(0, Versions.major("x1"));
     }
 
     @Test

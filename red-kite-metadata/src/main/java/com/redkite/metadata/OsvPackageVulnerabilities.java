@@ -193,15 +193,14 @@ final class OsvPackageVulnerabilities {
         return "LOW";
     }
 
+    /** Lower of two bounds; {@code a} is null before the first one is seen, {@code b} never is. */
     private static String lowerBoundRaw(String a, String b) {
         if (a == null) return b;
-        if (b == null) return a;
         return HttpVersionMetadataProvider.compareVersions(a, b) <= 0 ? a : b;
     }
 
     private static String higherBound(String a, String b) {
         if (a == null) return b;
-        if (b == null) return a;
         return HttpVersionMetadataProvider.compareVersions(a, b) >= 0 ? a : b;
     }
 
@@ -210,7 +209,7 @@ final class OsvPackageVulnerabilities {
     }
 
     private static boolean versionInRange(String version, String introduced, String fixed) {
-        if (fixed == null || fixed.isBlank()) return false;
+        if (fixed.isBlank()) return false;
         boolean aboveIntroduced = normalizeIntroduced(introduced) == null
                 || HttpVersionMetadataProvider.compareVersions(version, introduced) >= 0;
         boolean belowFixed = HttpVersionMetadataProvider.compareVersions(version, fixed) < 0;

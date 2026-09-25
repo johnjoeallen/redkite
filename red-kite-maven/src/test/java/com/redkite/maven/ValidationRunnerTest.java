@@ -62,6 +62,15 @@ class ValidationRunnerTest {
     }
 
     @Test
+    void projectLocalSettingsArePassedExplicitly() throws Exception {
+        Path settings = Files.createDirectories(project.resolve(".m2")).resolve("settings.xml");
+        Files.writeString(settings, "<settings/>");
+        mvn.output("install", "[INFO] BUILD SUCCESS\n");
+        List<String> command = new ValidationRunner().validate(project, pom).command();
+        assertEquals(List.of("-s", settings.toString()), command.subList(1, 3));
+    }
+
+    @Test
     void modesMapToGoalsAndTestsFlagControlsSkipTests() throws Exception {
         ValidationRunner runner = new ValidationRunner();
 
@@ -219,6 +228,11 @@ class ValidationRunnerTest {
         assertNull(ValidationRunner.attributeFailure("BUILD FAILURE for other reasons"));
         assertNull(ValidationRunner.attributeFailure(""));
         assertNull(ValidationRunner.attributeFailure(null));
+        assertEquals("a:b", ValidationRunner.attributeFailure("Could not find artifact a:b"), "a coordinate at the very end of the output");
+        assertNull(ValidationRunner.attributeFailure("Could not find artifact a:"), "a single part is not a coordinate");
+        assertEquals("a:b", ValidationRunner.attributeFailure("Could not resolve artifact a:b:jar:1 in central"), "a marker at the very start");
+        assertNull(ValidationRunner.attributeFailure("Could not find artifact nocolon in repo:central"),
+                "only the first whitespace-delimited token is the coordinate");
     }
 
     @Test
@@ -233,6 +247,8 @@ class ValidationRunnerTest {
         assertEquals(500, ValidationRunner.extractSignature(longOutput).length());
         assertTrue(ValidationRunner.extractSignature(longOutput).endsWith("END"));
         assertEquals("trailing Exception", ValidationRunner.extractSignature("trailing Exception"));
+        assertEquals("[ERROR]x\nplain", ValidationRunner.extractSignature("[ERROR]x\nplain"), "an [ERROR] marker needs a message after it");
+        assertEquals("Exception first", ValidationRunner.extractSignature("Exception first\nnext"));
     }
 
     @Test

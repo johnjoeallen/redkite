@@ -135,7 +135,6 @@ final class PomChanges {
                 continue;
             }
             String selectedVersion = versionChanged ? requestedVersion : component.version();
-            boolean changed = false;
             TransitiveConflictFinding finding = findMatchingConflict(conflictsByKey, component);
 
             if (rootPomKey != null) {
@@ -159,10 +158,7 @@ final class PomChanges {
                                 content, g, a, selectedVersion,
                                 "Enforcer dependency convergence fix by RedKite", RemediationApplier.PinKind.COMPUTED);
                     }
-                    if (!updated.equals(content)) {
-                        result.put(rootPomKey, updated);
-                        changed = true;
-                    }
+                    if (!updated.equals(content)) result.put(rootPomKey, updated);
                 }
             }
             if (!versionChanged) {
@@ -185,16 +181,9 @@ final class PomChanges {
                                 action.parentGroupId(), action.parentArtifactId(),
                                 finding.groupId(), finding.artifactId(),
                                 "Enforcer dependency convergence fix by RedKite");
-                        if (!updated.equals(content)) {
-                            result.put(filePath, updated);
-                            changed = true;
-                        }
+                        if (!updated.equals(content)) result.put(filePath, updated);
                     }
                 }
-            }
-
-            if (!changed) {
-                continue;
             }
         }
         result.entrySet().removeIf(e -> sourcePoms.containsKey(e.getKey()) && sourcePoms.get(e.getKey()).equals(e.getValue()));

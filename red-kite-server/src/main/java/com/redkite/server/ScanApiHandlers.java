@@ -76,30 +76,19 @@ final class ScanApiHandlers {
                         job.phasesJson = scanPhases(5,"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     } else if (msg.startsWith("Running dependency:tree")) {
                         scanDone[0]++;
-                        int pct = scanMods[0] > 0 ? 10 + scanDone[0] * 80 / scanMods[0] : 20;
-                        job.phasesJson = scanPhases(Math.min(pct, 95),"active",0,"pending",0,"pending",0,"pending",0,"pending");
+                        job.phasesJson = scanPhases(treeProgressPercent(scanDone[0], scanMods[0]),"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     }
                 };
                 ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg, job::appendLine);
 
                 job.phasesJson = scanPhases(100,"done",0,"active",0,"pending",0,"pending",0,"pending");
                 Consumer<String> buildProg = msg -> {
-                    if (msg.startsWith("Version ")) {
-                        String[] parts = msg.substring("Version ".length()).split("/");
-                        try {
-                            int n = Integer.parseInt(parts[0].trim());
-                            int t = Integer.parseInt(parts[1].trim());
-                            int pct = t > 0 ? n * 100 / t : 0;
-                            job.phasesJson = scanPhases(100,"done",pct,"active",0,"pending",0,"pending",0,"pending");
-                        } catch (Exception ignored) {}
-                    } else if (msg.startsWith("Vulnerability ")) {
-                        String[] parts = msg.substring("Vulnerability ".length()).split("/");
-                        try {
-                            int n = Integer.parseInt(parts[0].trim());
-                            int t = Integer.parseInt(parts[1].trim());
-                            int pct = t > 0 ? n * 100 / t : 0;
-                            job.phasesJson = scanPhases(100,"done",100,"done",pct,"active",0,"pending",0,"pending");
-                        } catch (Exception ignored) {}
+                    Integer versionPct = stepProgressPercent(msg, "Version ");
+                    Integer vulnPct = stepProgressPercent(msg, "Vulnerability ");
+                    if (versionPct != null) {
+                        job.phasesJson = scanPhases(100,"done",versionPct,"active",0,"pending",0,"pending",0,"pending");
+                    } else if (vulnPct != null) {
+                        job.phasesJson = scanPhases(100,"done",100,"done",vulnPct,"active",0,"pending",0,"pending");
                     } else if ("Updates".equals(msg)) {
                         job.phasesJson = scanPhases(100,"done",100,"done",100,"done",0,"active",0,"pending");
                     }
@@ -187,6 +176,26 @@ final class ScanApiHandlers {
         sb.append("\"parentArtifactId\":").append(jsonStr(a.parentArtifactId()));
         sb.append("}");
         return sb.toString();
+    }
+
+    /** Dependency-tree phase progress: 10% on discovering the modules, the next 80% spread over
+     *  them, capped at 95% until the phase is really done; 20% while the module count is unknown. */
+    static int treeProgressPercent(int modulesDone, int modules) {
+        return modules > 0 ? Math.min(10 + modulesDone * 80 / modules, 95) : 20;
+    }
+
+    /** Percent complete for a "{@code <prefix>n/total}" progress message, or {@code null} if
+     *  {@code msg} isn't one (wrong prefix or unparsable counts). */
+    static Integer stepProgressPercent(String msg, String prefix) {
+        if (!msg.startsWith(prefix)) return null;
+        String[] parts = msg.substring(prefix.length()).split("/");
+        try {
+            int n = Integer.parseInt(parts[0].trim());
+            int total = Integer.parseInt(parts[1].trim());
+            return total > 0 ? n * 100 / total : 0;
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     private String stringListToJson(List<String> list) {

@@ -230,14 +230,18 @@ public class RemediationApplier {
             }
         }
 
-        // 4) No <dependencyManagement> at all — create one under the project root.
+        // 4) No <dependencyManagement><dependencies> yet — create it under the project root,
+        // reusing an existing empty <dependencyManagement/> (a second one is a duplicate tag).
         Element root = doc.getDocumentElement();
-        Element depMgmt = doc.createElement("dependencyManagement");
+        Element depMgmt = directChild(root, "dependencyManagement");
+        if (depMgmt == null) {
+            depMgmt = doc.createElement("dependencyManagement");
+            root.appendChild(depMgmt);
+        }
         Element dependencies = doc.createElement("dependencies");
         dependencies.appendChild(buildPinComment(doc, groupId, artifactId, version, reason, kind));
         dependencies.appendChild(buildPinDependency(doc, groupId, artifactId, version));
         depMgmt.appendChild(dependencies);
-        root.appendChild(depMgmt);
         return serialize(doc);
     }
 
@@ -553,7 +557,7 @@ public class RemediationApplier {
     private static List<Element> materialise(NodeList nl) {
         List<Element> out = new ArrayList<>();
         for (int i = 0; i < nl.getLength(); i++) {
-            if (nl.item(i) instanceof Element e) out.add(e);
+            out.add((Element) nl.item(i));
         }
         return out;
     }

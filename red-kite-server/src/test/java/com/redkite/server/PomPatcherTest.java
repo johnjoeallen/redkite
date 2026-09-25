@@ -234,4 +234,50 @@ class PomPatcherTest {
                 || out.contains("<version></version>"), out);
         assertTrue(squash(patch("<project/>", Map.of())).endsWith("<project/>"));
     }
+
+    @Test
+    void propertiesAreCreatedAtTheTopLevelEvenWhenDependenciesOnlyExistInAProfile() throws Exception {
+        String pom = "<project><modelVersion>4.0.0</modelVersion><profiles><profile><id>p</id><dependencies>"
+                + "<dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version></dependency>"
+                + "</dependencies></profile></profiles></project>";
+        String patched = PomPatcher.patchPomXml(pom, Map.of("g:a", "2"));
+        assertTrue(patched.contains("<properties>"), patched);
+        assertTrue(patched.contains("<a.version>2</a.version>"), patched);
+        assertTrue(patched.indexOf("</profiles>") < patched.indexOf("<properties>"), "appended directly under <project>: " + patched);
+        assertTrue(patched.contains("<version>${a.version}</version>"), patched);
+    }
+
+    @Test
+    void cornerCasesInDeclarationsAndRedkitePins() throws Exception {
+        String pom = """
+                <project>
+                  <dependencyManagement><dependencies>
+                    <!-- redkite:dependency-management pin groupId="g" artifactId="pinned" version="1" -->
+                    <dependency><groupId>g</groupId><artifactId>pinned</artifactId><version>1</version></dependency>
+                    <!-- redkite:dependency-management pin groupId="g" artifactId="versionless" -->
+                    <dependency><groupId>g</groupId><artifactId>versionless</artifactId></dependency>
+                    <!-- redkite:dependency-management pin artifactId="no-group" -->
+                    <dependency><artifactId>no-group</artifactId><version>1</version></dependency>
+                  </dependencies></dependencyManagement>
+                  <dependencies>
+                    <dependency><groupId>g</groupId><artifactId>blank</artifactId><version> </version></dependency>
+                    <dependency><groupId>g</groupId><artifactId>managed</artifactId></dependency>
+                    <dependency><groupId>g</groupId><artifactId>prop</artifactId><version>${inherited.version}</version></dependency>
+                  </dependencies>
+                </project>
+                """;
+        Map<String, String> updates = new java.util.LinkedHashMap<>();
+        updates.put("g:pinned", "1");
+        updates.put("g:versionless", "2");
+        updates.put("g:blank", "3");
+        updates.put("g:managed", "4");
+        String patched = PomPatcher.patchPomXml(pom, updates, Set.of("g:prop"), Set.of("g:managed"));
+        assertTrue(patched.contains("<artifactId>pinned</artifactId>\n        <version>1</version>"), "an unchanged pin is left as is: " + patched);
+        assertTrue(patched.contains("<artifactId>versionless</artifactId>\n      </dependency>"), patched);
+        assertTrue(patched.contains("<artifactId>blank</artifactId>\n      <version/>"), "a blank version is left alone: " + patched);
+        assertTrue(patched.contains("<managed.version>4</managed.version>"), "an unpinned managed dependency still gets a property: " + patched);
+        assertFalse(patched.contains("redkite:user-pin version=\"4\""), patched);
+        assertFalse(patched.contains("redkite:user-pin"), "a property this POM doesn't declare has nothing to mark: " + patched);
+        assertTrue(patched.contains("<version>${inherited.version}</version>"), patched);
+    }
 }

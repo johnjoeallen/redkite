@@ -149,6 +149,53 @@ class EnforcerDetectorTest {
         assertEquals(EnforcerDetector.DetectionResult.CONFIGURED_WITH_CONVERGENCE_RULES, detector.detect(tempDir));
     }
 
+    @Test
+    void onlyTheApacheEnforcerPluginCounts() throws IOException {
+        writePom(tempDir, """
+                <project><build><plugins>
+                  <!-- a comment -->
+                  <extension><artifactId>maven-enforcer-plugin</artifactId></extension>
+                  <plugin><groupId>com.other</groupId><artifactId>maven-enforcer-plugin</artifactId></plugin>
+                </plugins></build></project>
+                """);
+        assertEquals(EnforcerDetector.DetectionResult.NOT_CONFIGURED, detector.detect(tempDir));
+        writePom(tempDir, "<project><artifactId>no-build</artifactId></project>");
+        assertEquals(EnforcerDetector.DetectionResult.NOT_CONFIGURED, detector.detect(tempDir));
+    }
+
+    @Test
+    void rulesMayBeListedDirectlyUnderConfigurationOrInALaterExecution() throws IOException {
+        writePom(tempDir, """
+                <project><build><plugins>
+                  <plugin><groupId> </groupId><artifactId>maven-enforcer-plugin</artifactId>
+                    <configuration><dependencyConvergence/></configuration>
+                  </plugin>
+                </plugins></build></project>
+                """);
+        assertEquals(EnforcerDetector.DetectionResult.CONFIGURED_WITH_CONVERGENCE_RULES, detector.detect(tempDir));
+
+        writePom(tempDir, """
+                <project><build>
+                  <plugins><plugin><artifactId>maven-enforcer-plugin</artifactId>
+                    <executions>
+                      <!-- first execution has no rules -->
+                      <execution><id>a</id></execution>
+                      <execution><id>b</id><configuration><rules><!-- x --><requireJavaVersion/><RequireUpperBoundDeps/></rules></configuration></execution>
+                    </executions>
+                  </plugin></plugins>
+                </build></project>
+                """);
+        assertEquals(EnforcerDetector.DetectionResult.CONFIGURED_WITH_CONVERGENCE_RULES, detector.detect(tempDir));
+
+        writePom(tempDir, """
+                <project><build><plugins>
+                  <plugin><artifactId>other-plugin</artifactId></plugin>
+                  <plugin><artifactId>maven-enforcer-plugin</artifactId></plugin>
+                </plugins></build></project>
+                """);
+        assertEquals(EnforcerDetector.DetectionResult.CONFIGURED_NO_CONVERGENCE_RULES, detector.detect(tempDir));
+    }
+
     private static void writePom(Path dir, String content) throws IOException {
         Files.writeString(dir.resolve("pom.xml"), content);
     }

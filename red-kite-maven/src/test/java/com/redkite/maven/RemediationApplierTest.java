@@ -2,6 +2,9 @@ package com.redkite.maven;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class RemediationApplierTest {
@@ -553,5 +556,240 @@ class RemediationApplierTest {
             idx += pattern.length();
         }
         return count;
+    }
+
+    // ---------------------------------------------------------------- marker bookkeeping
+
+    private static final String POM_WITH_MARKERS = """
+            <project>
+              <!-- redkite:pin-summary 3 redkite pin(s) (2 user pinned) -->
+              <properties>
+                <!-- redkite:user-pin version="1.0" — user pinned -->
+                <shared.version>1.0</shared.version>
+                <free.version>2.0</free.version>
+              </properties>
+              <dependencyManagement>
+                <dependencies>
+                  <!-- redkite:dependency-management pin groupId="g" artifactId="managed" version="3.0" reason="r" -->
+                  <dependency><groupId>g</groupId><artifactId>managed</artifactId><version>3.0</version></dependency>
+                  <!-- redkite:dependency-management groupId="g" artifactId="legacy" version="4.0" -->
+                  <dependency><groupId>g</groupId><artifactId>legacy</artifactId><version>4.0</version></dependency>
+                  <!-- redkite:user-pin groupId="g" artifactId="userpinned" version="5.0" -->
+                  <dependency><groupId>g</groupId><artifactId>userpinned</artifactId><version>5.0</version></dependency>
+                  <!-- redkite:ignore groupId="g" artifactId="ignored" -->
+                  <dependency><groupId>g</groupId><artifactId>ignored</artifactId><version>6.0</version></dependency>
+                  <dependency><groupId>g</groupId><artifactId>plain</artifactId><version>7.0</version></dependency>
+                  <dependency><groupId>g</groupId><artifactId>noversion</artifactId></dependency>
+                </dependencies>
+              </dependencyManagement>
+              <dependencies>
+                <dependency>
+                  <groupId>g</groupId><artifactId>shared-a</artifactId><version>${shared.version}</version>
+                  <exclusions>
+                    <!-- redkite:exclusion groupId="x" artifactId="y" reason="r" -->
+                    <exclusion><groupId>x</groupId><artifactId>y</artifactId></exclusion>
+                  </exclusions>
+                </dependency>
+                <dependency>
+                  <groupId>g</groupId><artifactId>free</artifactId><version>${free.version}</version>
+                  <exclusions>
+                    <!-- redkite:exclusion groupId="x" artifactId="z" reason="r" -->
+                    <exclusion><groupId>x</groupId><artifactId>z</artifactId></exclusion>
+                    <exclusion><groupId>keep</groupId><artifactId>me</artifactId></exclusion>
+                  </exclusions>
+                </dependency>
+                <dependency><groupId>g</groupId><artifactId>literal</artifactId><version>1.0</version></dependency>
+                <!-- redkite:exclusion groupId="dangling" artifactId="marker" -->
+              </dependencies>
+              <build><plugins>
+                <plugin><artifactId>maven-shared-plugin</artifactId><version>${shared.version}</version></plugin>
+                <plugin><groupId>org.example</groupId><artifactId>other-plugin</artifactId><version>${shared.version}</version></plugin>
+                <plugin><artifactId>unversioned-plugin</artifactId></plugin>
+              </plugins></build>
+            </project>
+            """;
+
+    @Test
+    void userPinnedCoordinatesIncludeEverythingSharingAPinnedProperty() {
+        assertEquals(Set.of("g:userpinned", "g:shared-a", "org.apache.maven.plugins:maven-shared-plugin", "org.example:other-plugin"),
+                applier.findUserPinnedCoordinates(POM_WITH_MARKERS));
+    }
+
+    @Test
+    void removingAPropertyLevelUserPinKeepsTheValue() {
+        String result = applier.removeUserPin(POM_WITH_MARKERS, "g", "shared-a");
+        assertFalse(result.contains("redkite:user-pin version="), result);
+        assertTrue(result.contains("<shared.version>1.0</shared.version>"), result);
+        assertTrue(result.contains("redkite:user-pin groupId=\"g\" artifactId=\"userpinned\""), "other pins stay");
+
+        assertSame(POM_WITH_MARKERS, applier.removeUserPin(POM_WITH_MARKERS, "g", "literal"), "a literal version has no property pin");
+        assertSame(POM_WITH_MARKERS, applier.removeUserPin(POM_WITH_MARKERS, "g", "free"), "an unpinned property is left alone");
+        assertSame(POM_WITH_MARKERS, applier.removeUserPin(POM_WITH_MARKERS, "g", "absent"));
+    }
+
+    @Test
+    void stripRemovesEveryRedkiteMarkerButKeepsProjectContent() {
+        String stripped = applier.stripRedkiteRemediations(POM_WITH_MARKERS);
+        assertFalse(stripped.contains("redkite:"), stripped);
+        for (String gone : List.of("managed", "legacy", "userpinned", "ignored"))
+            assertFalse(stripped.contains("<artifactId>" + gone + "</artifactId>"), gone + " should be gone: " + stripped);
+        assertTrue(stripped.contains("<artifactId>plain</artifactId>"), stripped);
+        assertTrue(stripped.contains("<shared.version>1.0</shared.version>"), stripped);
+        assertFalse(stripped.contains("<artifactId>y</artifactId>"), stripped);
+        assertTrue(stripped.contains("<artifactId>me</artifactId>"), "a hand-written exclusion stays: " + stripped);
+        assertEquals(1, stripped.split("<exclusions>", -1).length - 1, "the emptied <exclusions> wrapper is removed: " + stripped);
+    }
+
+    @Test
+    void dependencyManagementCanBeListedAndStripped() {
+        assertEquals(List.of("g:managed:3.0", "g:legacy:4.0", "g:userpinned:5.0", "g:ignored:6.0", "g:plain:7.0"),
+                applier.extractDepMgmtEntries(POM_WITH_MARKERS));
+        String stripped = applier.stripAllDepManagement(POM_WITH_MARKERS);
+        assertFalse(stripped.contains("dependencyManagement"), stripped);
+        assertTrue(stripped.contains("<artifactId>shared-a</artifactId>"), stripped);
+    }
+
+    @Test
+    void exclusionAndPinCounts() {
+        assertEquals(3, applier.countRedkiteExclusions(POM_WITH_MARKERS));
+        assertEquals(0, applier.countRedkiteExclusions("<project/>"));
+        assertEquals(List.of("x:y", "x:z", "dangling:marker"), applier.parseRedkiteExclusions(POM_WITH_MARKERS));
+        assertEquals(List.of(), applier.parseRedkiteExclusions("<!-- redkite:exclusion groupId=\"only\" -->"));
+        // managed + legacy computed pins, one dependency user pin, one property user pin; "ignore" is not a pin.
+        assertEquals(new RemediationApplier.PinCounts(4, 2), applier.countPins(POM_WITH_MARKERS));
+    }
+
+    @Test
+    void pinSummaryIsReplacedRatherThanDuplicated() {
+        String once = applier.applyPinSummaryComment(POM_WITH_MARKERS, new RemediationApplier.PinCounts(4, 2), null);
+        assertTrue(once.contains("<!-- redkite:pin-summary 4 redkite pin(s) (2 user pinned) -->"), once);
+        assertEquals(1, once.split("redkite:pin-summary", -1).length - 1, once);
+
+        String project = applier.applyPinSummaryComment(once, new RemediationApplier.PinCounts(4, 2), new RemediationApplier.PinCounts(9, 3));
+        assertTrue(project.contains("<!-- redkite:pin-summary project: 9 redkite pin(s) (3 user pinned) — this file: 4 redkite pin(s) (2 user pinned) -->"), project);
+        assertEquals(1, project.split("redkite:pin-summary", -1).length - 1, project);
+
+        assertTrue(applier.applyPinSummaryComment("<project/>", new RemediationApplier.PinCounts(0, 0), null)
+                .contains("<project>\n  <!-- redkite:pin-summary 0 redkite pin(s) (0 user pinned) -->"));
+    }
+
+    @Test
+    void pinReasonIsEscapedInsideTheMarker() {
+        String result = applier.applyDependencyManagementPin(POM_WITH_DEPENDENCIES, "g", "new", "1.0", "a \"quoted\" & <odd> reason");
+        assertTrue(result.contains("reason=\"a &quot;quoted&quot; &amp; &lt;odd> reason\""), result);
+    }
+
+    @Test
+    void treeAnnotationsAreStrippedFromVersions() {
+        assertEquals("1.0", RemediationApplier.sanitizeVersion("1.0 (managed) <-- 0.9"));
+        assertEquals("1.0", RemediationApplier.sanitizeVersion("1.0"));
+        assertEquals("", RemediationApplier.sanitizeVersion(null));
+        assertEquals(" 1.0", RemediationApplier.sanitizeVersion(" 1.0"));
+    }
+
+    private static final String POM_WITH_ODD_MARKERS = """
+            <project>
+              <!-- an ordinary comment -->
+              <properties>
+                <used.version>1.0</used.version>
+                <!-- redkite:user-pin version="1.0" — dangling, nothing follows it -->
+              </properties>
+              <dependencyManagement><dependencies>
+                <!-- redkite:dependency-management pin groupId="g" artifactId="x" -->
+                <exclusion/>
+                <dependency><artifactId>no-group</artifactId><version>1</version></dependency>
+                <dependency><groupId>g</groupId><version>1</version></dependency>
+              </dependencies></dependencyManagement>
+              <dependencies>
+                <dependency><artifactId>no-group</artifactId><version>${used.version}</version></dependency>
+                <dependency><groupId>g</groupId><artifactId>no-version</artifactId></dependency>
+                <dependency><groupId>g</groupId><artifactId>undeclared</artifactId><version>${missing.version}</version></dependency>
+                <dependency><groupId>g</groupId><artifactId>d</artifactId><version>1</version>
+                  <exclusions>
+                    <!-- redkite:exclusion groupId="x" artifactId="" -->
+                    <dependency/>
+                  </exclusions>
+                </dependency>
+              </dependencies>
+              <build><plugins>
+                <plugin><artifactId>versionless</artifactId></plugin>
+                <plugin><groupId> </groupId><artifactId>blank-group</artifactId><version>${used.version}</version></plugin>
+                <plugin><groupId>g</groupId><version>${used.version}</version></plugin>
+              </plugins></build>
+            </project>
+            """;
+
+    @Test
+    void oddlyShapedMarkersAndDeclarationsAreTolerated() {
+        assertEquals(Set.of(), applier.findUserPinnedCoordinates(POM_WITH_ODD_MARKERS), "a pin marker with nothing after it pins nothing");
+        assertSame(POM_WITH_ODD_MARKERS, applier.removeUserPin(POM_WITH_ODD_MARKERS, "g", "no-version"));
+        assertSame(POM_WITH_ODD_MARKERS, applier.removeUserPin(POM_WITH_ODD_MARKERS, "g", "undeclared"));
+        assertEquals(List.of(), applier.extractDepMgmtEntries(POM_WITH_ODD_MARKERS));
+        assertEquals(List.of(), applier.parseRedkiteExclusions(POM_WITH_ODD_MARKERS), "an empty artifactId is not a coordinate");
+
+        String stripped = applier.stripRedkiteRemediations(POM_WITH_ODD_MARKERS);
+        assertFalse(stripped.contains("redkite:"), stripped);
+        assertTrue(stripped.contains("<exclusion/>"), "a marker above the wrong element only loses the marker: " + stripped);
+        assertTrue(stripped.contains("<exclusions>"), stripped);
+        assertTrue(stripped.contains("<!-- an ordinary comment -->"), stripped);
+
+        String summary = applier.applyPinSummaryComment(POM_WITH_ODD_MARKERS, new RemediationApplier.PinCounts(1, 1), null);
+        assertTrue(summary.contains("<project>\n  <!-- redkite:pin-summary 1 redkite pin(s) (1 user pinned) -->\n  <!-- an ordinary comment -->"), summary);
+    }
+
+    @Test
+    void userPinOnAPropertyManagedEntryMarksAndUpdatesTheProperty() {
+        String pom = "<project><properties><p.version>1</p.version></properties><dependencyManagement><dependencies>"
+                + "<dependency><groupId>g</groupId><artifactId>a</artifactId><version>${p.version}</version></dependency>"
+                + "</dependencies></dependencyManagement></project>";
+        String pinned = applier.applyDependencyManagementPin(pom, "g", "a", "2", null, RemediationApplier.PinKind.USER);
+        assertTrue(pinned.contains("redkite:user-pin version=\"2\""), pinned);
+        assertTrue(pinned.contains("<p.version>2</p.version>"), pinned);
+
+        String repinned = applier.applyDependencyManagementPin(pinned, "g", "a", "3", "again", RemediationApplier.PinKind.USER);
+        assertTrue(repinned.contains("redkite:user-pin version=\"3\""), repinned);
+        assertEquals(1, repinned.split("redkite:user-pin", -1).length - 1, repinned);
+
+        String same = applier.applyDependencyManagementPin(repinned, "g", "a", "3", null, RemediationApplier.PinKind.USER);
+        assertTrue(same.contains("<p.version>3</p.version>"), same);
+
+        String inherited = pom.replace("<properties><p.version>1</p.version></properties>", "");
+        assertSame(inherited, applier.applyDependencyManagementPin(inherited, "g", "a", "2", null, RemediationApplier.PinKind.USER),
+                "a property this POM doesn't define is left alone");
+    }
+
+    @Test
+    void pinningIntoAnEmptyDependencyManagementReusesIt() {
+        String result = applier.applyDependencyManagementPin("<project><dependencyManagement/></project>", "g", "a", "1.0", "r");
+        assertEquals(1, result.split("<dependencyManagement", -1).length - 1, "a second block would be a duplicate tag: " + result);
+        assertTrue(result.contains("<artifactId>a</artifactId>"), result);
+    }
+
+    @Test
+    void aPropertyManagedPinCollapsesDuplicateEntriesElsewhere() {
+        String pom = "<project><properties><p.version>1</p.version></properties>"
+                + "<dependencyManagement><dependencies>"
+                + "<dependency><groupId>g</groupId><artifactId>a</artifactId><version>${p.version}</version></dependency>"
+                + "</dependencies></dependencyManagement>"
+                + "<profiles><profile><id>x</id><dependencyManagement><dependencies>"
+                + "<!-- stray -->"
+                + "<dependency><groupId>g</groupId><artifactId>a</artifactId><version>0.9</version></dependency>"
+                + "<dependency><groupId>g</groupId><artifactId>other</artifactId><version>0.9</version></dependency>"
+                + "</dependencies></dependencyManagement></profile></profiles></project>";
+        String result = applier.applyDependencyManagementPin(pom, "g", "a", "2", "r");
+        assertTrue(result.contains("<p.version>2</p.version>"), result);
+        assertEquals(1, result.split("<artifactId>a</artifactId>", -1).length - 1, result);
+        assertFalse(result.contains("stray"), "the duplicate's own comment goes with it: " + result);
+        assertTrue(result.contains("<artifactId>other</artifactId>"), result);
+    }
+
+    @Test
+    void aCommentOnlyMarkerBecomesARealPin() {
+        String pom = "<project><dependencyManagement><dependencies>"
+                + "<!-- redkite:ignore groupId=\"g\" artifactId=\"a\" -->"
+                + "</dependencies></dependencyManagement></project>";
+        String result = applier.applyDependencyManagementPin(pom, "g", "a", "1.5", "r");
+        assertTrue(result.contains("redkite:dependency-management pin groupId=\"g\" artifactId=\"a\" version=\"1.5\""), result);
+        assertTrue(result.contains("<artifactId>a</artifactId>\n        <version>1.5</version>"), result);
     }
 }
