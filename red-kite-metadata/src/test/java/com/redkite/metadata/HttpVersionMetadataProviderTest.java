@@ -444,11 +444,21 @@ class HttpVersionMetadataProviderTest {
 
     @Test
     void stableVersionPattern() {
-        for (String v : List.of("1.0", "1.2.3", "1.2.3.4", "5.6.15.Final", "5.3.1.RELEASE", "1.0-GA", "2.1.SP2", "3.0.SR1", " 1.0 "))
+        for (String v : List.of("1.0", "1.2.3", "1.2.3.4", "5.6.15.Final", "5.3.1.RELEASE", "1.0-GA", "2.1.SP2", "3.0.SR1", " 1.0 ", "33.7.2-jre", "33.4.8-android"))
             assertTrue(HttpVersionMetadataProvider.isStableVersion(v), v);
         for (String v : List.of("1", "1.0-SNAPSHOT", "2.0.0-RC1", "1.2.3.4.5", "", "  "))
             assertFalse(HttpVersionMetadataProvider.isStableVersion(v), v);
         assertFalse(HttpVersionMetadataProvider.isStableVersion(null));
+    }
+
+    @Test
+    void sameFlavorKeepsGuavaJreAndAndroidApart() {
+        List<String> versions = List.of("23.0", "33.4.8-jre", "33.4.8-android", "33.5.0-jre", "33.5.0-android");
+        assertEquals(List.of("33.4.8-jre", "33.5.0-jre"), HttpVersionMetadataProvider.sameFlavor(versions, "33.4.0-jre"));
+        assertEquals(List.of("33.4.8-android", "33.5.0-android"), HttpVersionMetadataProvider.sameFlavor(versions, "33.4.0-android"));
+        assertEquals(versions, HttpVersionMetadataProvider.sameFlavor(versions, "23.0"));
+        assertEquals(versions, HttpVersionMetadataProvider.sameFlavor(versions, null));
+        assertEquals(List.of("23.0"), HttpVersionMetadataProvider.sameFlavor(List.of("23.0"), "33.4.0-jre"));
     }
 
     @Test

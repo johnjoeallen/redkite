@@ -338,12 +338,12 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                 .filter(HttpVersionMetadataProvider::isStableVersion)
                 .collect(java.util.stream.Collectors.toList());
         // Fall back to all if the library publishes only non-stable versions (edge case).
-        List<String> versionsForRec = stableVersions.isEmpty() ? allVersions : stableVersions;
+        List<String> versionsForRec = sameFlavor(stableVersions.isEmpty() ? allVersions : stableVersions, currentVersion);
         String latest = versionsForRec.stream().max(HttpVersionMetadataProvider::compareVersions).orElse(null);
         if (latest == null || latest.isBlank()) return null;
         String latestSameMajor = latestSameMajorVersion(versionsForRec, currentVersion, latest);
         // Dropdown retains all versions (including non-stable) for manual selection.
-        List<String> upgradePathVersions = upgradePathVersions(allVersions, currentVersion);
+        List<String> upgradePathVersions = upgradePathVersions(sameFlavor(allVersions, currentVersion), currentVersion);
         VersionMetadata metadata = new VersionMetadata(
                 coordinate, latest, latestSameMajor, upgradePathVersions,
                 !latest.contains("SNAPSHOT"), now, source, true, CacheState.FRESH, MetadataStatus.FRESH,
@@ -390,11 +390,30 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
     }
 
     // Matches plain numeric versions (1.2.3) plus well-known stable qualifiers
-    // (.Final, .RELEASE, .GA, .SPn, .SRn) used by Hibernate, Spring, JBoss etc.
+    // (.Final, .RELEASE, .GA, .SPn, .SRn) used by Hibernate, Spring, JBoss etc., and the
+    // -jre / -android flavor suffixes used by Guava.
     private static final java.util.regex.Pattern STABLE_VERSION_PATTERN =
             java.util.regex.Pattern.compile(
-                    "^\\d+(?:\\.\\d+){1,3}(?:[.\\-](?:Final|RELEASE|GA|SP\\d*|SR\\d*))?$",
+                    "^\\d+(?:\\.\\d+){1,3}(?:[.\\-](?:Final|RELEASE|GA|SP\\d*|SR\\d*|jre|android))?$",
                     java.util.regex.Pattern.CASE_INSENSITIVE);
+
+    /** Keeps only versions sharing the current version's -jre/-android flavor (all versions if it has none). */
+    static List<String> sameFlavor(List<String> versions, String currentVersion) {
+        String flavor = flavorOf(currentVersion);
+        if (flavor == null) {
+            return versions;
+        }
+        List<String> matching = versions.stream().filter(v -> flavor.equals(flavorOf(v))).toList();
+        return matching.isEmpty() ? versions : matching;
+    }
+
+    private static String flavorOf(String version) {
+        if (version == null) return null;
+        String v = version.trim().toLowerCase();
+        if (v.endsWith("-jre")) return "jre";
+        if (v.endsWith("-android")) return "android";
+        return null;
+    }
 
     static boolean isStableVersion(String version) {
         if (version == null || version.isBlank()) return false;
@@ -675,14 +694,14 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             List<String> stable = versions.stream()
                     .filter(HttpVersionMetadataProvider::isStableVersion)
                     .collect(java.util.stream.Collectors.toList());
-            List<String> forRec = stable.isEmpty() ? versions : stable;
+            List<String> forRec = sameFlavor(stable.isEmpty() ? versions : stable, currentVersion);
             String resolvedLatest = latestVersion == null || latestVersion.isBlank() ? "unknown" : latestVersion;
             String latestSameMajor = latestSameMajorVersion(forRec, currentVersion, resolvedLatest);
             return new VersionMetadata(
                     coordinate,
                     resolvedLatest,
                     latestSameMajor,
-                    upgradePathVersions(versions, currentVersion), // all versions for dropdown
+                    upgradePathVersions(sameFlavor(versions, currentVersion), currentVersion), // all versions for dropdown
                     !resolvedLatest.contains("SNAPSHOT"),
                     now,
                     source,
