@@ -695,7 +695,9 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
                     .filter(HttpVersionMetadataProvider::isStableVersion)
                     .collect(java.util.stream.Collectors.toList());
             List<String> forRec = sameFlavor(stable.isEmpty() ? versions : stable, currentVersion);
-            String resolvedLatest = latestVersion == null || latestVersion.isBlank() ? "unknown" : latestVersion;
+            // Recompute from the cached list so entries written by older filter rules self-heal.
+            String resolvedLatest = forRec.stream().max(HttpVersionMetadataProvider::compareVersions)
+                    .orElse(latestVersion == null || latestVersion.isBlank() ? "unknown" : latestVersion);
             String latestSameMajor = latestSameMajorVersion(forRec, currentVersion, resolvedLatest);
             return new VersionMetadata(
                     coordinate,
@@ -741,7 +743,10 @@ public class HttpVersionMetadataProvider implements VersionMetadataProvider {
             return List.of(VersionToken.zero());
         }
         List<VersionToken> tokens = new ArrayList<>();
-        for (String part : version.trim().replace('_', '.').split("[.-]")) {
+        // -jre/-android are build flavors of the same release, not pre-release qualifiers:
+        // 33.7.2-jre must compare equal to the 33.7.2 an advisory names as its fix.
+        String base = version.trim().replaceFirst("(?i)-(jre|android)$", "");
+        for (String part : base.replace('_', '.').split("[.-]")) {
             if (part.isBlank()) {
                 continue;
             }

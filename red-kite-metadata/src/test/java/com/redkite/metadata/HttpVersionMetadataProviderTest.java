@@ -452,6 +452,13 @@ class HttpVersionMetadataProviderTest {
     }
 
     @Test
+    void flavorSuffixDoesNotAffectOrdering() {
+        assertEquals(0, HttpVersionMetadataProvider.compareVersions("33.7.2-jre", "33.7.2"));
+        assertTrue(HttpVersionMetadataProvider.compareVersions("33.7.2-jre", "33.7.1") > 0);
+        assertTrue(HttpVersionMetadataProvider.compareVersions("33.7.1-android", "33.7.2-jre") < 0);
+    }
+
+    @Test
     void sameFlavorKeepsGuavaJreAndAndroidApart() {
         List<String> versions = List.of("23.0", "33.4.8-jre", "33.4.8-android", "33.5.0-jre", "33.5.0-android");
         assertEquals(List.of("33.4.8-jre", "33.5.0-jre"), HttpVersionMetadataProvider.sameFlavor(versions, "33.4.0-jre"));
