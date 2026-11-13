@@ -7,10 +7,6 @@ import com.redkite.core.domain.ScanReport;
 import com.redkite.core.domain.UpgradeRecommendation;
 import com.redkite.core.domain.VulnerabilityFinding;
 import com.redkite.core.service.AdvisoryClassifier;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -18,16 +14,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Plain-text rendering of a scan, written to a file and echoed to the build log. */
+/** Plain-text rendering of a scan, printed to the build log. */
 final class TextReport {
-    static final String FILE_NAME = "redkite-report.txt";
-
     private TextReport() {}
-
-    static void write(Path dir, String text) throws IOException {
-        Files.createDirectories(dir);
-        Files.writeString(dir.resolve(FILE_NAME), text, StandardCharsets.UTF_8);
-    }
 
     static String render(ScanReport report) {
         List<String> out = new ArrayList<>();

@@ -9,14 +9,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/** Writes the machine-readable companion to the HTML report. */
+/** Writes the machine-readable JSON report. */
 final class ReportWriter {
     private ReportWriter() {}
-
-    static void writeHtml(Path dir, String html) throws IOException {
-        Files.createDirectories(dir);
-        Files.writeString(dir.resolve("redkite-report.html"), html, StandardCharsets.UTF_8);
-    }
 
     static void writeJson(Path dir, ScanReport report) throws IOException {
         Files.createDirectories(dir);

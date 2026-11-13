@@ -20,7 +20,7 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.skip", defaultValue = "false")
     boolean skip;
 
-    /** Directory the HTML and JSON reports are written to. */
+    /** Directory the JSON report is written to. */
     @Parameter(property = "redkite.outputDirectory", defaultValue = "${project.build.directory}/redkite")
     File outputDirectory;
 
@@ -37,7 +37,7 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.allowMajorUpgrades", defaultValue = "false")
     boolean allowMajorUpgrades;
 
-    /** Echo the text report to the build log (it is always written to <code>redkite-report.txt</code>). */
+    /** Print the text report to the build log. */
     @Parameter(property = "redkite.consoleReport", defaultValue = "true")
     boolean consoleReport;
 
@@ -62,15 +62,12 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
             result = ReportExporter.analyse(root, url, enforcer, allowMajorUpgrades,
                     msg -> getLog().debug(msg), line -> getLog().debug(line));
             Path out = outputDirectory.toPath();
-            ReportWriter.writeHtml(out, result.html());
             ReportWriter.writeJson(out, result.report());
             String text = TextReport.render(result.report());
-            TextReport.write(out, text);
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }
-            getLog().info("RedKite report written to " + out.resolve("redkite-report.html")
-                    + " (also " + TextReport.FILE_NAME + ", redkite-report.json)");
+            getLog().info("RedKite JSON report written to " + out.resolve("redkite-report.json"));
         } catch (IOException | RuntimeException e) {
             throw new MojoExecutionException("RedKite analysis failed: " + e.getMessage(), e);
         } finally {

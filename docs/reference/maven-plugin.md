@@ -1,6 +1,6 @@
 # Maven Plugin
 
-The `red-kite-maven-plugin` runs the same analysis as the RedKite server as part of a Maven build and writes a static report.
+The `red-kite-maven-plugin` runs the same analysis as the RedKite server as part of a Maven build and prints a text report and writes a JSON one.
 
 It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 database. The plugin keeps its own database at `~/.redkite/plugin/redkite`, shared by all projects so version and vulnerability lookups are cached between builds. It is separate from the server's database, so the plugin and server can run at the same time, and parallel builds share it through H2's `AUTO_SERVER` mode. Use `-Dredkite.db.url=...` to put it elsewhere.
 
@@ -43,7 +43,7 @@ Requirements: Java 17+, Maven 3.9+ on `PATH`, and network access to Maven Centra
     mvn redkite:report
     ```
 
-4. **Open the report**: `target/redkite/redkite-report.html` (and `redkite-report.json` for tooling).
+4. **Read the report** in the build output. `target/redkite/redkite-report.json` is also written for tooling.
 
 Without the settings change, use the full coordinates instead:
 
@@ -91,20 +91,17 @@ Then run `mvn verify -Predkite`. Profiles in `settings.xml` cannot bind plugins,
 
 ## Output
 
-Written to `target/redkite/` (`outputDirectory`):
-
-- `redkite-report.html` — the RedKite analysis page, self-contained and read-only (no Analyse or Apply controls).
-- `redkite-report.txt` — a plain-text summary (counts, vulnerabilities worst first with fixed versions, SNAPSHOT dependencies, recommended upgrades). It is also printed to the build log unless `consoleReport` is `false`.
-- `redkite-report.json` — components, vulnerabilities and recommendations for CI tooling.
+- **Build log:** a plain-text report (counts, vulnerabilities worst first with fixed versions, SNAPSHOT dependencies, recommended upgrades) is printed unless `consoleReport` is `false`. Nothing else is written for text.
+- **`target/redkite/redkite-report.json`** (`outputDirectory`): components, vulnerabilities and recommendations for CI tooling.
 
 ## Parameters
 
 | Parameter | Property | Default | Goals | Description |
 | --- | --- | --- | --- | --- |
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
-| `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where reports are written. |
+| `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written. |
 | `databaseUrl` | `redkite.db.url` | `~/.redkite/plugin/redkite` (H2, `AUTO_SERVER`) | both | H2 database for the cache and scan history. |
-| `consoleReport` | `redkite.consoleReport` | `true` | both | Echo the text report to the build log. It is always written to `redkite-report.txt`. |
+| `consoleReport` | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
 | `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Fail on any vulnerability at or above `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`; `NONE` disables. |

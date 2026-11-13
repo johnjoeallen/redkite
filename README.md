@@ -94,7 +94,7 @@ mvn install -DskipTests -pl red-kite-maven-plugin -am   # once, from a RedKite c
 mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report   # in the project to analyse
 ```
 
-The report is written to `target/redkite/`. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
+The report is printed to the build log, and a JSON copy is written to `target/redkite/`. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
 
 ## Configuration
 

@@ -11,13 +11,13 @@ import java.util.function.Consumer;
 /**
  * Headless entry point used by the RedKite Maven plugin: runs the same analysis as the server
  * (dependency scan, Maven Central metadata, OSV vulnerabilities, licenses, recommendations),
- * records it in the local H2 database, and renders the same analysis page as a static report.
+ * and records it in the local H2 database.
  */
 public final class ReportExporter {
     private ReportExporter() {}
 
     /** The outcome of one headless analysis. */
-    public record Result(String scanId, ScanReport report, String html) {}
+    public record Result(String scanId, ScanReport report) {}
 
     /** The default local database URL: a plugin-only database shared by all projects, kept apart from
      *  the server's {@code ~/.redkite/redkite} so the two never contend for the file lock. AUTO_SERVER
@@ -50,12 +50,6 @@ public final class ReportExporter {
             new EnforcerAnalysis(store).runEnforcerCheck(root, report.scanId(), progress,
                     mavenOutput != null ? mavenOutput : line -> {});
         }
-        Path prefs = Path.of(System.getProperty("user.home"), ".redkite", "preferences.properties");
-        Pages pages = new Pages(prefs);
-        PageHandlers handlers = new PageHandlers(store, pages,
-                new ScanPageRenderer(store, new ComponentCardRenderer(store.vulnerabilityProvider)),
-                new EnforcerSectionRenderer(store, new EnforcerAnalysis(store)),
-                new LogModalRenderer(store, new EnforcerAnalysis(store)));
-        return new Result(report.scanId(), report, handlers.renderScanPage(report.scanId(), false));
+        return new Result(report.scanId(), report);
     }
 }
