@@ -1,6 +1,6 @@
 # Maven Plugin
 
-The `red-kite-maven-plugin` runs the same analysis as the RedKite server as part of a Maven build and prints a text report and writes a JSON one.
+The `red-kite-maven-plugin` runs the same analysis as the RedKite server from the command line, without the server. It prints a text report to the build log and writes a JSON copy. It is run by hand when you want it; nothing runs unless you invoke it or bind it in your POM.
 
 It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 database. The plugin keeps its own database at `~/.redkite/plugin/redkite`, shared by all projects so version and vulnerability lookups are cached between builds. It is separate from the server's database, so the plugin and server can run at the same time, and parallel builds share it through H2's `AUTO_SERVER` mode. Use `-Dredkite.db.url=...` to put it elsewhere.
 
@@ -8,7 +8,7 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 
 | Goal | Default phase | Purpose |
 | --- | --- | --- |
-| `redkite:report` | none | Analyse and write the report. Never fails the build. |
+| `redkite:report` | none | Analyse, print the report and write the JSON copy. Never fails the build. |
 | `redkite:check` | `verify` | Print the report, then fail the build for vulnerabilities a developer can fix. |
 
 Both goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
@@ -61,7 +61,13 @@ mvn redkite:check -Dredkite.failOnSnapshot=true      # also fail on SNAPSHOT dep
 mvn redkite:report -Dredkite.enforcer=true           # include dependency-convergence analysis (slower)
 ```
 
-To run it as part of `mvn verify`, put it in an opt-in profile in the project POM:
+To run the check after a normal build without touching the POM, add the goal to the command line:
+
+```bash
+mvn verify redkite:check
+```
+
+To have `mvn verify` run it, put it in an opt-in profile in the project POM:
 
 ```xml
 <profile>
@@ -91,7 +97,7 @@ Then run `mvn verify -Predkite`. Profiles in `settings.xml` cannot bind plugins,
 
 ## When `check` fails the build
 
-`check` is meant to stay bound to every build, so it only fails for problems you can do something about. A dependency with a vulnerability at or above `failOnSeverity` fails the build when another version **on the same major line** (newer or older) has nothing at or above that severity. The message names the version to move to:
+`check` only fails for problems you can do something about, so it is safe to leave bound to every build. A dependency with a vulnerability at or above `failOnSeverity` fails the build when another version **on the same major line** (newer or older) has nothing at or above that severity. The message names the version to move to:
 
 ```
 [ERROR] RedKite: com.fasterxml.jackson.core:jackson-core:2.22.2 has High vulnerabilities (GHSA-7hhh-6rmp-j9qf); upgrade to 2.22.3 leaves nothing at or above High
@@ -103,7 +109,7 @@ If no such version exists, for example because the vulnerability has no fix yet,
 [WARNING] RedKite: org.springframework:spring-webmvc:6.2.19 has Critical vulnerabilities (...); no version on the same major line is below High, so this does not fail the build
 ```
 
-Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
+Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, up to six each side of the current version plus the latest release, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
 
 ## Output
 

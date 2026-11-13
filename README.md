@@ -92,9 +92,10 @@ RedKite can also produce its report as part of a Maven build, without running th
 ```bash
 mvn install -DskipTests -pl red-kite-maven-plugin -am   # once, from a RedKite checkout
 mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report   # in the project to analyse
+mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:check    # same, but fail on fixable vulnerabilities
 ```
 
-The report is printed to the build log, and a JSON copy is written to `target/redkite/`. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
+The report is printed to the build log, and a JSON copy is written to `target/redkite/`. `check` fails the build only for vulnerabilities that have a same-major fix below the threshold. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
 
 ## Configuration
 
