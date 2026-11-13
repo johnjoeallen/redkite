@@ -94,6 +94,7 @@ Then run `mvn verify -Predkite`. Profiles in `settings.xml` cannot bind plugins,
 Written to `target/redkite/` (`outputDirectory`):
 
 - `redkite-report.html` — the RedKite analysis page, self-contained and read-only (no Analyse or Apply controls).
+- `redkite-report.txt` — a plain-text summary (counts, vulnerabilities worst first with fixed versions, SNAPSHOT dependencies, recommended upgrades). It is also printed to the build log unless `consoleReport` is `false`.
 - `redkite-report.json` — components, vulnerabilities and recommendations for CI tooling.
 
 ## Parameters
@@ -103,6 +104,7 @@ Written to `target/redkite/` (`outputDirectory`):
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where reports are written. |
 | `databaseUrl` | `redkite.db.url` | `~/.redkite/plugin/redkite` (H2, `AUTO_SERVER`) | both | H2 database for the cache and scan history. |
+| `consoleReport` | `redkite.consoleReport` | `true` | both | Echo the text report to the build log. It is always written to `redkite-report.txt`. |
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
 | `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Fail on any vulnerability at or above `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`; `NONE` disables. |

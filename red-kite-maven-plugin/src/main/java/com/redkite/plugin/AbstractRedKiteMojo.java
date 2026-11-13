@@ -37,6 +37,10 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.allowMajorUpgrades", defaultValue = "false")
     boolean allowMajorUpgrades;
 
+    /** Echo the text report to the build log (it is always written to <code>redkite-report.txt</code>). */
+    @Parameter(property = "redkite.consoleReport", defaultValue = "true")
+    boolean consoleReport;
+
     abstract void execute(ReportExporter.Result result) throws MojoFailureException;
 
     @Override
@@ -60,7 +64,13 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
             Path out = outputDirectory.toPath();
             ReportWriter.writeHtml(out, result.html());
             ReportWriter.writeJson(out, result.report());
-            getLog().info("RedKite report written to " + out.resolve("redkite-report.html"));
+            String text = TextReport.render(result.report());
+            TextReport.write(out, text);
+            if (consoleReport) {
+                getLog().info(System.lineSeparator() + text);
+            }
+            getLog().info("RedKite report written to " + out.resolve("redkite-report.html")
+                    + " (also " + TextReport.FILE_NAME + ", redkite-report.json)");
         } catch (IOException | RuntimeException e) {
             throw new MojoExecutionException("RedKite analysis failed: " + e.getMessage(), e);
         } finally {

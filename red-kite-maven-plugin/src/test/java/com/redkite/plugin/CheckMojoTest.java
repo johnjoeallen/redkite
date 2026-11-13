@@ -50,4 +50,30 @@ class CheckMojoTest {
         assertTrue(json.contains("\"artifactId\": \"jackson-core\""));
         assertEquals("null", ReportWriter.str(null));
     }
+
+    @Test
+    void textReportListsSeveritiesWorstFirstAndFixes() {
+        ScanReport r = report(true, List.of(component(true)), List.of(vuln("LOW-1", "LOW"), vuln("CRIT-1", "CRITICAL")));
+        String text = TextReport.render(r);
+        assertTrue(text.contains("Vulnerabilities: 2 (1 critical, 1 low)"));
+        assertTrue(text.indexOf("CRIT-1") < text.indexOf("LOW-1"));
+        assertTrue(text.contains("fixed in 2.0.1"));
+        assertTrue(text.contains("com.fasterxml:jackson-core:2.0.0"), "the SNAPSHOT dependency is listed");
+    }
+
+    @Test
+    void textReportHandlesAnEmptyScan() {
+        String text = TextReport.render(report(false, List.of(), List.of()));
+        assertTrue(text.contains("INCOMPLETE"));
+        assertTrue(text.contains("Vulnerabilities: 0"));
+        assertTrue(text.contains("  none"));
+    }
+
+    @Test
+    void textReportListsRepeatedFindingsOnce() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("DUP-1", "HIGH"), vuln("DUP-1", "HIGH")));
+        String text = TextReport.render(r);
+        assertTrue(text.contains("Vulnerabilities: 1 (1 high)"));
+        assertEquals(1, text.split("DUP-1", -1).length - 1);
+    }
 }
