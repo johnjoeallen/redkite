@@ -9,7 +9,7 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 | Goal | Default phase | Purpose |
 | --- | --- | --- |
 | `redkite:report` | none | Analyse and write the report. Never fails the build. |
-| `redkite:check` | `verify` | Write the report, then fail the build if a threshold is crossed. |
+| `redkite:check` | `verify` | Print the report, then fail the build for vulnerabilities a developer can fix. |
 
 Both goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
 
@@ -55,7 +55,7 @@ mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report
 
 ```bash
 mvn redkite:report                                   # report only, never fails the build
-mvn redkite:check                                    # fails on HIGH or worse (the default)
+mvn redkite:check                                    # fails on fixable HIGH or worse (the default)
 mvn redkite:check -Dredkite.failOnSeverity=CRITICAL  # stricter or looser threshold
 mvn redkite:check -Dredkite.failOnSnapshot=true      # also fail on SNAPSHOT dependencies
 mvn redkite:report -Dredkite.enforcer=true           # include dependency-convergence analysis (slower)
@@ -89,6 +89,22 @@ To run it as part of `mvn verify`, put it in an opt-in profile in the project PO
 
 Then run `mvn verify -Predkite`. Profiles in `settings.xml` cannot bind plugins, so the profile has to live in the POM.
 
+## When `check` fails the build
+
+`check` is meant to stay bound to every build, so it only fails for problems you can do something about. A dependency with a vulnerability at or above `failOnSeverity` fails the build when another version **on the same major line** (newer or older) has nothing at or above that severity. The message names the version to move to:
+
+```
+[ERROR] RedKite: com.fasterxml.jackson.core:jackson-core:2.22.2 has High vulnerabilities (GHSA-7hhh-6rmp-j9qf); upgrade to 2.22.3 leaves nothing at or above High
+```
+
+If no such version exists, for example because the vulnerability has no fix yet, the finding is logged as a warning and the build passes:
+
+```
+[WARNING] RedKite: org.springframework:spring-webmvc:6.2.19 has Critical vulnerabilities (...); no version on the same major line is below High, so this does not fail the build
+```
+
+Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
+
 ## Output
 
 - **Build log:** a plain-text report (counts, vulnerabilities worst first with fixed versions, SNAPSHOT dependencies, recommended upgrades) is printed unless `consoleReport` is `false`. Nothing else is written for text.
@@ -104,7 +120,7 @@ Then run `mvn verify -Predkite`. Profiles in `settings.xml` cannot bind plugins,
 | `consoleReport` | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
-| `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Fail on any vulnerability at or above `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`; `NONE` disables. |
+| `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) at or above which a fixable vulnerability fails the build; `NONE` disables. |
 | `failOnSnapshot` | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `failOnIncomplete` | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
 

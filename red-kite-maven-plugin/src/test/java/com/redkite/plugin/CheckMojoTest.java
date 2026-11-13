@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.redkite.core.domain.*;
+import com.redkite.server.ReportExporter;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -26,20 +27,70 @@ class CheckMojoTest {
                 List.of(), List.of(), List.of(), List.of());
     }
 
+    private static ReportExporter.Remediation fix(String from, String to, AdvisorySeverity residual, boolean sameMajor) {
+        return new ReportExporter.Remediation("com.fasterxml", "jackson-core", from, to,
+                RecommendationReason.CVE_FIX, residual, sameMajor);
+    }
+
     @Test
-    void failsOnlyAtOrAboveThreshold() {
-        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "MEDIUM"), vuln("B", "HIGH")));
-        assertEquals(1, CheckMojo.evaluate(r, "HIGH", false, false).size());
-        assertEquals(2, CheckMojo.evaluate(r, "MEDIUM", false, false).size());
-        assertTrue(CheckMojo.evaluate(r, "CRITICAL", false, false).isEmpty());
-        assertTrue(CheckMojo.evaluate(r, "NONE", false, false).isEmpty());
+    void failsOnlyWhenASameMajorVersionIsBelowTheThreshold() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "HIGH")));
+        CheckMojo.Outcome ok = CheckMojo.evaluate(r, List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.NONE, true)), "HIGH", false, false);
+        assertEquals(1, ok.problems().size());
+        assertTrue(ok.problems().get(0).contains("upgrade to 2.0.1"));
+        assertTrue(ok.warnings().isEmpty());
+    }
+
+    @Test
+    void aDowngradeFixIsWordedAsADowngrade() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "HIGH")));
+        CheckMojo.Outcome o = CheckMojo.evaluate(r, List.of(fix("2.0.0", "1.9.0", AdvisorySeverity.NONE, true)), "HIGH", false, false);
+        assertTrue(o.problems().get(0).contains("downgrade to 1.9.0"));
+    }
+
+    @Test
+    void unfixableFindingsWarnButDoNotFail() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        // no remediation at all, a fix on another major, and a fix that still leaves HIGH
+        for (List<ReportExporter.Remediation> fixes : List.of(
+                List.<ReportExporter.Remediation>of(),
+                List.of(fix("2.0.0", "3.0.0", AdvisorySeverity.NONE, false)),
+                List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.HIGH, true)))) {
+            CheckMojo.Outcome o = CheckMojo.evaluate(r, fixes, "HIGH", false, false);
+            assertTrue(o.problems().isEmpty());
+            assertEquals(1, o.warnings().size());
+        }
+    }
+
+    @Test
+    void aResidualBelowTheThresholdCountsAsFixable() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        CheckMojo.Outcome o = CheckMojo.evaluate(r, List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.MEDIUM, true)), "HIGH", false, false);
+        assertEquals(1, o.problems().size());
+    }
+
+    @Test
+    void findingsBelowTheThresholdAreIgnoredAndNoneDisables() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "MEDIUM")));
+        List<ReportExporter.Remediation> fixes = List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.NONE, true));
+        assertTrue(CheckMojo.evaluate(r, fixes, "HIGH", false, false).problems().isEmpty());
+        ScanReport high = report(true, List.of(component(false)), List.of(vuln("B", "HIGH")));
+        assertTrue(CheckMojo.evaluate(high, fixes, "NONE", false, false).problems().isEmpty());
+    }
+
+    @Test
+    void severalAdvisoriesOnOneComponentGiveOneProblem() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "HIGH"), vuln("B", "CRITICAL"), vuln("A", "HIGH")));
+        CheckMojo.Outcome o = CheckMojo.evaluate(r, List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.NONE, true)), "HIGH", false, false);
+        assertEquals(1, o.problems().size());
+        assertTrue(o.problems().get(0).contains("Critical") && o.problems().get(0).contains("A, B"));
     }
 
     @Test
     void snapshotAndIncompleteChecksAreOptIn() {
         ScanReport r = report(false, List.of(component(true)), List.of());
-        assertTrue(CheckMojo.evaluate(r, "HIGH", false, false).isEmpty());
-        assertEquals(2, CheckMojo.evaluate(r, "HIGH", true, true).size());
+        assertTrue(CheckMojo.evaluate(r, List.of(), "HIGH", false, false).problems().isEmpty());
+        assertEquals(2, CheckMojo.evaluate(r, List.of(), "HIGH", true, true).problems().size());
     }
 
     @Test
