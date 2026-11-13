@@ -11,6 +11,7 @@
     <module>red-kite-maven</module>
     <module>red-kite-metadata</module>
     <module>red-kite-server</module>
+    <module>red-kite-maven-plugin</module>
   </modules>
   <properties>
     <java.version>17</java.version>

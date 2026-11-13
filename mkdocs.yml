@@ -137,6 +137,7 @@ nav:
   - Reference:
       - Overview: reference/index.md
       - Command Line: reference/command-line.md
+      - Maven Plugin: reference/maven-plugin.md
       - System Properties: reference/system-properties.md
       - Environment Variables: reference/environment-variables.md
       - Ports and Files: reference/ports-and-files.md
