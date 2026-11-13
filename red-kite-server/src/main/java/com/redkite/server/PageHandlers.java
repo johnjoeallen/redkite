@@ -253,80 +253,89 @@ final class PageHandlers {
         return body.toString();
     }
 
+    /** Renders the analysis page for a stored scan. {@code interactive=false} produces a static,
+     *  self-contained report (no Analyse/Clear-cache/Apply controls) suitable for writing to disk. */
+    String renderScanPage(String scanId, boolean interactive) {
+        ScanEntry scanEntry = store.getScan(scanId);
+        ScanReport report = scanEntry.report();
+        String projectPath = scanEntry.input().workingTreePath();
+        Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
+        Map<String, String> moduleArtifactIds = buildModuleArtifactIds(sourcePoms);
+        Map<Long, UpgradeRecommendation> recommendationsByComponent = new LinkedHashMap<>();
+        for (UpgradeRecommendation recommendation : report.recommendations()) {
+            if (!recommendation.affectedComponentIds().isEmpty()) {
+                recommendationsByComponent.put(recommendation.affectedComponentIds().get(0), recommendation);
+            } else {
+                recommendationsByComponent.put(recommendation.id(), recommendation);
+            }
+        }
+        Map<Long, List<MetadataResult>> metadataByComponent = new LinkedHashMap<>();
+        for (MetadataResult metadataResult : report.metadataResults()) {
+            metadataByComponent.computeIfAbsent(metadataResult.componentId(), key -> new ArrayList<>()).add(metadataResult);
+        }
+        Store.EnforcerResultEntry enforcerResult = store.getEnforcerResult(scanId);
+        ProjectEntry project = store.getProject(report.projectId());
+        String projectName = project != null ? project.name() : projectPath;
+        StringBuilder body = new StringBuilder();
+        body.append("<div class=\"page-grid\">");
+        body.append("<section class=\"card span-2\"><div class=\"headline\">");
+        java.time.format.DateTimeFormatter reportFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
+        body.append("<div>");
+        body.append("<p class=\"eyebrow\">").append(escape(reportFmt.format(report.createdAt()))).append("</p>");
+        if (project != null && interactive) {
+            body.append("<h1 style=\"font-size:1.5rem\"><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
+        } else {
+            body.append("<h1 style=\"font-size:1.5rem\">").append(escape(projectName)).append("</h1>");
+        }
+        body.append("</div>");
+        body.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");
+        body.append(report.complete() ? "<span class=\"badge success\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Complete</span>"
+                : isBuildFailed(report) ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Failed</span>"
+                : "<span class=\"badge warn\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Incomplete</span>");
+        body.append(enforcerBadge(enforcerResult));
+        if (interactive) {
+            body.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Analyse</button>");
+            body.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
+        }
+        body.append("</div>");
+        body.append("</div>");
+        body.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
+        body.append("</section>");
+        if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
+            body.append("<section class=\"card span-2\">");
+            body.append(enforcerSection.renderEnforcerSection(scanId, enforcerResult));
+            body.append("</section>");
+        }
+        body.append("<section class=\"card span-2\">");
+        body.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">License information</h2>");
+        String licenseBreakdown = scanPage.licenseBreakdownHtml(report);
+        body.append(licenseBreakdown.isEmpty() ? "<p class=\"muted\">No license data available.</p>" : licenseBreakdown);
+        body.append("</section>");
+        Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
+        if (enforcerResult != null) {
+            for (TransitiveConflictFinding f : enforcerResult.findings()) {
+                conflictsByKey.computeIfAbsent(f.groupId() + ":" + f.artifactId(), k -> new ArrayList<>()).add(f);
+            }
+        }
+        body.append("<script>const rk_scanPath=").append(jsonStr(projectPath)).append(";</script>");
+        body.append("<section class=\"card span-2\">");
+        body.append(scanPage.renderRemediationView(report, scanId, interactive && !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
+        body.append("</section>");
+        body.append("</div>");
+        body.append(logModal.renderLogModal(report, scanId, enforcerResult));
+        if (interactive) {
+            body.append(scanOverlayHtml());
+            body.append(applyOverlayHtml());
+        }
+        return pages.renderPage("scan", "Analysis",
+                "Dependency inventory and upgrade recommendations.", body.toString());
+    }
+
     void handleScans(HttpExchange exchange) throws IOException {
         URI uri = exchange.getRequestURI();
         String[] parts = uri.getPath().split("/");
         if (parts.length == 3) {
-            String scanId = parts[2];
-            ScanEntry scanEntry = store.getScan(scanId);
-            ScanReport report = scanEntry.report();
-            String projectPath = scanEntry.input().workingTreePath();
-            Map<String, String> sourcePoms = store.loadSourcePoms(scanId);
-            Map<String, String> moduleArtifactIds = buildModuleArtifactIds(sourcePoms);
-            Map<Long, UpgradeRecommendation> recommendationsByComponent = new LinkedHashMap<>();
-            for (UpgradeRecommendation recommendation : report.recommendations()) {
-                if (!recommendation.affectedComponentIds().isEmpty()) {
-                    recommendationsByComponent.put(recommendation.affectedComponentIds().get(0), recommendation);
-                } else {
-                    recommendationsByComponent.put(recommendation.id(), recommendation);
-                }
-            }
-            Map<Long, List<MetadataResult>> metadataByComponent = new LinkedHashMap<>();
-            for (MetadataResult metadataResult : report.metadataResults()) {
-                metadataByComponent.computeIfAbsent(metadataResult.componentId(), key -> new ArrayList<>()).add(metadataResult);
-            }
-            Store.EnforcerResultEntry enforcerResult = store.getEnforcerResult(scanId);
-            ProjectEntry project = store.getProject(report.projectId());
-            String projectName = project != null ? project.name() : projectPath;
-            StringBuilder body = new StringBuilder();
-            body.append("<div class=\"page-grid\">");
-            body.append("<section class=\"card span-2\"><div class=\"headline\">");
-            java.time.format.DateTimeFormatter reportFmt = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(java.time.ZoneId.systemDefault());
-            body.append("<div>");
-            body.append("<p class=\"eyebrow\">").append(escape(reportFmt.format(report.createdAt()))).append("</p>");
-            if (project != null) {
-                body.append("<h1 style=\"font-size:1.5rem\"><a href=\"/projects/").append(escape(project.id())).append("\" style=\"color:inherit;text-decoration:none\">").append(escape(projectName)).append("</a></h1>");
-            } else {
-                body.append("<h1 style=\"font-size:1.5rem\">").append(escape(projectName)).append("</h1>");
-            }
-            body.append("</div>");
-            body.append("<div style=\"display:flex;align-items:center;gap:10px;flex-wrap:wrap\">");
-            body.append(report.complete() ? "<span class=\"badge success\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Complete</span>"
-                    : isBuildFailed(report) ? "<span class=\"badge\" style=\"background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5;cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Failed</span>"
-                    : "<span class=\"badge warn\" style=\"cursor:pointer\" title=\"View analysis log\" onclick=\"document.getElementById('log-modal').style.display='flex'\">Incomplete</span>");
-            body.append(enforcerBadge(enforcerResult));
-            body.append("<button class=\"button\" type=\"button\" onclick=\"triggerScan(").append(escape(jsString(projectPath))).append(")\">Analyse</button>");
-            body.append("<button class=\"button\" type=\"button\" onclick=\"clearCache(this)\" title=\"Clear version metadata cache\">Clear cache</button>");
-            body.append("</div>");
-            body.append("</div>");
-            body.append("<div id=\"scan-error\" class=\"scan-error\" style=\"display:none;margin-top:12px\"></div>");
-            body.append("</section>");
-            if (enforcerResult != null && enforcerResult.status() != EnforcerStatus.ENFORCER_NOT_CONFIGURED) {
-                body.append("<section class=\"card span-2\">");
-                body.append(enforcerSection.renderEnforcerSection(scanId, enforcerResult));
-                body.append("</section>");
-            }
-            body.append("<section class=\"card span-2\">");
-            body.append("<h2 style=\"font-size:1rem;margin:0 0 12px\">License information</h2>");
-            String licenseBreakdown = scanPage.licenseBreakdownHtml(report);
-            body.append(licenseBreakdown.isEmpty() ? "<p class=\"muted\">No license data available.</p>" : licenseBreakdown);
-            body.append("</section>");
-            Map<String, List<TransitiveConflictFinding>> conflictsByKey = new LinkedHashMap<>();
-            if (enforcerResult != null) {
-                for (TransitiveConflictFinding f : enforcerResult.findings()) {
-                    conflictsByKey.computeIfAbsent(f.groupId() + ":" + f.artifactId(), k -> new ArrayList<>()).add(f);
-                }
-            }
-            body.append("<script>const rk_scanPath=").append(jsonStr(projectPath)).append(";</script>");
-            body.append("<section class=\"card span-2\">");
-            body.append(scanPage.renderRemediationView(report, scanId, !sourcePoms.isEmpty(), moduleArtifactIds, sourcePoms, conflictsByKey));
-            body.append("</section>");
-            body.append("</div>");
-            body.append(logModal.renderLogModal(report, scanId, enforcerResult));
-            body.append(scanOverlayHtml());
-            body.append(applyOverlayHtml());
-            sendHtml(exchange, 200, pages.renderPage("scan", "Analysis",
-                    "Dependency inventory and upgrade recommendations.", body.toString()));
+            sendHtml(exchange, 200, renderScanPage(parts[2], true));
             return;
         }
         sendText(exchange, 404, "Not found");
