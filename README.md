@@ -85,6 +85,17 @@ Apply conflict fixes (dependency-management pins and exclusions) before applying
 
 Use **Clear cache** to flush the cached version and vulnerability metadata and force a fresh fetch on the next analysis.
 
+## Maven Plugin
+
+RedKite can also produce its report as part of a Maven build, without running the server:
+
+```bash
+mvn install -DskipTests -pl red-kite-maven-plugin -am   # once, from a RedKite checkout
+mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report   # in the project to analyse
+```
+
+The report is written to `target/redkite/`. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
+
 ## Configuration
 
 Pass JVM system properties to override defaults, or set them persistently in `~/.redkite/redkite.properties` (created from a bundled default by `red-kite.sh`/`red-kite.bat` on first run — a `-D` flag always overrides the file):

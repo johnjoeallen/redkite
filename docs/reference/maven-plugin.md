@@ -13,27 +13,52 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 
 Both goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
 
-## Installation
+## Quick start
 
-The plugin is not published to Maven Central yet, so install it into your local repository from a RedKite checkout:
+Requirements: Java 17+, Maven 3.9+ on `PATH`, and network access to Maven Central and OSV.dev.
+
+1. **Install the plugin locally** from a RedKite checkout (it is not on Maven Central yet):
+
+    ```bash
+    git clone https://github.com/johnjoeallen/redkite.git
+    cd redkite
+    mvn install -DskipTests -pl red-kite-maven-plugin -am
+    ```
+
+    `-am` also installs the modules the plugin depends on. Repeat after pulling RedKite changes.
+
+2. **Add the plugin group** to `~/.m2/settings.xml` so the `redkite:` prefix works in any project, with no POM changes:
+
+    ```xml
+    <settings>
+      <pluginGroups>
+        <pluginGroup>com.redkite</pluginGroup>
+      </pluginGroups>
+    </settings>
+    ```
+
+3. **Run it** from the root of the project you want to analyse:
+
+    ```bash
+    mvn redkite:report
+    ```
+
+4. **Open the report**: `target/redkite/redkite-report.html` (and `redkite-report.json` for tooling).
+
+Without the settings change, use the full coordinates instead:
 
 ```bash
-mvn install -DskipTests -pl red-kite-maven-plugin -am
+mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report
 ```
-
-`-am` also installs the modules the plugin depends on. Repeat after updating RedKite.
 
 ## Usage
 
-Add the plugin group to `~/.m2/settings.xml` so the short prefix works in any project, with no POM changes:
-
-```xml
-<pluginGroups><pluginGroup>com.redkite</pluginGroup></pluginGroups>
-```
-
 ```bash
-mvn redkite:report
-mvn redkite:check -Dredkite.failOnSeverity=CRITICAL
+mvn redkite:report                                   # report only, never fails the build
+mvn redkite:check                                    # fails on HIGH or worse (the default)
+mvn redkite:check -Dredkite.failOnSeverity=CRITICAL  # stricter or looser threshold
+mvn redkite:check -Dredkite.failOnSnapshot=true      # also fail on SNAPSHOT dependencies
+mvn redkite:report -Dredkite.enforcer=true           # include dependency-convergence analysis (slower)
 ```
 
 To run it as part of `mvn verify`, put it in an opt-in profile in the project POM:
@@ -89,3 +114,4 @@ Written to `target/redkite/` (`outputDirectory`):
 - The scan runs `mvn dependency:tree` as a child process, so `mvn` must be on `PATH`, as for the server.
 - The plugin only reads the project. It never edits POMs; applying upgrades remains a server feature.
 - Run with `-X` to see RedKite's per-component logging.
+- If a run fails with an H2 error such as `EOFException` or `Timeout trying to lock table`, the plugin's cache database is damaged. It holds only cached lookups, so delete `~/.redkite/plugin/` and re-run.
