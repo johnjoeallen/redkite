@@ -50,7 +50,12 @@ class PageSnapshotTest {
 
     private String normalise(String text) throws IOException {
         String s = text.replace(resource("static/styles.css"), "<CSS>").replace(resource("static/scripts.js"), "<JS>");
-        s = s.replace(tempDir.toString(), "<TMP>");
+        // The temp path can appear raw, with forward slashes, or backslash-escaped inside a JS string
+        // literal (Windows); mask the escaped form first so the raw form doesn't half-match it.
+        String raw = tempDir.toString();
+        s = s.replace(raw.replace("\\", "\\\\"), "<TMP>").replace(raw, "<TMP>").replace(raw.replace('\\', '/'), "<TMP>");
+        s = s.replace("<TMP>\\\\", "<TMP>/").replace("<TMP>\\", "<TMP>/");
+        s = s.replace("\r\n", "\n");
         s = s.replace(fx.httpBase, "<REPO-HOST>");
         s = s.replaceAll("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<UUID>");
         s = s.replaceAll("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z", "<INSTANT>");
