@@ -20,6 +20,7 @@
     <spring-boot-maven-plugin.version>3.5.16</spring-boot-maven-plugin.version>
     <maven-compiler-plugin.version>3.16.0</maven-compiler-plugin.version>
     <maven-surefire-plugin.version>3.6.0</maven-surefire-plugin.version>
+    <maven-jar-plugin.version>3.4.2</maven-jar-plugin.version>
     <junit-jupiter.version>5.14.4</junit-jupiter.version>
     <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
     <pitest-maven.version>1.30.0</pitest-maven.version>
@@ -47,6 +48,11 @@
           <configuration>
             <release>${maven.compiler.release}</release>
           </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven-jar-plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>

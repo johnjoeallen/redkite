@@ -87,15 +87,25 @@ Use **Clear cache** to flush the cached version and vulnerability metadata and f
 
 ## Maven Plugin
 
-RedKite can also produce its report as part of a Maven build, without running the server:
+RedKite can also produce its report as part of a Maven build, without running the server. It prints to the build log, writes no files by default, never edits POMs and needs no change to the project it analyses.
+
+The plugin is not on Maven Central yet, so install it locally once, then run it in any project:
 
 ```bash
-mvn install -DskipTests -pl red-kite-maven-plugin -am   # once, from a RedKite checkout
-mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report   # in the project to analyse
-mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:check    # same, but fail on fixable vulnerabilities
+# 1. once, from a RedKite checkout
+mvn install -DskipTests -pl red-kite-maven-plugin -am
+
+# 2. once, so the short "redkite:" prefix works: add this to ~/.m2/settings.xml
+#    <settings><pluginGroups><pluginGroup>com.redkite</pluginGroup></pluginGroups></settings>
+
+# 3. in the project to analyse (root pom.xml directory)
+mvn -B redkite:report     # print the report, never fails the build
+mvn -B redkite:check      # fail the build for vulnerabilities that have a same-major fix
 ```
 
-The report is printed to the build log, and a JSON copy is written to `target/redkite/`. `check` fails the build only for vulnerabilities that have a same-major fix below the threshold. See the [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) for the `check` goal, thresholds and the `redkite:` short prefix.
+Without the `settings.xml` change, use the full form: `mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
+
+The [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) have a step-by-step runbook for enabling it in a project (suitable for a coding agent), how to bind it to a build profile, reading the output, every parameter, and troubleshooting.
 
 ## Configuration
 

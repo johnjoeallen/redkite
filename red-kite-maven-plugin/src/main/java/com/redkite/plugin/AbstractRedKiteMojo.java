@@ -8,6 +8,7 @@ import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.execution.MavenSession;
 import org.apache.maven.project.MavenProject;
 
 /** Shared parameters and the analyse-and-write step for the RedKite goals. */
@@ -20,7 +21,12 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.skip", defaultValue = "false")
     boolean skip;
 
-    /** Directory the JSON report is written to. */
+    /** Also write a JSON copy of the report to {@code outputDirectory}. Off by default: the plugin
+     *  writes no report files unless asked. */
+    @Parameter(property = "redkite.jsonReport", defaultValue = "false")
+    boolean jsonReport;
+
+    /** Directory the JSON report is written to when {@code jsonReport} is true. */
     @Parameter(property = "redkite.outputDirectory", defaultValue = "${project.build.directory}/redkite")
     File outputDirectory;
 
@@ -47,6 +53,13 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.consoleReport", defaultValue = "true")
     boolean consoleReport;
 
+    /** Show progress while analysing: a live status line on a terminal, one log line per phase elsewhere. */
+    @Parameter(property = "redkite.progress", defaultValue = "true")
+    boolean showProgress;
+
+    @Parameter(defaultValue = "${session}", readonly = true)
+    MavenSession session;
+
     abstract void execute(ReportExporter.Result result) throws MojoFailureException;
 
     @Override
@@ -66,15 +79,26 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
             String url = !cache ? ReportExporter.inMemoryJdbcUrl()
                     : databaseUrl != null && !databaseUrl.isBlank() ? databaseUrl : ReportExporter.defaultJdbcUrl();
             getLog().info("RedKite analysing " + root + (cache ? " (cache " + url + ")" : " (cache disabled)"));
-            result = ReportExporter.analyse(root, url, enforcer, allowMajorUpgrades,
-                    msg -> getLog().debug(msg), line -> getLog().debug(line));
-            Path out = outputDirectory.toPath();
-            ReportWriter.writeJson(out, result.report());
+            boolean animate = showProgress && ProgressLine.shouldAnimate(
+                    session == null || session.getRequest().isInteractiveMode(), getLog().isDebugEnabled(),
+                    ProgressLine.stdoutIsTerminal(), System.getenv("CI"), System.getenv("TERM"));
+            boolean unicode = !System.getProperty("os.name", "").toLowerCase().contains("win");
+            try (ProgressLine progress = new ProgressLine(animate, System.out,
+                    msg -> getLog().info(msg), unicode)) {
+                progress.start();
+                result = ReportExporter.analyse(root, url, enforcer, allowMajorUpgrades,
+                        msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
+                        line -> getLog().debug(line));
+            }
             String text = TextReport.render(result.report());
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }
-            getLog().info("RedKite JSON report written to " + out.resolve("redkite-report.json"));
+            if (jsonReport) {
+                Path out = outputDirectory.toPath();
+                ReportWriter.writeJson(out, result.report());
+                getLog().info("RedKite JSON report written to " + out.resolve("redkite-report.json"));
+            }
         } catch (IOException | RuntimeException e) {
             throw new MojoExecutionException("RedKite analysis failed: " + e.getMessage(), e);
         } finally {
