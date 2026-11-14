@@ -4,10 +4,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.net.URISyntaxException;
 import java.util.List;
 
 /**
- * A stand-in {@code mvn} executable for tests: a shell script, installed through the
+ * A stand-in {@code mvn} executable for tests: a launcher for {@link FakeMavenMain}, installed through the
  * {@code redkite.mvn} system property, that records its arguments and replays canned output and
  * an exit code per goal. Output can also be keyed by the directory of the {@code -f} POM, so a
  * multi-module scan can give each module its own dependency tree.
@@ -23,34 +24,36 @@ final class FakeMaven implements AutoCloseable {
 
     static FakeMaven install(Path dir) throws IOException {
         Files.createDirectories(dir);
-        Path script = dir.resolve("mvn");
-        Files.writeString(script, """
-                #!/bin/sh
-                D='%s'
-                echo "$@" >> "$D/calls.log"
-                G=""
-                POM=""
-                PREV=""
-                for a in "$@"; do
-                  case "$a" in
-                    dependency:tree|enforcer:enforce|verify|install|test|spring-boot:run) G="$a";;
-                  esac
-                  if [ "$PREV" = "-f" ]; then POM="$a"; fi
-                  PREV="$a"
-                done
-                G=$(echo "$G" | tr ':' '_')
-                M=$(basename "$(dirname "$POM")")
-                if [ -n "$POM" ] && [ -f "$POM" ]; then cp "$POM" "$D/last-pom.xml"; ls -a "$(dirname "$POM")" > "$D/last-pom-dir.txt"; fi
-                if [ -f "$D/$G@$M.out" ]; then cat "$D/$G@$M.out"; elif [ -f "$D/$G.out" ]; then cat "$D/$G.out"; fi
-                if [ -f "$D/$G.sleep" ]; then sleep "$(cat "$D/$G.sleep")"; fi
-                if [ -f "$D/$G@$M.exit" ]; then exit "$(cat "$D/$G@$M.exit")"; fi
-                if [ -f "$D/$G.exit" ]; then exit "$(cat "$D/$G.exit")"; fi
-                exit 0
-                """.formatted(dir.toAbsolutePath()));
-        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path script = writeLauncher(dir, FakeMavenMain.class);
         FakeMaven fake = new FakeMaven(dir);
         System.setProperty(MavenExecutable.PROPERTY, script.toAbsolutePath().toString());
         return fake;
+    }
+
+    /**
+     * Writes an {@code mvn} (Unix) or {@code mvn.cmd} (Windows) wrapper in {@code dir} that runs
+     * {@code mainClass} on the current JVM, passing {@code dir} and then its own arguments. Test code
+     * is Java so nothing depends on a POSIX shell or file permissions.
+     */
+    static Path writeLauncher(Path dir, Class<?> mainClass) throws IOException {
+        String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        String classes;
+        try {
+            classes = Path.of(mainClass.getProtectionDomain().getCodeSource().getLocation().toURI()).toString();
+        } catch (URISyntaxException e) {
+            throw new IOException(e);
+        }
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        Path script = dir.resolve(windows ? "mvn.cmd" : "mvn");
+        if (windows) {
+            Files.writeString(script, "@echo off\r\n\"" + java + "\" -cp \"" + classes + "\" " + mainClass.getName()
+                    + " \"" + dir.toAbsolutePath() + "\" %*\r\nexit /b %ERRORLEVEL%\r\n");
+        } else {
+            Files.writeString(script, "#!/bin/sh\nexec '" + java + "' -cp '" + classes + "' " + mainClass.getName()
+                    + " '" + dir.toAbsolutePath() + "' \"$@\"\n");
+            Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+        return script;
     }
 
     /** Canned output for {@code goal} (e.g. {@code "dependency:tree"}) from every module. */

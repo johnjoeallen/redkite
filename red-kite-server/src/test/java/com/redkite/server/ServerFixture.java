@@ -153,6 +153,7 @@ final class ServerFixture implements AutoCloseable {
     final Path home;
     final Path fileRepo;
     final Path fakeMvnDir;
+    private Path mvnScript;
     final Path project;
     final Path prefsFile;
     final HttpServer http;
@@ -205,7 +206,7 @@ final class ServerFixture implements AutoCloseable {
         setProperty("redkite.osv.url", httpBase);
         setProperty(HttpVersionMetadataProvider.CENTRAL_URL_PROPERTY, httpBase + "/central");
         setProperty("redkite.prefs.file", prefsFile.toString());
-        setProperty(MavenExecutable.PROPERTY, fakeMvnDir.resolve("mvn").toString());
+        setProperty(MavenExecutable.PROPERTY, mvnScript.toString());
 
         String jdbc = "jdbc:h2:mem:" + UUID.randomUUID() + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
         app = new RedKiteServerMain(jdbc, "sa", "", 0);
@@ -288,33 +289,25 @@ final class ServerFixture implements AutoCloseable {
     // ---------------------------------------------------------------- fake mvn
 
     private void writeFakeMaven() throws IOException {
-        Path script = fakeMvnDir.resolve("mvn");
-        Files.writeString(script, """
-                #!/bin/sh
-                D='%s'
-                echo "$@" >> "$D/calls.log"
-                G=""
-                POM=""
-                PREV=""
-                for a in "$@"; do
-                  case "$a" in
-                    dependency:tree|enforcer:enforce|verify|install|test|spring-boot:run) G="$a";;
-                  esac
-                  if [ "$PREV" = "-f" ]; then POM="$a"; fi
-                  PREV="$a"
-                done
-                G=$(echo "$G" | tr ':' '_')
-                if [ -f "$D/$G.rules" ] && [ -f "$POM" ]; then
-                  while IFS='|' read -r pat code out; do
-                    if [ -n "$pat" ] && grep -q -- "$pat" "$POM"; then cat "$D/$out"; exit "$code"; fi
-                  done < "$D/$G.rules"
-                fi
-                if [ -f "$D/$G.out" ]; then cat "$D/$G.out"; fi
-                if [ -f "$D/$G.sleep" ]; then sleep "$(cat "$D/$G.sleep")"; fi
-                if [ -f "$D/$G.exit" ]; then exit "$(cat "$D/$G.exit")"; fi
-                exit 0
-                """.formatted(fakeMvnDir.toAbsolutePath()));
-        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwxr-xr-x"));
+        boolean windows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        String classes;
+        try {
+            classes = Path.of(FakeMvnMain.class.getProtectionDomain().getCodeSource().getLocation().toURI()).toString();
+        } catch (java.net.URISyntaxException e) {
+            throw new IOException(e);
+        }
+        Path script = fakeMvnDir.resolve(windows ? "mvn.cmd" : "mvn");
+        String dir = fakeMvnDir.toAbsolutePath().toString();
+        if (windows) {
+            Files.writeString(script, "@echo off\r\n\"" + java + "\" -cp \"" + classes + "\" " + FakeMvnMain.class.getName()
+                    + " \"" + dir + "\" %*\r\nexit /b %ERRORLEVEL%\r\n");
+        } else {
+            Files.writeString(script, "#!/bin/sh\nexec '" + java + "' -cp '" + classes + "' " + FakeMvnMain.class.getName()
+                    + " '" + dir + "' \"$@\"\n");
+            Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+        mvnScript = script;
         mvnOutput("dependency:tree", DEMO_TREE, 0);
         mvnOutput("enforcer:enforce", CONVERGENCE_FAILURE, 1);
         // Phase 2 runs the enforcer again with RedKite's computed pins: that resolves the conflict.
