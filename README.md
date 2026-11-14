@@ -89,21 +89,15 @@ Use **Clear cache** to flush the cached version and vulnerability metadata and f
 
 RedKite can also produce its report as part of a Maven build, without running the server. It prints to the build log, writes no files by default, never edits POMs and needs no change to the project it analyses.
 
-The plugin is not on Maven Central yet, so install it locally once, then run it in any project:
+The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), so Maven downloads it on first use. Run it in any project:
 
 ```bash
-# 1. once, from a RedKite checkout
-mvn install -DskipTests -pl red-kite-maven-plugin -am
-
-# 2. once, so the short "redkite:" prefix works: add this to ~/.m2/settings.xml
-#    <settings><pluginGroups><pluginGroup>net.dublinux.redkite</pluginGroup></pluginGroups></settings>
-
-# 3. in the project to analyse (root pom.xml directory)
-mvn -B redkite:report     # print the report, never fails the build
-mvn -B redkite:check      # fail the build for vulnerabilities that have a same-major fix
+# in the project to analyse (root pom.xml directory)
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.199:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.199:check    # fail the build for vulnerabilities that have a same-major fix
 ```
 
-Without the `settings.xml` change, use the full form: `mvn net.dublinux.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
+To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
 
 The [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) have a step-by-step runbook for enabling it in a project (suitable for a coding agent), how to bind it to a build profile, reading the output, every parameter, and troubleshooting.
 

@@ -19,22 +19,14 @@ This section is a runbook, written so that a person or a coding agent can follow
 
 **Facts to rely on**
 
-- The plugin is **not on Maven Central**. It has to be installed into the local Maven repository (`~/.m2`) from a RedKite checkout first.
+- The plugin is published on Maven Central, so Maven downloads it on first use. There is nothing to install by hand.
 - Plugin coordinates: `net.dublinux.redkite:red-kite-maven-plugin`. Goals: `report` and `check`. Short prefix: `redkite`.
 - It never edits POMs or any project file. By default it writes nothing to disk. It reads the project, queries Maven Central and OSV.dev, and prints to the build log.
 - It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 17+, Maven 3.9+ and network access.
 
-**1. Install the plugin (once per machine, repeat to update).** From a RedKite checkout:
+**1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.199`. Maven downloads it the first time you run it.
 
-```bash
-git clone https://github.com/johnjoeallen/redkite.git     # skip if you already have a checkout
-cd redkite
-mvn install -DskipTests -pl red-kite-maven-plugin -am
-```
-
-`-am` also builds the modules the plugin depends on. Success ends with `BUILD SUCCESS`. The installed version is the `<version>` in `red-kite-maven-plugin/pom.xml` (currently `0.1.0-SNAPSHOT`). It is also the directory name under `~/.m2/repository/net/dublinux/redkite/red-kite-maven-plugin/`.
-
-**2. Make the short `redkite:` prefix work (once per machine).** Add this to `~/.m2/settings.xml`. Create the file if it is missing, and add the `<pluginGroup>` line inside an existing `<pluginGroups>` element if there is one:
+**2. (Optional) Make the short `redkite:` prefix work (once per machine).** Add this to `~/.m2/settings.xml`. Create the file if it is missing, and add the `<pluginGroup>` line inside an existing `<pluginGroups>` element if there is one:
 
 ```xml
 <settings>
@@ -44,7 +36,7 @@ mvn install -DskipTests -pl red-kite-maven-plugin -am
 </settings>
 ```
 
-If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report` wherever the commands below say `mvn redkite:report`.
+If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.99.199:report` (and `…:check`) wherever the commands below say `mvn redkite:report`.
 
 **3. Run it in the target project.** From the directory holding the root `pom.xml`, with no edits to that project:
 
@@ -65,7 +57,7 @@ mvn -B redkite:check      # print the report; fail the build for fixable vulnera
       <plugin>
         <groupId>net.dublinux.redkite</groupId>
         <artifactId>red-kite-maven-plugin</artifactId>
-        <version>0.1.0-SNAPSHOT</version>
+        <version>0.99.199</version>
         <executions>
           <execution>
             <goals><goal>check</goal></goals>
@@ -80,7 +72,7 @@ mvn -B redkite:check      # print the report; fail the build for fixable vulnera
 </profile>
 ```
 
-Run it with `mvn -B verify -Predkite`. Because the plugin is only in the local repository, anyone building with that profile, including CI, has to install it first (step 1), so keep the profile opt-in. `check` binds to `verify` by default.
+Run it with `mvn -B verify -Predkite`. The plugin downloads from Maven Central like any other, so CI needs no extra setup. `check` binds to `verify` by default. Keep the profile opt-in so ordinary builds don't make network calls to Maven Central and OSV.dev.
 
 **5. Verify it works.** A successful run prints `RedKite analysing <path> (cache disabled)`, a `RedKite report` block with counts, then `BUILD SUCCESS`. For `check`, a failing exit code (Maven exits `1`) with `[ERROR] RedKite: …` lines means it found something to fix. That is the plugin working, not a failure to run.
 
@@ -88,8 +80,8 @@ Common setup problems:
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `No plugin found for prefix 'redkite'` | Step 2 not done, or the plugin isn't installed. Use the full coordinates, or redo steps 1 and 2. |
-| `Could not find artifact net.dublinux.redkite:red-kite-maven-plugin:…` | Step 1 not done on this machine, or the version in the command doesn't match the installed one. |
+| `No plugin found for prefix 'redkite'` | The `<pluginGroup>` entry (step 2) is missing. Add it, or use the full coordinates. |
+| `Could not find artifact net.dublinux.redkite:red-kite-maven-plugin:…` | The version doesn't exist on Maven Central (check the spelling and the version), or the machine can't reach Maven Central. |
 | `RedKite analysis failed: … dependency:tree failed` | The project doesn't build on its own (missing parent POM, unreachable repository). Fix that first, then re-run. |
 | H2 `EOFException` or `Timeout trying to lock table` | Only with `-Dredkite.cache=true`. Delete `~/.redkite/plugin/` and re-run. |
 
@@ -172,3 +164,15 @@ Candidate versions come from RedKite's CVE search (a bounded window of nearby ve
 - The plugin only reads the project. It never edits POMs; applying upgrades remains a server feature.
 - Run with `-X` to see RedKite's per-component logging.
 - If a run fails with an H2 error such as `EOFException` or `Timeout trying to lock table`, the plugin's persistent cache database (`redkite.cache=true`) is damaged. It holds only cached lookups, so delete `~/.redkite/plugin/` and re-run.
+
+## Building from source
+
+To run a build of the plugin from a RedKite checkout instead of the release on Central:
+
+```bash
+git clone https://github.com/johnjoeallen/redkite.git
+cd redkite
+mvn install -DskipTests -pl red-kite-maven-plugin -am
+```
+
+This installs the checkout's version (the `<version>` in `red-kite-maven-plugin/pom.xml`, `0.1.0-SNAPSHOT` on `main`) into `~/.m2`, and you then use that version in the commands above.
