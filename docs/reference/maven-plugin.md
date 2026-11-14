@@ -20,7 +20,7 @@ This section is a runbook, written so that a person or a coding agent can follow
 **Facts to rely on**
 
 - The plugin is **not on Maven Central**. It has to be installed into the local Maven repository (`~/.m2`) from a RedKite checkout first.
-- Plugin coordinates: `com.redkite:red-kite-maven-plugin`. Goals: `report` and `check`. Short prefix: `redkite`.
+- Plugin coordinates: `net.dublinux.redkite:red-kite-maven-plugin`. Goals: `report` and `check`. Short prefix: `redkite`.
 - It never edits POMs or any project file. By default it writes nothing to disk. It reads the project, queries Maven Central and OSV.dev, and prints to the build log.
 - It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 17+, Maven 3.9+ and network access.
 
@@ -32,19 +32,19 @@ cd redkite
 mvn install -DskipTests -pl red-kite-maven-plugin -am
 ```
 
-`-am` also builds the modules the plugin depends on. Success ends with `BUILD SUCCESS`. The installed version is the `<version>` in `red-kite-maven-plugin/pom.xml` (currently `0.1.0-SNAPSHOT`). It is also the directory name under `~/.m2/repository/com/redkite/red-kite-maven-plugin/`.
+`-am` also builds the modules the plugin depends on. Success ends with `BUILD SUCCESS`. The installed version is the `<version>` in `red-kite-maven-plugin/pom.xml` (currently `0.1.0-SNAPSHOT`). It is also the directory name under `~/.m2/repository/net/dublinux/redkite/red-kite-maven-plugin/`.
 
 **2. Make the short `redkite:` prefix work (once per machine).** Add this to `~/.m2/settings.xml`. Create the file if it is missing, and add the `<pluginGroup>` line inside an existing `<pluginGroups>` element if there is one:
 
 ```xml
 <settings>
   <pluginGroups>
-    <pluginGroup>com.redkite</pluginGroup>
+    <pluginGroup>net.dublinux.redkite</pluginGroup>
   </pluginGroups>
 </settings>
 ```
 
-If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report` wherever the commands below say `mvn redkite:report`.
+If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report` wherever the commands below say `mvn redkite:report`.
 
 **3. Run it in the target project.** From the directory holding the root `pom.xml`, with no edits to that project:
 
@@ -63,7 +63,7 @@ mvn -B redkite:check      # print the report; fail the build for fixable vulnera
   <build>
     <plugins>
       <plugin>
-        <groupId>com.redkite</groupId>
+        <groupId>net.dublinux.redkite</groupId>
         <artifactId>red-kite-maven-plugin</artifactId>
         <version>0.1.0-SNAPSHOT</version>
         <executions>
@@ -89,7 +89,7 @@ Common setup problems:
 | Symptom | Cause and fix |
 | --- | --- |
 | `No plugin found for prefix 'redkite'` | Step 2 not done, or the plugin isn't installed. Use the full coordinates, or redo steps 1 and 2. |
-| `Could not find artifact com.redkite:red-kite-maven-plugin:…` | Step 1 not done on this machine, or the version in the command doesn't match the installed one. |
+| `Could not find artifact net.dublinux.redkite:red-kite-maven-plugin:…` | Step 1 not done on this machine, or the version in the command doesn't match the installed one. |
 | `RedKite analysis failed: … dependency:tree failed` | The project doesn't build on its own (missing parent POM, unreachable repository). Fix that first, then re-run. |
 | H2 `EOFException` or `Timeout trying to lock table` | Only with `-Dredkite.cache=true`. Delete `~/.redkite/plugin/` and re-run. |
 

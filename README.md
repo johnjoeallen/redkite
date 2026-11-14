@@ -96,14 +96,14 @@ The plugin is not on Maven Central yet, so install it locally once, then run it 
 mvn install -DskipTests -pl red-kite-maven-plugin -am
 
 # 2. once, so the short "redkite:" prefix works: add this to ~/.m2/settings.xml
-#    <settings><pluginGroups><pluginGroup>com.redkite</pluginGroup></pluginGroups></settings>
+#    <settings><pluginGroups><pluginGroup>net.dublinux.redkite</pluginGroup></pluginGroups></settings>
 
 # 3. in the project to analyse (root pom.xml directory)
 mvn -B redkite:report     # print the report, never fails the build
 mvn -B redkite:check      # fail the build for vulnerabilities that have a same-major fix
 ```
 
-Without the `settings.xml` change, use the full form: `mvn com.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
+Without the `settings.xml` change, use the full form: `mvn net.dublinux.redkite:red-kite-maven-plugin:0.1.0-SNAPSHOT:report`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
 
 The [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) have a step-by-step runbook for enabling it in a project (suitable for a coding agent), how to bind it to a build profile, reading the output, every parameter, and troubleshooting.
 
