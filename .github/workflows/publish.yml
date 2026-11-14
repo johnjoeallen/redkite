@@ -1,0 +1,64 @@
+name: Publish to Maven Central
+
+# Run by hand from the Actions tab, pointing at the tag to publish; never on a tag push. It uploads two
+# artifacts under net.dublinux.redkite: the parent POM (red-kite-parent) and the self-contained
+# red-kite-maven-plugin jar. The upload lands as a pending deployment at
+# central.sonatype.com/publishing/deployments for manual review (autoPublish is off, see the release
+# profile in the parent pom). The server zip ships as a GitHub release asset (release.yml), not on Central.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish from (e.g. v0.2.0)'
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Set version from tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: mvn --no-transfer-progress versions:set -DnewVersion=${TAG#v} -DgenerateBackupPoms=false -DprocessAllModules=true
+
+      - name: Build and test
+        # Publish nothing that has not passed its own tests. install (not just verify) puts every module in
+        # the local repository, which the plugin module's build and the upload below resolve against.
+        run: mvn --no-transfer-progress install
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v7
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Publish to Maven Central
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          mkdir -p ~/.m2
+          {
+            echo '<settings>'
+            echo '  <servers>'
+            echo '    <server>'
+            echo '      <id>central</id>'
+            echo "      <username>${MAVEN_CENTRAL_USERNAME}</username>"
+            echo "      <password>${MAVEN_CENTRAL_PASSWORD}</password>"
+            echo '    </server>'
+            echo '  </servers>'
+            echo '</settings>'
+          } > ~/.m2/settings.xml
+          mvn --no-transfer-progress -Prelease -DskipTests -pl .,red-kite-maven-plugin deploy
+          echo "Uploaded to Central Portal — review and publish manually at https://central.sonatype.com/publishing/deployments"

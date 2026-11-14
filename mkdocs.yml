@@ -152,6 +152,7 @@ nav:
       - Modules: development/modules.md
       - Testing: development/testing.md
       - Contributing: development/contributing.md
+      - Publishing to Maven Central: development/publishing.md
       - Evolution: development/evolution.md
       - Bugs Fixed: development/bugs-fixed.md
 

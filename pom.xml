@@ -6,6 +6,26 @@
   <artifactId>red-kite-parent</artifactId>
   <version>0.1.0-SNAPSHOT</version>
   <packaging>pom</packaging>
+  <name>RedKite Parent</name>
+  <description>RedKite: a local Maven dependency analyser and upgrade assistant, with a Maven plugin that reports vulnerabilities and upgrades during a build.</description>
+  <url>https://github.com/johnjoeallen/redkite</url>
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>John Allen</name>
+      <url>https://github.com/johnjoeallen</url>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/johnjoeallen/redkite.git</connection>
+    <developerConnection>scm:git:https://github.com/johnjoeallen/redkite.git</developerConnection>
+    <url>https://github.com/johnjoeallen/redkite</url>
+  </scm>
   <modules>
     <module>red-kite-core</module>
     <module>red-kite-maven</module>
@@ -244,4 +264,79 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
+  <profiles>
+    <!-- Publishing to Maven Central. Activated only by the "Publish to Maven Central" workflow
+         (-Prelease). Central requires sources and Javadoc jars and signed artifacts. -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.4.0</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.12.0</version>
+            <configuration>
+              <!-- The jar is required by Central; lint failures must not block a release. -->
+              <doclint>none</doclint>
+              <quiet>true</quiet>
+            </configuration>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.8</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+              </execution>
+            </executions>
+            <configuration>
+              <gpgArguments>
+                <arg>--pinentry-mode</arg>
+                <arg>loopback</arg>
+              </gpgArguments>
+            </configuration>
+          </plugin>
+          <plugin>
+            <!-- Uploads to the Central Publishing Portal. autoPublish is off: the upload waits as a
+                 pending deployment to be reviewed and published by hand, since Central never lets a
+                 published version be changed or deleted. -->
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>false</autoPublish>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
