@@ -49,10 +49,10 @@ final class TextReport {
             out.add("  none");
         }
         for (VulnerabilityFinding v : vulns) {
-            out.add(String.format("  %-9s %s:%s  %s", AdvisoryClassifier.severity(v).label().toUpperCase(),
+            out.add(String.format("  %-9s %s:%s  %s  %s", AdvisoryClassifier.severity(v).label().toUpperCase(),
                     key(v.coordinate()), v.affectedVersion(), v.advisoryId()
-                            + (v.cves().isEmpty() ? "" : " (" + String.join(", ", v.cves()) + ")")));
-            out.add("            " + (blank(v.fixedVersion()) ? "no fixed version known" : "fixed in " + v.fixedVersion()));
+                            + (v.cves().isEmpty() ? "" : " (" + String.join(", ", v.cves()) + ")"),
+                    blank(v.fixedVersion()) ? "no fixed version known" : "fixed in " + v.fixedVersion()));
         }
         out.add("");
 

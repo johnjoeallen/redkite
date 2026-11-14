@@ -43,6 +43,13 @@ public final class ReportExporter {
                 + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE";
     }
 
+    /** A throwaway in-memory database: lookups are still shared within one run, but nothing is kept
+     *  after the JVM exits, so every build queries Maven Central and OSV afresh. */
+    public static String inMemoryJdbcUrl() {
+        return "jdbc:h2:mem:redkite-" + java.util.UUID.randomUUID()
+                + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+    }
+
     /**
      * @param projectRoot   directory containing the root {@code pom.xml}
      * @param jdbcUrl       H2 database to cache metadata and record the scan in

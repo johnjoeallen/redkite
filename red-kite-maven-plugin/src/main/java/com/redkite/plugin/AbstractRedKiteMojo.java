@@ -24,7 +24,13 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.outputDirectory", defaultValue = "${project.build.directory}/redkite")
     File outputDirectory;
 
-    /** H2 database holding the metadata cache and scan history. Defaults to a plugin-only database
+    /** Keep a persistent cache of Maven Central and OSV lookups between builds. Disabled by default:
+     *  each build then uses a throwaway in-memory database, queries the sources afresh and leaves
+     *  nothing on disk. When enabled, {@code databaseUrl} (or the default plugin database) is used. */
+    @Parameter(property = "redkite.cache", defaultValue = "false")
+    boolean cache;
+
+    /** H2 database holding the metadata cache and scan history; only used when {@code cache} is true. Defaults to a plugin-only database
      *  shared by all projects (<code>~/.redkite/plugin/redkite</code>), separate from the server's. */
     @Parameter(property = "redkite.db.url")
     String databaseUrl;
@@ -57,8 +63,9 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
         rk.setLevel(getLog().isDebugEnabled() ? java.util.logging.Level.INFO : java.util.logging.Level.WARNING);
         try {
             Path root = project.getBasedir().toPath();
-            String url = databaseUrl != null && !databaseUrl.isBlank() ? databaseUrl : ReportExporter.defaultJdbcUrl();
-            getLog().info("RedKite analysing " + root + " (database " + url + ")");
+            String url = !cache ? ReportExporter.inMemoryJdbcUrl()
+                    : databaseUrl != null && !databaseUrl.isBlank() ? databaseUrl : ReportExporter.defaultJdbcUrl();
+            getLog().info("RedKite analysing " + root + (cache ? " (cache " + url + ")" : " (cache disabled)"));
             result = ReportExporter.analyse(root, url, enforcer, allowMajorUpgrades,
                     msg -> getLog().debug(msg), line -> getLog().debug(line));
             Path out = outputDirectory.toPath();

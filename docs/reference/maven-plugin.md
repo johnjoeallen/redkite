@@ -2,7 +2,7 @@
 
 The `red-kite-maven-plugin` runs the same analysis as the RedKite server from the command line, without the server. It prints a text report to the build log and writes a JSON copy. It is run by hand when you want it; nothing runs unless you invoke it or bind it in your POM.
 
-It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 database. The plugin keeps its own database at `~/.redkite/plugin/redkite`, shared by all projects so version and vulnerability lookups are cached between builds. It is separate from the server's database, so the plugin and server can run at the same time, and parallel builds share it through H2's `AUTO_SERVER` mode. Use `-Dredkite.db.url=...` to put it elsewhere.
+It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 database. By default the cache is **disabled**: each build uses a throwaway in-memory database, queries Maven Central and OSV.dev afresh, and leaves nothing on disk. Pass `-Dredkite.cache=true` to keep a persistent database at `~/.redkite/plugin/redkite`, shared by all projects so lookups are cached between builds. That database is separate from the server's database, so the plugin and server can run at the same time, and parallel builds share it through H2's `AUTO_SERVER` mode. Use `-Dredkite.db.url=...` (with the cache enabled) to put it elsewhere.
 
 ## Goals
 
@@ -122,7 +122,8 @@ Candidate versions come from RedKite's CVE search (a bounded window of nearby ve
 | --- | --- | --- | --- | --- |
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written. |
-| `databaseUrl` | `redkite.db.url` | `~/.redkite/plugin/redkite` (H2, `AUTO_SERVER`) | both | H2 database for the cache and scan history. |
+| `cache` | `redkite.cache` | `false` | both | Keep a persistent lookup cache between builds. When false, an in-memory database is used and nothing is written to disk. |
+| `databaseUrl` | `redkite.db.url` | `~/.redkite/plugin/redkite` (H2, `AUTO_SERVER`) | both | H2 database for the cache and scan history; used only when `cache` is true. |
 | `consoleReport` | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
@@ -135,4 +136,4 @@ Candidate versions come from RedKite's CVE search (a bounded window of nearby ve
 - The scan runs `mvn dependency:tree` as a child process, so `mvn` must be on `PATH`, as for the server.
 - The plugin only reads the project. It never edits POMs; applying upgrades remains a server feature.
 - Run with `-X` to see RedKite's per-component logging.
-- If a run fails with an H2 error such as `EOFException` or `Timeout trying to lock table`, the plugin's cache database is damaged. It holds only cached lookups, so delete `~/.redkite/plugin/` and re-run.
+- If a run fails with an H2 error such as `EOFException` or `Timeout trying to lock table`, the plugin's persistent cache database (`redkite.cache=true`) is damaged. It holds only cached lookups, so delete `~/.redkite/plugin/` and re-run.
