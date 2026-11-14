@@ -1,6 +1,7 @@
 package com.redkite.maven;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -85,6 +86,7 @@ class TempPomAnalyzerTest {
 
     @Test
     void runPristineStripsEverythingInATempCopyAndLeavesTheProjectAlone() throws Exception {
+        Assumptions.assumeTrue(canCreateSymlinks(), "symlinks need Developer Mode or admin rights on Windows");
         mvn.output("enforcer:enforce", "[ERROR] Rule 0 failed\n").exit("enforcer:enforce", 1);
 
         TempPomAnalyzer.PristineResult result = new TempPomAnalyzer().runPristine(project, rootPom);
@@ -137,5 +139,19 @@ class TempPomAnalyzerTest {
 
         assertTrue(result.usedVerifyFallback());
         assertTrue(mvn.calls().get(0).contains("verify -DskipTests"));
+    }
+
+    private boolean canCreateSymlinks() throws java.io.IOException {
+        Path target = Files.writeString(tempDir.resolve("symlink-probe-target"), "x");
+        Path link = tempDir.resolve("symlink-probe");
+        try {
+            Files.createSymbolicLink(link, target);
+            return true;
+        } catch (UnsupportedOperationException | java.io.IOException | SecurityException e) {
+            return false;
+        } finally {
+            Files.deleteIfExists(link);
+            Files.deleteIfExists(target);
+        }
     }
 }

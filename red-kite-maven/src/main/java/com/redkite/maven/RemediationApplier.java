@@ -720,7 +720,8 @@ public class RemediationApplier {
             transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
             StringWriter sw = new StringWriter();
             transformer.transform(new DOMSource(doc), new StreamResult(sw));
-            return sw.toString();
+            // The JDK serialiser uses line.separator (CRLF on Windows); always emit LF.
+            return sw.toString().replace("\r\n", "\n");
         } catch (Exception e) {
             throw new IllegalStateException("Failed to serialise POM XML: " + e.getMessage(), e);
         }

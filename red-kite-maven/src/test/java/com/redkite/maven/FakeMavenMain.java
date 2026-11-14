@@ -42,7 +42,7 @@ public final class FakeMavenMain {
             Files.copy(pom, dir.resolve("last-pom.xml"), StandardCopyOption.REPLACE_EXISTING);
             try (Stream<Path> entries = Files.list(pom.toAbsolutePath().getParent())) {
                 Files.write(dir.resolve("last-pom-dir.txt"),
-                        Stream.concat(Stream.of(".", ".."), entries.map(p -> p.getFileName().toString())).sorted().toList());
+                        entries.map(p -> p.getFileName().toString()).sorted().toList());
             }
         }
         Path moduleOut = dir.resolve(goal + "@" + module + ".out");

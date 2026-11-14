@@ -273,6 +273,7 @@ public class MavenProjectScanner {
                     new java.io.InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    if (MavenExecutable.isJvmBanner(line)) continue;
                     outputBuilder.append(line).append('\n');
                     if (onLine != null) onLine.accept(line);
                 }
@@ -283,7 +284,7 @@ public class MavenProjectScanner {
             if (exit != 0) {
                 LOGGER.warning(() -> "mvn dependency:tree failed for " + root.relativize(pom) + " with exit " + exit + "\n" + output);
                 List<String> errors = new ArrayList<>();
-                errors.add("[BUILD_FAILED] dependency:tree failed (exit " + exit + ") for " + root.relativize(pom));
+                errors.add("[BUILD_FAILED] dependency:tree failed (exit " + exit + ") for " + sourceFile(root, pom));
                 for (String line : output.split("\n")) {
                     String s = line.strip();
                     if (s.startsWith("[ERROR]") && !s.contains("[Help ") && !s.equals("[ERROR]")) {
