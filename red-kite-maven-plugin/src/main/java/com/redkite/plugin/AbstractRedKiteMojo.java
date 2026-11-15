@@ -38,7 +38,8 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
 
     /** H2 database holding the metadata cache and scan history; only used when {@code cache} is true. Defaults to a plugin-only database
      *  shared by all projects (<code>~/.redkite/plugin/redkite</code>), separate from the server's. */
-    @Parameter(property = "redkite.db.url")
+    @Parameter(property = "redkite.db.url",
+            defaultValue = "jdbc:h2:${user.home}/.redkite/plugin/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE")
     String databaseUrl;
 
     /** Also run the dependency-convergence (enforcer) analysis. Slower: several extra Maven runs. */
@@ -48,6 +49,11 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     /** Allow major-version upgrade recommendations. */
     @Parameter(property = "redkite.allowMajorUpgrades", defaultValue = "false")
     boolean allowMajorUpgrades;
+
+    /** List plain "newer version exists" updates for transitive dependencies too. Off by default:
+     *  nothing in the project forces them to move, so the server's Outdated count leaves them out. */
+    @Parameter(property = "redkite.showTransitives", defaultValue = "false")
+    boolean showTransitives;
 
     /** Print the text report to the build log. */
     @Parameter(property = "redkite.consoleReport", defaultValue = "true")
@@ -90,7 +96,7 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
                         msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
                         line -> getLog().debug(line));
             }
-            String text = TextReport.render(result.report());
+            String text = TextReport.render(result.report(), showTransitives);
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }

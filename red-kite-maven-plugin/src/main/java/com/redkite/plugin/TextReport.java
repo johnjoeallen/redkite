@@ -19,6 +19,11 @@ final class TextReport {
     private TextReport() {}
 
     static String render(ScanReport report) {
+        return render(report, false);
+    }
+
+    /** @param showTransitives also list plain "newer version exists" updates for transitive dependencies */
+    static String render(ScanReport report, boolean showTransitives) {
         List<String> out = new ArrayList<>();
         out.add("RedKite report");
         out.add("==============");
@@ -36,11 +41,28 @@ final class TextReport {
         vulns.sort(Comparator.<VulnerabilityFinding>comparingInt(v -> -AdvisoryClassifier.severity(v).ordinal())
                 .thenComparing(v -> key(v.coordinate())));
         out.add("Vulnerabilities: " + vulns.size() + severityBreakdown(vulns));
-        Map<String, UpgradeRecommendation> uniqueRecs = new LinkedHashMap<>();
-        for (UpgradeRecommendation r : report.recommendations()) {
-            uniqueRecs.putIfAbsent(key(r.coordinate()) + ":" + r.currentVersion() + ":" + r.targetVersion(), r);
+        // Like the server's Outdated count: a plain "newer version exists" on a transitive dependency is
+        // left out, because nothing in the project makes it move and there is nothing to change for it.
+        // Direct dependencies and anything driven by a vulnerability are listed; showTransitives lists all.
+        java.util.Set<String> directKeys = new java.util.HashSet<>();
+        for (ScanComponent c : report.components()) {
+            if (c.direct()) directKeys.add(key(c.coordinate()) + ":" + c.version());
         }
-        out.add("Recommendations: " + uniqueRecs.size());
+        Map<String, UpgradeRecommendation> uniqueRecs = new LinkedHashMap<>();
+        Map<String, UpgradeRecommendation> transitiveRecs = new LinkedHashMap<>();
+        for (UpgradeRecommendation r : report.recommendations()) {
+            String id = key(r.coordinate()) + ":" + r.currentVersion() + ":" + r.targetVersion();
+            if (uniqueRecs.containsKey(id) || transitiveRecs.containsKey(id)) continue;
+            if (isActionable(r, directKeys.contains(key(r.coordinate()) + ":" + r.currentVersion()))) {
+                uniqueRecs.put(id, r);
+            } else {
+                transitiveRecs.put(id, r);
+            }
+        }
+        out.add("Recommendations: " + uniqueRecs.size()
+                + (transitiveRecs.isEmpty() ? ""
+                : showTransitives ? " (+ " + transitiveRecs.size() + " transitive-only updates, listed separately)"
+                : " (" + transitiveRecs.size() + " transitive-only updates not listed)"));
         out.add("");
 
         out.add("Vulnerabilities");
@@ -72,11 +94,16 @@ final class TextReport {
         if (uniqueRecs.isEmpty()) {
             out.add("  none");
         }
-        List<UpgradeRecommendation> recs = new ArrayList<>(uniqueRecs.values());
-        recs.sort(Comparator.comparing((UpgradeRecommendation r) -> key(r.coordinate())));
-        for (UpgradeRecommendation r : recs) {
-            out.add(String.format("  %-60s %s -> %s  [%s, %s risk]", key(r.coordinate()), r.currentVersion(),
-                    r.targetVersion(), r.reason(), r.riskLevel()));
+        addRecommendations(out, uniqueRecs.values());
+        if (showTransitives) {
+            out.add("");
+            out.add("Transitive-only updates");
+            out.add("-----------------------");
+            out.add("  Not declared by the project and not driven by a vulnerability.");
+            if (transitiveRecs.isEmpty()) {
+                out.add("  none");
+            }
+            addRecommendations(out, transitiveRecs.values());
         }
         if (!report.treeParseWarnings().isEmpty()) {
             out.add("");
@@ -85,6 +112,24 @@ final class TextReport {
             report.treeParseWarnings().forEach(w -> out.add("  " + w));
         }
         return String.join(System.lineSeparator(), out) + System.lineSeparator();
+    }
+
+    private static void addRecommendations(List<String> out, java.util.Collection<UpgradeRecommendation> values) {
+        List<UpgradeRecommendation> recs = new ArrayList<>(values);
+        recs.sort(Comparator.comparing((UpgradeRecommendation r) -> key(r.coordinate())));
+        for (UpgradeRecommendation r : recs) {
+            out.add(String.format("  %-60s %s -> %s  [%s, %s risk]", key(r.coordinate()), r.currentVersion(),
+                    r.targetVersion(), r.reason(), r.riskLevel()));
+        }
+    }
+
+    /** A recommendation worth listing: the dependency is declared directly, or it is vulnerability-driven. */
+    static boolean isActionable(UpgradeRecommendation r, boolean direct) {
+        if (direct) return true;
+        return switch (r.reason()) {
+            case CVE_FIX, CVE_FIX_DOWNGRADE, CVE_BEST_EFFORT -> true;
+            default -> false;
+        };
     }
 
     private static String severityBreakdown(List<VulnerabilityFinding> vulns) {

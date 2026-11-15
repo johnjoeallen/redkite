@@ -45,7 +45,7 @@ final class CveFixFinder {
             return new CveFixResult(downgradeTarget, RecommendationReason.CVE_FIX_DOWNGRADE);
         }
 
-        String bestEffort = bestEffortLowestSeverity(component, current, allVersions);
+        String bestEffort = bestEffortLowestSeverity(component, current, allVersions, allowMajorUpgrades);
         if (bestEffort != null) {
             return new CveFixResult(bestEffort, RecommendationReason.CVE_BEST_EFFORT);
         }
@@ -127,8 +127,11 @@ final class CveFixFinder {
      *  severity to be worth suggesting — an older release with no CVE improvement is pure
      *  downside (missing later fixes) and should never be offered just because it ties.
      *  Within whichever direction wins, ties are broken toward the candidate closest to
-     *  current. Returns null if nothing at least as good as current is found. */
-    private String bestEffortLowestSeverity(ScanComponent component, String current, List<String> allVersions) {
+     *  current. Unless {@code allowMajorUpgrades}, upgrade candidates on a higher major version
+     *  are never considered, same as the upgrade tier. Returns null if nothing at least as good
+     *  as current is found. */
+    private String bestEffortLowestSeverity(ScanComponent component, String current, List<String> allVersions,
+            boolean allowMajorUpgrades) {
         // Located by value, not by exact string match against allVersions — the current
         // version's string may not literally appear there (different qualifier formatting,
         // filtered out by the stable-version regex, cache staleness, etc.), and indexOf
@@ -140,7 +143,7 @@ final class CveFixFinder {
             if (isPreRelease(v)) continue;
             int cmp = compareVersions(v, current);
             if (cmp < 0) below.add(v);
-            else if (cmp > 0) above.add(v);
+            else if (cmp > 0 && (allowMajorUpgrades || !isMajorUpgrade(current, v))) above.add(v);
         }
         below.sort((a, b) -> compareVersions(b, a)); // descending — closest below first
         above.sort(Versions::compareVersions); // ascending — closest above first

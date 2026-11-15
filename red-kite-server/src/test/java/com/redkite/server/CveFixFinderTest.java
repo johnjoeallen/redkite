@@ -42,6 +42,25 @@ class CveFixFinderTest {
     }
 
     @Test
+    void bestEffortNeverCrossesAMajorVersionUnlessAllowed() {
+        // No fixed version is known, so only the best-effort tier applies; 7.0 is the only improvement.
+        List<VulnerabilityFinding> vulns = List.of(finding("6.2", "CRITICAL", null, null));
+        vulnerable("CRITICAL", "6.1", "6.2", "6.3");
+        List<String> versions = List.of("6.1", "6.2", "6.3", "7.0");
+        assertEquals(new CveFixFinder.CveFixResult("6.3", RecommendationReason.CVE_BEST_EFFORT),
+                resolve("6.2", vulns, versions, false), "a tied same-major upgrade is fine, 7.0 is not offered");
+        assertEquals(new CveFixFinder.CveFixResult("7.0", RecommendationReason.CVE_BEST_EFFORT),
+                resolve("6.2", vulns, versions, true), "with major upgrades allowed the cleaner 7.0 wins");
+    }
+
+    @Test
+    void bestEffortOffersNothingWhenOnlyAHigherMajorWouldHelp() {
+        List<VulnerabilityFinding> vulns = List.of(finding("6.2", "CRITICAL", null, null));
+        vulnerable("CRITICAL", "6.2");
+        assertNull(resolve("6.2", vulns, List.of("6.2", "7.0"), false));
+    }
+
+    @Test
     void upgradeIsTheSmallestVerifiedCleanVersionPastEveryFix() {
         List<VulnerabilityFinding> vulns = List.of(finding("1.0", "HIGH", "1.5", null), finding("1.0", "HIGH", "1.2", null));
         vulnerable("LOW", "1.5");

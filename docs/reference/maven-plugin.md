@@ -24,7 +24,7 @@ This section is a runbook, written so that a person or a coding agent can follow
 - It never edits POMs or any project file. By default it writes nothing to disk. It reads the project, queries Maven Central and OSV.dev, and prints to the build log.
 - It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 17+, Maven 3.9+ and network access.
 
-**1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.199`. Maven downloads it the first time you run it.
+**1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.200`. Maven downloads it the first time you run it.
 
 **2. (Optional) Make the short `redkite:` prefix work (once per machine).** Add this to `~/.m2/settings.xml`. Create the file if it is missing, and add the `<pluginGroup>` line inside an existing `<pluginGroups>` element if there is one:
 
@@ -36,7 +36,7 @@ This section is a runbook, written so that a person or a coding agent can follow
 </settings>
 ```
 
-If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.99.199:report` (and `…:check`) wherever the commands below say `mvn redkite:report`.
+If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.99.200:report` (and `…:check`) wherever the commands below say `mvn redkite:report`.
 
 **3. Run it in the target project.** From the directory holding the root `pom.xml`, with no edits to that project:
 
@@ -57,7 +57,7 @@ mvn -B redkite:check      # print the report; fail the build for fixable vulnera
       <plugin>
         <groupId>net.dublinux.redkite</groupId>
         <artifactId>red-kite-maven-plugin</artifactId>
-        <version>0.99.199</version>
+        <version>0.99.200</version>
         <executions>
           <execution>
             <goals><goal>check</goal></goals>
@@ -150,7 +150,8 @@ Candidate versions come from RedKite's CVE search (a bounded window of nearby ve
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written when `jsonReport` is true. |
 | `cache` | `redkite.cache` | `false` | both | Keep a persistent lookup cache between builds. When false, an in-memory database is used and nothing is written to disk. |
 | `showProgress` | `redkite.progress` | `true` | both | Show progress while analysing: a live status line (spinner, current step, elapsed time) on an interactive terminal, one log line per step when output is piped, in batch mode (`-B`), on CI or with `-X`. |
-| `databaseUrl` | `redkite.db.url` | `~/.redkite/plugin/redkite` (H2, `AUTO_SERVER`) | both | H2 database for the cache and scan history; used only when `cache` is true. |
+| `databaseUrl` | `redkite.db.url` | `jdbc:h2:${user.home}/.redkite/plugin/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE` | both | H2 database for the cache and scan history; used only when `cache` is true. |
+| `showTransitives` | `redkite.showTransitives` | `false` | both | Also list plain "newer version exists" updates for transitive dependencies, in a separate "Transitive-only updates" section. Off by default, matching the server's Outdated count: nothing in the project forces them to move. Direct dependencies and vulnerability fixes are always listed. |
 | `consoleReport` | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
