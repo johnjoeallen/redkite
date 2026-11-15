@@ -96,7 +96,7 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
                         msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
                         line -> getLog().debug(line));
             }
-            String text = TextReport.render(result.report(), showTransitives);
+            String text = TextReport.render(result.report(), showTransitives, PinnedCoordinates.find(root));
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }

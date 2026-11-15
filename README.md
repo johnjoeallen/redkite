@@ -93,11 +93,29 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 
 ```bash
 # in the project to analyse (root pom.xml directory)
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.200:report   # print the report, never fails the build
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.200:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.201:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.201:check    # fail the build for vulnerabilities that have a same-major fix
 ```
 
-To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`. Useful options: `-Dredkite.failOnSeverity=CRITICAL`, `-Dredkite.enforcer=true`, `-Dredkite.jsonReport=true`, `-Dredkite.cache=true`.
+To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
+
+Every option is a `-D` property on the command line or a `<configuration>` entry in the POM:
+
+| Property | Default | Goals | Meaning |
+|---|---|---|---|
+| `redkite.skip` | `false` | both | Skip the plugin. |
+| `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
+| `redkite.progress` | `true` | both | Show progress: a live spinner on a terminal, one log line per step when piped, in `-B`, on CI or with `-X`. |
+| `redkite.allowMajorUpgrades` | `false` | both | Allow upgrade recommendations that cross a major version. |
+| `redkite.showTransitives` | `false` | `report` | Also list plain "newer version exists" updates for transitive dependencies, in a separate section. Vulnerability fixes are always listed. |
+| `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
+| `redkite.jsonReport` | `false` | both | Also write a JSON copy of the report. No files are written by default. |
+| `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report goes when `jsonReport` is true. |
+| `redkite.cache` | `false` | both | Keep a persistent lookup cache between builds. Off means an in-memory database and nothing on disk. |
+| `redkite.db.url` | `jdbc:h2:${user.home}/.redkite/plugin/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE` | both | H2 database for the cache; used only when `redkite.cache` is true. |
+| `redkite.failOnSeverity` | `HIGH` | `check` | Fail when a same-major fix exists for a vulnerability at or above this severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; `NONE` disables). |
+| `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
+| `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
 
 The [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) have a step-by-step runbook for enabling it in a project (suitable for a coding agent), how to bind it to a build profile, reading the output, every parameter, and troubleshooting.
 

@@ -24,6 +24,12 @@ final class TextReport {
 
     /** @param showTransitives also list plain "newer version exists" updates for transitive dependencies */
     static String render(ScanReport report, boolean showTransitives) {
+        return render(report, showTransitives, java.util.Set.of());
+    }
+
+    /** @param pinned {@code groupId:artifactId} of dependencies the user pinned; plain (non-CVE) updates for
+     *                them are left out, as in the server, because a pin is a deliberate decision to hold the version */
+    static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned) {
         List<String> out = new ArrayList<>();
         out.add("RedKite report");
         out.add("==============");
@@ -50,9 +56,14 @@ final class TextReport {
         }
         Map<String, UpgradeRecommendation> uniqueRecs = new LinkedHashMap<>();
         Map<String, UpgradeRecommendation> transitiveRecs = new LinkedHashMap<>();
+        java.util.Set<String> pinnedHidden = new java.util.HashSet<>();
         for (UpgradeRecommendation r : report.recommendations()) {
             String id = key(r.coordinate()) + ":" + r.currentVersion() + ":" + r.targetVersion();
             if (uniqueRecs.containsKey(id) || transitiveRecs.containsKey(id)) continue;
+            if (pinned.contains(key(r.coordinate())) && !isVulnerabilityDriven(r)) {
+                pinnedHidden.add(id);
+                continue;
+            }
             if (isActionable(r, directKeys.contains(key(r.coordinate()) + ":" + r.currentVersion()))) {
                 uniqueRecs.put(id, r);
             } else {
@@ -62,7 +73,8 @@ final class TextReport {
         out.add("Recommendations: " + uniqueRecs.size()
                 + (transitiveRecs.isEmpty() ? ""
                 : showTransitives ? " (+ " + transitiveRecs.size() + " transitive-only updates, listed separately)"
-                : " (" + transitiveRecs.size() + " transitive-only updates not listed)"));
+                : " (" + transitiveRecs.size() + " transitive-only updates not listed)")
+                + (pinnedHidden.isEmpty() ? "" : " (" + pinnedHidden.size() + " updates for pinned dependencies not listed)"));
         out.add("");
 
         out.add("Vulnerabilities");
@@ -126,6 +138,10 @@ final class TextReport {
     /** A recommendation worth listing: the dependency is declared directly, or it is vulnerability-driven. */
     static boolean isActionable(UpgradeRecommendation r, boolean direct) {
         if (direct) return true;
+        return isVulnerabilityDriven(r);
+    }
+
+    private static boolean isVulnerabilityDriven(UpgradeRecommendation r) {
         return switch (r.reason()) {
             case CVE_FIX, CVE_FIX_DOWNGRADE, CVE_BEST_EFFORT -> true;
             default -> false;
