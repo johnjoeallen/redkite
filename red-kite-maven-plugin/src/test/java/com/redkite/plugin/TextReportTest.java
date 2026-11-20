@@ -72,8 +72,9 @@ class TextReportTest {
         ScanReport plain = new ScanReport("s", "p", true, "", Instant.now(), List.of(direct), List.of(), List.of(),
                 List.of(rec(RecommendationReason.PATCH_AVAILABLE)), List.of(), List.of(), List.of());
         String text = TextReport.render(plain, false, java.util.Set.of("g:a"));
-        assertTrue(text.contains("Recommendations: 0 (1 updates for pinned dependencies not listed)"), text);
-        assertFalse(text.contains("1.0 -> 1.1"));
+        assertTrue(text.contains("Recommendations: 0 (+ 1 updates for pinned dependencies, listed separately)"), text);
+        assertTrue(text.substring(text.indexOf("Pinned dependencies with upgrades available")).contains("1.0 -> 1.1"), text);
+        assertTrue(text.substring(text.indexOf("Recommended upgrades"), text.indexOf("Pinned dependencies with upgrades available")).contains("none"), text);
         ScanReport cve = new ScanReport("s", "p", true, "", Instant.now(), List.of(direct), List.of(), List.of(),
                 List.of(rec(RecommendationReason.CVE_FIX)), List.of(), List.of(), List.of());
         assertTrue(TextReport.render(cve, false, java.util.Set.of("g:a")).contains("1.0 -> 1.1"));

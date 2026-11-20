@@ -56,12 +56,12 @@ final class TextReport {
         }
         Map<String, UpgradeRecommendation> uniqueRecs = new LinkedHashMap<>();
         Map<String, UpgradeRecommendation> transitiveRecs = new LinkedHashMap<>();
-        java.util.Set<String> pinnedHidden = new java.util.HashSet<>();
+        Map<String, UpgradeRecommendation> pinnedRecs = new LinkedHashMap<>();
         for (UpgradeRecommendation r : report.recommendations()) {
             String id = key(r.coordinate()) + ":" + r.currentVersion() + ":" + r.targetVersion();
             if (uniqueRecs.containsKey(id) || transitiveRecs.containsKey(id)) continue;
             if (pinned.contains(key(r.coordinate())) && !isVulnerabilityDriven(r)) {
-                pinnedHidden.add(id);
+                pinnedRecs.put(id, r);
                 continue;
             }
             if (isActionable(r, directKeys.contains(key(r.coordinate()) + ":" + r.currentVersion()))) {
@@ -74,7 +74,7 @@ final class TextReport {
                 + (transitiveRecs.isEmpty() ? ""
                 : showTransitives ? " (+ " + transitiveRecs.size() + " transitive-only updates, listed separately)"
                 : " (" + transitiveRecs.size() + " transitive-only updates not listed)")
-                + (pinnedHidden.isEmpty() ? "" : " (" + pinnedHidden.size() + " updates for pinned dependencies not listed)"));
+                + (pinnedRecs.isEmpty() ? "" : " (+ " + pinnedRecs.size() + " updates for pinned dependencies, listed separately)"));
         out.add("");
 
         out.add("Vulnerabilities");
@@ -117,6 +117,14 @@ final class TextReport {
             }
             addRecommendations(out, transitiveRecs.values());
         }
+        out.add("");
+        out.add("Pinned dependencies with upgrades available");
+        out.add("-------------------------------------------");
+        out.add("  Held back by a redkite:user-pin marker; shown for information only.");
+        if (pinnedRecs.isEmpty()) {
+            out.add("  none");
+        }
+        addRecommendations(out, pinnedRecs.values());
         if (!report.treeParseWarnings().isEmpty()) {
             out.add("");
             out.add("Warnings");

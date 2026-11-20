@@ -177,7 +177,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 
 ## Notes
 
-- Dependencies pinned with a `redkite:user-pin` marker in any project POM (the pins the server writes) get no plain "newer version exists" recommendation, as in the server; vulnerability fixes are still listed. The header says how many were left out.
+- Dependencies pinned with a `redkite:user-pin` marker in any project POM (the pins the server writes) get no plain "newer version exists" recommendation, as in the server; vulnerability fixes are still listed. Their available upgrades are shown for information in a separate "Pinned dependencies with upgrades available" section of the report.
 - The scan runs `mvn dependency:tree` as a child process, so `mvn` must be on `PATH`, as for the server.
 - The plugin only reads the project. It never edits POMs; applying upgrades remains a server feature.
 - Run with `-X` to see RedKite's per-component logging.
