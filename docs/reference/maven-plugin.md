@@ -10,8 +10,11 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 | --- | --- | --- |
 | `redkite:report` | none | Analyse and print the report. Never fails the build. |
 | `redkite:check` | `verify` | Print the report, then fail the build for vulnerabilities a developer can fix. |
-| `redkite:apply` | none | Edit the POMs: upgrade or pin the dependencies you name (`-Dredkite.upgrades`), or drop pins (`-Dredkite.drop`). |
-| `redkite:recommended` | none | Edit the POMs: upgrade every direct dependency to its recommended version. |
+| `redkite:upgrade` | none | Edit the POMs: upgrade exactly the dependencies you name (`-Dredkite.upgrades`). |
+| `redkite:upgrade-all` | none | Edit the POMs: apply the CVE fixes and recommended upgrades RedKite chooses. |
+| `redkite:upgrade-cve` | none | Edit the POMs: upgrade only to fix vulnerabilities. |
+| `redkite:drop` | none | Remove RedKite pins (`-Dredkite.pins`). Runs no analysis. |
+| `redkite:unpin` | none | Keep a pinned version but release the pin (`-Dredkite.pins`). Runs no analysis. |
 
 All goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
 
@@ -97,37 +100,49 @@ export RK_CACHE=true
 
 No POM or `settings.xml` change is needed. The cache is on when `RK_CACHE` is `true` and off otherwise, so CI, where the variable is unset, keeps it off. An explicit `-Dredkite.cache=true|false` or `<cache>` configuration always takes precedence over the variable. To confirm it is in effect, look for `(cache jdbc:h2:...)` rather than `(cache disabled)` in the `RedKite analysing` log line.
 
-## Applying upgrades and pins
+## Upgrading and pinning
 
-`redkite:apply` is the command-line version of the server's "Apply selected". Run `redkite:report` to see what is recommended, then name what you want changed:
+These goals are the command-line version of the server's "Apply selected". Run `redkite:report` first to see what is recommended. None of them runs a build afterwards, so review the diff and run your build to validate it. All of them accept `-Dredkite.dryRun=true`, which shows what would change and writes nothing.
+
+| Goal | Upgrades |
+| --- | --- |
+| `redkite:upgrade` | exactly what you name with `-Dredkite.upgrades=groupId:artifactId[:version],...` (required) |
+| `redkite:upgrade-all` | the CVE fixes and recommended upgrades RedKite chooses |
+| `redkite:upgrade-cve` | only the version that fixes a vulnerability |
 
 ```bash
-# every direct dependency to its recommended version (transitive ones are not pinned)
-mvn -B redkite:recommended
-mvn -B redkite:recommended -Dredkite.dryRun=true
+# exactly these: an explicit version, or leave it off for RedKite's recommended one
+mvn -B redkite:upgrade -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3
+mvn -B redkite:upgrade -Dredkite.upgrades=org.apache.tomcat.embed:tomcat-embed-core,com.rabbitmq:amqp-client
 
-# an explicit version
-mvn -B redkite:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3
-
-# RedKite's recommended version (leave the version off), several at once
-mvn -B redkite:apply -Dredkite.upgrades=org.apache.tomcat.embed:tomcat-embed-core,com.rabbitmq:amqp-client
-
-# see the change without writing anything
-mvn -B redkite:apply -Dredkite.dryRun=true -Dredkite.upgrades=com.rabbitmq:amqp-client
-
-# drop a pin again
-mvn -B redkite:apply -Dredkite.drop=com.rabbitmq:amqp-client
+# let RedKite choose
+mvn -B redkite:upgrade-cve
+mvn -B redkite:upgrade-all -Dredkite.dryRun=true
 ```
 
-What happens depends on the dependency:
+**How a dependency is changed.** A *direct* dependency is upgraded where it is declared, with the same POM patching as the server: a version that is already a property has the property updated, a literal version is moved into a property, and a BOM-managed dependency gets an explicit version. A *transitive* dependency has no declaration of its own, so it is **pinned**: a `<dependencyManagement>` entry with the version goes into the root POM and forces that version for every module.
 
-- **A direct dependency** is upgraded where it is declared, with the same POM patching as the server: a version that is already a property has the property updated, a literal version is moved into a property, and a BOM-managed dependency gets an explicit version.
-- **A transitive dependency** has no declaration of its own to change, so it is **pinned**: a `<dependencyManagement>` entry with the version goes into the root POM, marked with a `redkite:user-pin` comment. The pin forces that version for every module.
-- **`redkite.drop`** removes RedKite's pin for a dependency: the marked `<dependencyManagement>` entry (and the block around it, if that leaves it empty), or the `redkite:user-pin` marker on a version property, whose value is left alone. It needs no analysis, so it is fast. Dropping something with no pin is reported as skipped. The dependency is no longer forced afterwards, but a pin's version is not rolled back; to go back to the earlier version, drop the pin and upgrade the dependency again.
+**What `upgrade-all` and `upgrade-cve` choose.**
 
-A pin is written with the `redkite:user-pin` marker, so it is protected from the server's bulk upgrades until you drop it. The `redkite:pin-summary` comment at the top of each POM is refreshed, as the server does.
+- `upgrade-cve` takes only the same-fix recommendations: the version that fixes the vulnerability. Best-effort fixes (which leave some vulnerability behind) and downgrades are not applied.
+- `upgrade-all` also takes best-effort fixes and newer versions of **direct** dependencies. A transitive dependency is only changed for a vulnerability. Downgrades and SNAPSHOT replacements are never done in bulk. Whether major-version upgrades are considered follows `redkite.allowMajorUpgrades`.
+- A transitive fix from these goals is a normal RedKite pin, which later runs may move. A pin you create with `redkite:upgrade` is a **user pin**.
+- If different modules are recommended different versions of the same dependency, it is left alone and listed, so you can name one with `redkite:upgrade`.
 
-`apply` does not run a build afterwards, so review the diff and run your build to validate it. Naming something that isn't a dependency of the project is reported as skipped and fails the goal. A missing or malformed argument fails immediately, before any analysis. Upgrading and dropping the same dependency in one run is refused.
+**Pinned dependencies.** A dependency with a user pin is never changed by `upgrade-all` or `upgrade-cve`, even to fix a vulnerability. It is listed with a warning instead. Only `redkite:upgrade` with the dependency named explicitly changes it, and it stays pinned at the new version.
+
+**Removing pins.** Both goals take `-Dredkite.pins=groupId:artifactId,...`, read only the POMs, and so run in seconds.
+
+```bash
+mvn -B redkite:unpin -Dredkite.pins=com.rabbitmq:amqp-client   # keep the version, release the protection
+mvn -B redkite:drop  -Dredkite.pins=com.rabbitmq:amqp-client   # remove the pin entry altogether
+```
+
+- `unpin` leaves the version where it is and removes the `redkite:user-pin` marker, so the bulk goals may move it again. The entry becomes an ordinary `<dependencyManagement>` entry, so a later `drop` will find no RedKite pin; remove such an entry by hand.
+- `drop` removes the marked `<dependencyManagement>` entry (and the block around it, if that leaves it empty), so the dependency is no longer forced to a version. It does not restore the earlier version; upgrade the dependency afterwards if you want that.
+- Naming something with no pin is reported as skipped and the goal fails.
+
+The `redkite:pin-summary` comment at the top of each POM is refreshed after every change, as the server does. A missing or malformed argument fails immediately, before any analysis, and naming something that isn't a dependency of the project is reported as skipped and fails the goal.
 
 ## Usage
 
@@ -162,7 +177,7 @@ Recommended upgrades
   com.fasterxml.jackson.core:jackson-core   2.22.2 -> 2.22.3  [CVE_FIX, PATCH risk]
 ```
 
-To act on a `check` failure, change the dependency's version in the project's POM (or the property that holds it) to the version named in the message, rebuild and test it yourself, then re-run `redkite:check`. The plugin does not apply changes. A `[WARNING]` from `check` means there is nothing fixable on the same major line, so no version change will clear it; it doesn't fail the build.
+To act on a `check` failure, change the dependency's version in the project's POM (or the property that holds it) to the version named in the message, rebuild and test it yourself, then re-run `redkite:check`. You can have the plugin make that change with `redkite:upgrade-cve` (or `redkite:upgrade` for one dependency). A `[WARNING]` from `check` means there is nothing fixable on the same major line, so no version change will clear it; it doesn't fail the build.
 
 ## When `check` fails the build
 
@@ -218,15 +233,15 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) at or above which a fixable vulnerability fails the build; `NONE` disables. |
 | `failOnSnapshot` | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `failOnIncomplete` | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
-| `upgrades` | `redkite.upgrades` | none | `apply` | Upgrades to apply: comma-separated `groupId:artifactId[:version]`; no version means the recommended one. A transitive dependency is pinned. |
-| `drop` | `redkite.drop` | none | `apply`, `recommended` | Pins to drop: comma-separated `groupId:artifactId`. Give this, `upgrades`, or both. |
-| `dryRun` | `redkite.dryRun` | `false` | `apply`, `recommended` | Show what would change and write nothing. |
+| `upgrades` | `redkite.upgrades` | none | `upgrade` | Dependencies to upgrade: comma-separated `groupId:artifactId[:version]`; no version means the recommended one. A transitive dependency is pinned. Required. |
+| `pins` | `redkite.pins` | none | `drop`, `unpin` | Pins to remove: comma-separated `groupId:artifactId`. Required. |
+| `dryRun` | `redkite.dryRun` | `false` | `upgrade`, `upgrade-all`, `upgrade-cve`, `drop`, `unpin` | Show what would change and write nothing. |
 
 ## Notes
 
 - Dependencies pinned with a `redkite:user-pin` marker in any project POM (the pins the server writes) get no plain "newer version exists" recommendation, as in the server; vulnerability fixes are still listed. Their available upgrades are shown for information in a separate "Pinned dependencies with upgrades available" section of the report.
 - The scan runs `mvn dependency:tree` as a child process, so `mvn` must be on `PATH`, as for the server.
-- The plugin only reads the project. It never edits POMs; applying upgrades remains a server feature.
+- `report` and `check` only read the project. Only the `upgrade`, `upgrade-all`, `upgrade-cve`, `drop` and `unpin` goals edit POMs, and only when you run them.
 - Run with `-X` to see RedKite's per-component logging.
 - If a run fails with an H2 error such as `EOFException` or `Timeout trying to lock table`, the plugin's persistent cache database (`redkite.cache=true`) is damaged. It holds only cached lookups, so delete `~/.redkite/plugin/` and re-run.
 

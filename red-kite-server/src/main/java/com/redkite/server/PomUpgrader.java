@@ -24,7 +24,7 @@ import java.util.Set;
  *   <li>A <em>direct</em> dependency is upgraded where it is declared.
  *   <li>A <em>transitive</em> dependency has no declaration to change, so it is pinned: a
  *       {@code <dependencyManagement>} entry marked {@code redkite:user-pin} goes in the root POM.
- *   <li>A pin can be <em>dropped</em> again, which needs no analysis.
+ *   <li>A pin can be <em>dropped</em> or <em>unpinned</em> again, which needs no analysis.
  * </ul>
  */
 public final class PomUpgrader {
@@ -35,18 +35,23 @@ public final class PomUpgrader {
 
     /** What is planned: the changes, the pins dropped, every POM that would be rewritten (path relative to the
      *  project root), and what was refused. */
-    public record Plan(List<Change> changes, List<String> dropped, Map<String, String> patchedPoms, List<String> problems) {}
+    public record Plan(List<Change> changes, List<String> dropped, List<String> unpinned,
+                       Map<String, String> patchedPoms, List<String> problems) {}
 
     /**
      * @param projectRoot directory containing the root {@code pom.xml}
      * @param pomFiles    every project POM (the root's and each module's); read from disk
      * @param result      an analysis of the project, needed only when {@code requested} is not empty (may be null otherwise)
      * @param requested   {@code groupId:artifactId} to the wanted version; null or blank means RedKite's recommended version
+     * @param bulk        true when RedKite chose {@code requested} itself (upgrade-all, upgrade-cve): a transitive then gets a
+     *                    computed pin that later bulk runs may move, instead of the user pin an explicit request gets
      * @param drops       {@code groupId:artifactId} whose RedKite pin should be removed
+     * @param unpins      {@code groupId:artifactId} whose user pin should be released, keeping the version
      * @return the planned POM contents; nothing is written
      */
     public static Plan plan(Path projectRoot, List<Path> pomFiles, ReportExporter.Result result,
-                            Map<String, String> requested, Set<String> drops) throws IOException {
+                            Map<String, String> requested, boolean bulk, Set<String> drops,
+                            Set<String> unpins) throws IOException {
         Path root = projectRoot.toAbsolutePath().normalize();
         Map<String, String> original = new LinkedHashMap<>();
         Path rootPom = root.resolve("pom.xml");
@@ -60,6 +65,7 @@ public final class PomUpgrader {
         List<String> problems = new ArrayList<>();
         List<Change> changes = new ArrayList<>();
         List<String> dropped = new ArrayList<>();
+        List<String> unpinned = new ArrayList<>();
         RemediationApplier applier = new RemediationApplier();
 
         for (String coord : drops) {
@@ -76,9 +82,26 @@ public final class PomUpgrader {
             else problems.add(coord + ": no RedKite pin to drop");
         }
 
+        for (String coord : unpins) {
+            String[] ga = coord.split(":");
+            boolean found = false;
+            for (Map.Entry<String, String> e : working.entrySet()) {
+                String next = applier.removeUserPin(e.getValue(), ga[0], ga[1]);
+                if (!next.equals(e.getValue())) {
+                    e.setValue(next);
+                    found = true;
+                }
+            }
+            if (found) unpinned.add(coord);
+            else problems.add(coord + ": no user pin to release");
+        }
+
         if (!requested.isEmpty()) {
             if (result == null) throw new IllegalArgumentException("an analysis is needed to plan upgrades");
             Map<String, String> directUpdates = new LinkedHashMap<>();
+            Set<String> userPinned = new LinkedHashSet<>();
+            for (String content : working.values()) userPinned.addAll(applier.findUserPinnedCoordinates(content));
+            Set<Long> repinIds = new LinkedHashSet<>();
             for (Map.Entry<String, String> want : requested.entrySet()) {
                 String coord = want.getKey();
                 List<ScanComponent> all = result.report().components().stream()
@@ -113,13 +136,16 @@ public final class PomUpgrader {
                     }
                     String[] ga = coord.split(":");
                     working.put("pom.xml", applier.applyDependencyManagementPin(rootContent, ga[0], ga[1], version,
-                            "pinned with redkite:apply", RemediationApplier.PinKind.USER));
+                            bulk ? "set by a redkite upgrade goal" : "pinned with redkite:upgrade",
+                            bulk ? RemediationApplier.PinKind.COMPUTED : RemediationApplier.PinKind.USER));
                     changes.add(new Change(ga[0], ga[1], c.version(), version, true));
                     continue;
                 }
                 for (ScanComponent c : direct) {
                     if (version.equals(c.version())) continue;
                     directUpdates.put(Long.toString(c.id()), version);
+                    // An explicit upgrade of a user-pinned dependency keeps it pinned, at the new version.
+                    if (userPinned.contains(coord)) repinIds.add(c.id());
                     changes.add(new Change(c.coordinate().groupId(), c.coordinate().artifactId(), c.version(), version, false));
                 }
             }
@@ -127,7 +153,8 @@ public final class PomUpgrader {
                 Map<String, String> patched;
                 try {
                     patched = new PomChanges(null, new EnforcerAnalysis(null))
-                            .generatePomPatches(result.report(), working, root.toString(), directUpdates, Map.of());
+                            .generatePomPatches(result.report(), working, root.toString(), directUpdates, Map.of(),
+                                    repinIds, Set.of());
                 } catch (IOException | RuntimeException e) {
                     throw e;
                 } catch (Exception e) {
@@ -137,7 +164,7 @@ public final class PomUpgrader {
             }
         }
 
-        boolean anyChange = !changes.isEmpty() || !dropped.isEmpty();
+        boolean anyChange = !changes.isEmpty() || !dropped.isEmpty() || !unpinned.isEmpty();
         Map<String, String> changed = new LinkedHashMap<>();
         if (anyChange) {
             refreshSummaries(applier, working);
@@ -145,29 +172,7 @@ public final class PomUpgrader {
                 if (!e.getValue().equals(original.get(e.getKey()))) changed.put(e.getKey(), e.getValue());
             }
         }
-        return new Plan(changes, dropped, changed, problems);
-    }
-
-    /**
-     * Every direct dependency that RedKite has a recommended version for, as {@code groupId:artifactId} to null (the
-     * recommended version), ready to hand to {@link #plan}. Dependencies it could not change anyway (a SNAPSHOT, or one
-     * with no declaration in a POM) and those in {@code except} are left out; transitive ones are never pinned.
-     */
-    public static Map<String, String> recommendedDirect(ReportExporter.Result result, Set<String> except) {
-        Set<String> upgradable = new LinkedHashSet<>();
-        for (ScanComponent c : result.report().components()) {
-            if (c.direct() && !c.snapshot() && c.sourceFilePath() != null) {
-                upgradable.add(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
-            }
-        }
-        Map<String, String> out = new LinkedHashMap<>();
-        for (UpgradeRecommendation r : result.report().recommendations()) {
-            String coord = r.coordinate().groupId() + ":" + r.coordinate().artifactId();
-            if (upgradable.contains(coord) && !except.contains(coord) && r.targetVersion() != null && !r.targetVersion().isBlank()) {
-                out.put(coord, null);
-            }
-        }
-        return out;
+        return new Plan(changes, dropped, unpinned, changed, problems);
     }
 
     /** Writes the planned POMs under {@code projectRoot}. */
