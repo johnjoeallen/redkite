@@ -87,26 +87,13 @@ Common setup problems:
 
 ## Cache on for local builds only
 
-The cache is off by default, so CI needs no change. To enable it only on your own machine, activate a profile from an environment variable. Put this in `~/.m2/settings.xml` (local to you) or in the project POM (shared, but only active for people who set the variable):
+The cache is off by default, so CI needs no change. To enable it only on your own machine, set an environment variable, for example in `~/.bashrc`:
 
-```xml
-<profile>
-  <id>redkite-cache</id>
-  <activation>
-    <property>
-      <name>env.RK_CACHE</name>
-      <value>true</value>
-    </property>
-  </activation>
-  <properties>
-    <redkite.cache>true</redkite.cache>
-  </properties>
-</profile>
+```bash
+export RK_CACHE=true
 ```
 
-Then add `export RK_CACHE=true` to your shell profile. Where `RK_CACHE` is unset, as on CI, the profile does not activate and `redkite.cache` keeps its default of `false`.
-
-Maven POMs have no `${VAR:default}` syntax, and an unset `${env.RK_CACHE}` is left as literal text, so use a profile rather than referencing the variable directly. If you already activate profiles with `-P`, this one still works because it is activated by property, not by `activeByDefault`. To confirm it is in effect, check that `~/.redkite/plugin/redkite.mv.db` is updated after a run.
+No POM or `settings.xml` change is needed. The cache is on when `RK_CACHE` is `true` and off otherwise, so CI, where the variable is unset, keeps it off. An explicit `-Dredkite.cache=true|false` or `<cache>` configuration always takes precedence over the variable. To confirm it is in effect, look for `(cache jdbc:h2:...)` rather than `(cache disabled)` in the `RedKite analysing` log line.
 
 ## Usage
 
@@ -187,7 +174,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
 | `jsonReport` | `redkite.jsonReport` | `false` | both | Also write a JSON copy of the report. No files are written by default. |
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written when `jsonReport` is true. |
-| `cache` | `redkite.cache` | `false` | both | Keep a persistent lookup cache between builds. When false, an in-memory database is used and nothing is written to disk. |
+| `cache` | `redkite.cache` | `false`; `true` if env `RK_CACHE=true` | both | Keep a persistent lookup cache between builds. When false, an in-memory database is used and nothing is written to disk. |
 | `showProgress` | `redkite.progress` | `true` | both | Show progress while analysing: a live status line (spinner, current step, elapsed time) on an interactive terminal, one log line per step when output is piped, in batch mode (`-B`), on CI or with `-X`. |
 | `databaseUrl` | `redkite.db.url` | `jdbc:h2:${user.home}/.redkite/plugin/redkite;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE` | both | H2 database for the cache and scan history; used only when `cache` is true. |
 | `showTransitives` | `redkite.showTransitives` | `false` | `report` | Also list plain "newer version exists" updates for transitive dependencies, in a separate "Transitive-only updates" section. Off by default, matching the server's Outdated count: nothing in the project forces them to move. Direct dependencies and vulnerability fixes are always listed. `check` ignores it. |

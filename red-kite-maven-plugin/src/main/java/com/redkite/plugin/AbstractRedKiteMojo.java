@@ -32,9 +32,17 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
 
     /** Keep a persistent cache of Maven Central and OSV lookups between builds. Disabled by default:
      *  each build then uses a throwaway in-memory database, queries the sources afresh and leaves
-     *  nothing on disk. When enabled, {@code databaseUrl} (or the default plugin database) is used. */
-    @Parameter(property = "redkite.cache", defaultValue = "false")
-    boolean cache;
+     *  nothing on disk. When enabled, {@code databaseUrl} (or the default plugin database) is used.
+     *  When not set explicitly ({@code -Dredkite.cache} or POM configuration), the {@code RK_CACHE}
+     *  environment variable decides: {@code RK_CACHE=true} enables it, so a developer can turn the cache
+     *  on locally while CI, where the variable is unset, keeps it off. */
+    @Parameter(property = "redkite.cache")
+    Boolean cache;
+
+    /** Whether the persistent cache is on: the explicit setting wins, then {@code RK_CACHE}, then off. */
+    boolean cacheEnabled() {
+        return cache != null ? cache : "true".equalsIgnoreCase(System.getenv("RK_CACHE"));
+    }
 
     /** H2 database holding the metadata cache and scan history; only used when {@code cache} is true. Defaults to a plugin-only database
      *  shared by all projects (<code>~/.redkite/plugin/redkite</code>), separate from the server's. */
@@ -82,9 +90,9 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
         rk.setLevel(getLog().isDebugEnabled() ? java.util.logging.Level.INFO : java.util.logging.Level.WARNING);
         try {
             Path root = project.getBasedir().toPath();
-            String url = !cache ? ReportExporter.inMemoryJdbcUrl()
+            String url = !cacheEnabled() ? ReportExporter.inMemoryJdbcUrl()
                     : databaseUrl != null && !databaseUrl.isBlank() ? databaseUrl : ReportExporter.defaultJdbcUrl();
-            getLog().info("RedKite analysing " + root + (cache ? " (cache " + url + ")" : " (cache disabled)"));
+            getLog().info("RedKite analysing " + root + (cacheEnabled() ? " (cache " + url + ")" : " (cache disabled)"));
             boolean animate = showProgress && ProgressLine.shouldAnimate(
                     session == null || session.getRequest().isInteractiveMode(), getLog().isDebugEnabled(),
                     ProgressLine.stdoutIsTerminal(), System.getenv("CI"), System.getenv("TERM"));
