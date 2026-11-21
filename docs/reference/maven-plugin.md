@@ -85,6 +85,29 @@ Common setup problems:
 | `RedKite analysis failed: … dependency:tree failed` | The project doesn't build on its own (missing parent POM, unreachable repository). Fix that first, then re-run. |
 | H2 `EOFException` or `Timeout trying to lock table` | Only with `-Dredkite.cache=true`. Delete `~/.redkite/plugin/` and re-run. |
 
+## Cache on for local builds only
+
+The cache is off by default, so CI needs no change. To enable it only on your own machine, activate a profile from an environment variable. Put this in `~/.m2/settings.xml` (local to you) or in the project POM (shared, but only active for people who set the variable):
+
+```xml
+<profile>
+  <id>redkite-cache</id>
+  <activation>
+    <property>
+      <name>env.RK_CACHE</name>
+      <value>true</value>
+    </property>
+  </activation>
+  <properties>
+    <redkite.cache>true</redkite.cache>
+  </properties>
+</profile>
+```
+
+Then add `export RK_CACHE=true` to your shell profile. Where `RK_CACHE` is unset, as on CI, the profile does not activate and `redkite.cache` keeps its default of `false`.
+
+Maven POMs have no `${VAR:default}` syntax, and an unset `${env.RK_CACHE}` is left as literal text, so use a profile rather than referencing the variable directly. If you already activate profiles with `-P`, this one still works because it is activated by property, not by `activeByDefault`. To confirm it is in effect, check that `~/.redkite/plugin/redkite.mv.db` is updated after a run.
+
 ## Usage
 
 ```bash

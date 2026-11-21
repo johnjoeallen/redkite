@@ -117,6 +117,20 @@ Every option is a `-D` property on the command line or a `<configuration>` entry
 | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
 
+**Cache on for local builds only.** The cache is off unless asked for, so CI needs no change. To turn it on just for your own machine, activate a profile from an environment variable. Put this in `~/.m2/settings.xml` (or the project POM):
+
+```xml
+<profile>
+  <id>redkite-cache</id>
+  <activation>
+    <property><name>env.RK_CACHE</name><value>true</value></property>
+  </activation>
+  <properties><redkite.cache>true</redkite.cache></properties>
+</profile>
+```
+
+Then `export RK_CACHE=true` in your shell profile. Where `RK_CACHE` is unset (CI), the profile doesn't activate and the default of `false` applies. Maven POMs have no `${VAR:default}` syntax, which is why a profile is used.
+
 The [Maven plugin docs](https://johnjoeallen.github.io/redkite/reference/maven-plugin/) have a step-by-step runbook for enabling it in a project (suitable for a coding agent), how to bind it to a build profile, reading the output, every parameter, and troubleshooting.
 
 ## Configuration
