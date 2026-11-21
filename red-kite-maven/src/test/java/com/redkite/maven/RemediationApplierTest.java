@@ -792,4 +792,32 @@ class RemediationApplierTest {
         assertTrue(result.contains("redkite:dependency-management pin groupId=\"g\" artifactId=\"a\" version=\"1.5\""), result);
         assertTrue(result.contains("<artifactId>a</artifactId>\n        <version>1.5</version>"), result);
     }
+
+    @Test
+    void removePinDropsTheEntryAndTidiesTheEmptyBlocks() {
+        String pinned = applier.applyDependencyManagementPin(POM_WITH_DEPENDENCIES, "org.x", "lib", "1.2.3", "r",
+                RemediationApplier.PinKind.USER);
+        assertTrue(pinned.contains("<artifactId>lib</artifactId>"));
+        assertTrue(pinned.contains("redkite:user-pin"));
+
+        String dropped = applier.removePin(pinned, "org.x", "lib");
+        assertFalse(dropped.contains("lib"), dropped);
+        assertFalse(dropped.contains("redkite:user-pin"), dropped);
+        assertFalse(dropped.contains("dependencyManagement"), "the now-empty block is removed: " + dropped);
+        assertTrue(dropped.contains("service-b"), "the project's own dependencies are untouched");
+    }
+
+    @Test
+    void removePinKeepsOtherEntriesInTheSameBlock() {
+        String pinned = applier.applyDependencyManagementPin(POM_WITH_DEP_MGMT, "org.x", "lib", "1.2.3", "r");
+        String dropped = applier.removePin(pinned, "org.x", "lib");
+        assertFalse(dropped.contains("org.x"), dropped);
+        assertTrue(dropped.contains("<dependencyManagement>"), "the block still holds the project's own entry");
+    }
+
+    @Test
+    void removePinIsANoOpWithoutARedKitePin() {
+        assertEquals(POM_WITH_DEPENDENCIES, applier.removePin(POM_WITH_DEPENDENCIES, "com.example", "service-b"));
+        assertEquals(POM_WITH_DEP_MGMT, applier.removePin(POM_WITH_DEP_MGMT, "org.nope", "nothing"));
+    }
 }

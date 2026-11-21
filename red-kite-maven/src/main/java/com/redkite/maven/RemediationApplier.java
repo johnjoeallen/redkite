@@ -256,6 +256,38 @@ public class RemediationApplier {
         return removeMarker(content, groupId, artifactId, USER_PIN_TAG);
     }
 
+    /**
+     * Drops RedKite's pin for {@code groupId:artifactId}: removes the marker comment together with
+     * the {@code <dependencyManagement>} entry it labels (tidying a {@code <dependencies>} or
+     * {@code <dependencyManagement>} block left empty), and removes a property-level
+     * {@code redkite:user-pin} marker, leaving the property's value alone. The dependency is no
+     * longer forced to a version afterwards. Returns {@code content} unchanged when there is no
+     * RedKite pin for it. Exclusions are not touched.
+     */
+    public String removePin(String content, String groupId, String artifactId) {
+        Document doc = parse(content);
+        boolean changed = false;
+        Comment marker = findRedkiteDepMgmtComment(doc, groupId, artifactId);
+        if (marker != null && !matchesTag(marker.getData().strip(), UNMANAGED_TAG)) {
+            Node parent = marker.getParentNode();
+            Element entry = nextElementSibling(marker);
+            if (entry != null && "dependency".equals(entry.getNodeName()) && coordMatches(entry, groupId, artifactId)) {
+                parent.removeChild(entry);
+            }
+            parent.removeChild(marker);
+            changed = true;
+            if (parent instanceof Element deps && "dependencies".equals(deps.getNodeName()) && directChildren(deps).isEmpty()) {
+                Node mgmt = deps.getParentNode();
+                mgmt.removeChild(deps);
+                if (mgmt instanceof Element m && "dependencyManagement".equals(m.getNodeName()) && directChildren(m).isEmpty()) {
+                    m.getParentNode().removeChild(m);
+                }
+            }
+        }
+        String afterEntry = changed ? serialize(doc) : content;
+        return removeUserPin(afterEntry, groupId, artifactId);
+    }
+
     /** Whether a comment's data starts with {@code tag} — or, when {@code tag} is
      *  {@link #UNMANAGED_TAG}, with the pre-rename {@link #UNMANAGED_TAG_LEGACY} either. */
     private static boolean matchesTag(String data, String tag) {

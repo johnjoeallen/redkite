@@ -95,6 +95,8 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 # in the project to analyse (root pom.xml directory)
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:report   # print the report, never fails the build
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # edit the POMs
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:apply -Dredkite.drop=com.rabbitmq:amqp-client   # drop a pin
 ```
 
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
@@ -116,6 +118,9 @@ Every option is a `-D` property on the command line or a `<configuration>` entry
 | `redkite.failOnSeverity` | `HIGH` | `check` | Fail when a same-major fix exists for a vulnerability at or above this severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; `NONE` disables). |
 | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
+| `redkite.upgrades` | none | `apply` | Upgrades to apply: comma-separated `groupId:artifactId[:version]`. No version means RedKite's recommended one. A direct dependency is upgraded where declared; a transitive one is pinned in the root POM. |
+| `redkite.drop` | none | `apply` | Pins to drop again: comma-separated `groupId:artifactId`. Needs no analysis. Give this, `redkite.upgrades`, or both. |
+| `redkite.dryRun` | `false` | `apply` | Show what `apply` would change and write nothing. |
 
 **Cache on for local builds only.** The cache is off unless asked for, so CI needs no change. To turn it on just for your own machine, set an environment variable, with no POM or settings changes:
 

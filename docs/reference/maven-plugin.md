@@ -10,8 +10,9 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 | --- | --- | --- |
 | `redkite:report` | none | Analyse and print the report. Never fails the build. |
 | `redkite:check` | `verify` | Print the report, then fail the build for vulnerabilities a developer can fix. |
+| `redkite:apply` | none | Edit the POMs: upgrade or pin the dependencies you name (`-Dredkite.upgrades`), or drop pins (`-Dredkite.drop`). |
 
-Both goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
+All goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
 
 ## Enable it in a project
 
@@ -94,6 +95,34 @@ export RK_CACHE=true
 ```
 
 No POM or `settings.xml` change is needed. The cache is on when `RK_CACHE` is `true` and off otherwise, so CI, where the variable is unset, keeps it off. An explicit `-Dredkite.cache=true|false` or `<cache>` configuration always takes precedence over the variable. To confirm it is in effect, look for `(cache jdbc:h2:...)` rather than `(cache disabled)` in the `RedKite analysing` log line.
+
+## Applying upgrades and pins
+
+`redkite:apply` is the command-line version of the server's "Apply selected". Run `redkite:report` to see what is recommended, then name what you want changed:
+
+```bash
+# an explicit version
+mvn -B redkite:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3
+
+# RedKite's recommended version (leave the version off), several at once
+mvn -B redkite:apply -Dredkite.upgrades=org.apache.tomcat.embed:tomcat-embed-core,com.rabbitmq:amqp-client
+
+# see the change without writing anything
+mvn -B redkite:apply -Dredkite.dryRun=true -Dredkite.upgrades=com.rabbitmq:amqp-client
+
+# drop a pin again
+mvn -B redkite:apply -Dredkite.drop=com.rabbitmq:amqp-client
+```
+
+What happens depends on the dependency:
+
+- **A direct dependency** is upgraded where it is declared, with the same POM patching as the server: a version that is already a property has the property updated, a literal version is moved into a property, and a BOM-managed dependency gets an explicit version.
+- **A transitive dependency** has no declaration of its own to change, so it is **pinned**: a `<dependencyManagement>` entry with the version goes into the root POM, marked with a `redkite:user-pin` comment. The pin forces that version for every module.
+- **`redkite.drop`** removes RedKite's pin for a dependency: the marked `<dependencyManagement>` entry (and the block around it, if that leaves it empty), or the `redkite:user-pin` marker on a version property, whose value is left alone. It needs no analysis, so it is fast. Dropping something with no pin is reported as skipped. The dependency is no longer forced afterwards, but a pin's version is not rolled back; to go back to the earlier version, drop the pin and upgrade the dependency again.
+
+A pin is written with the `redkite:user-pin` marker, so it is protected from the server's bulk upgrades until you drop it. The `redkite:pin-summary` comment at the top of each POM is refreshed, as the server does.
+
+`apply` does not run a build afterwards, so review the diff and run your build to validate it. Naming something that isn't a dependency of the project is reported as skipped and fails the goal. A missing or malformed argument fails immediately, before any analysis. Upgrading and dropping the same dependency in one run is refused.
 
 ## Usage
 
@@ -184,6 +213,9 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) at or above which a fixable vulnerability fails the build; `NONE` disables. |
 | `failOnSnapshot` | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `failOnIncomplete` | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
+| `upgrades` | `redkite.upgrades` | none | `apply` | Upgrades to apply: comma-separated `groupId:artifactId[:version]`; no version means the recommended one. A transitive dependency is pinned. |
+| `drop` | `redkite.drop` | none | `apply` | Pins to drop: comma-separated `groupId:artifactId`. Give this, `upgrades`, or both. |
+| `dryRun` | `redkite.dryRun` | `false` | `apply` | Show what would change and write nothing. |
 
 ## Notes
 
