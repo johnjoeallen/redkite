@@ -93,13 +93,13 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 
 ```bash
 # in the project to analyse (root pom.xml directory)
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:report   # print the report, never fails the build
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:check    # fail the build for vulnerabilities that have a same-major fix
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:upgrade -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # upgrade what you name
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:upgrade-cve    # upgrade only to fix vulnerabilities
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:upgrade-all    # CVE fixes plus recommended upgrades
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:drop -Dredkite.pins=com.rabbitmq:amqp-client      # remove a pin
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:unpin -Dredkite.pins=com.rabbitmq:amqp-client     # keep the version, release the pin
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:upgrade -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # upgrade what you name
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:upgrade-cve    # upgrade only to fix vulnerabilities
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:upgrade-all    # CVE fixes plus recommended upgrades
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:drop -Dredkite.pins=com.rabbitmq:amqp-client      # remove a pin
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:unpin -Dredkite.pins=com.rabbitmq:amqp-client     # keep the version, release the pin
 ```
 
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
