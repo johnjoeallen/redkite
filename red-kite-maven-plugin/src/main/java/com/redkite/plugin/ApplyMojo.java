@@ -25,6 +25,7 @@ import org.apache.maven.project.MavenProject;
  *       declared, or pins a transitive one in the root POM. No version means RedKite's recommended one.
  *   <li>{@code -Dredkite.drop=groupId:artifactId,...} drops RedKite's pin for those dependencies again.
  * </ul>
+ * The {@code redkite:recommended} goal is this one with every direct dependency's recommended version added.
  * {@code -Dredkite.dryRun=true} shows the change without writing anything. Run {@code redkite:report}
  * first to see what is recommended.
  */
@@ -34,6 +35,9 @@ public class ApplyMojo extends AbstractRedKiteMojo {
      *  {@code groupId:artifactId:version}. A transitive dependency is pinned. */
     @Parameter(property = "redkite.upgrades")
     String upgrades;
+
+    /** Also upgrade every direct dependency to RedKite's recommended version. Set by {@link RecommendedMojo}, not a parameter. */
+    boolean recommended;
 
     /** Pins to drop: comma-separated {@code groupId:artifactId}. Needs no analysis. */
     @Parameter(property = "redkite.drop")
@@ -84,17 +88,17 @@ public class ApplyMojo extends AbstractRedKiteMojo {
         // Fail fast on a missing or malformed argument, before any slow analysis.
         Map<String, String> wanted = parse(upgrades);
         Set<String> drops = parseCoordinates(drop);
-        if (wanted.isEmpty() && drops.isEmpty()) {
+        if (wanted.isEmpty() && drops.isEmpty() && !recommended) {
             throw new MojoFailureException("Say what to change: -Dredkite.upgrades=groupId:artifactId[:version],... "
                     + "(no version means the recommended one; a transitive dependency is pinned) and/or "
-                    + "-Dredkite.drop=groupId:artifactId,... to drop pins. Run redkite:report to see what is recommended.");
+                    + "-Dredkite.drop=groupId:artifactId,... to drop pins (or run redkite:recommended for every direct dependency's recommended version). Run redkite:report to see what is recommended.");
         }
         for (String coord : drops) {
             if (wanted.containsKey(coord)) {
                 throw new MojoFailureException(coord + " is both upgraded and dropped, pick one.");
             }
         }
-        if (wanted.isEmpty()) {
+        if (wanted.isEmpty() && !recommended) {
             apply(null); // dropping pins needs no analysis
         } else {
             super.execute();
@@ -110,7 +114,13 @@ public class ApplyMojo extends AbstractRedKiteMojo {
         Path root = project.getBasedir().toPath();
         PomUpgrader.Plan plan;
         try {
-            plan = PomUpgrader.plan(root, pomFiles(), result, parse(upgrades), parseCoordinates(drop));
+            Set<String> drops = parseCoordinates(drop);
+            Map<String, String> wanted = parse(upgrades);
+            if (recommended) {
+                // Named upgrades keep their own version; a dropped pin is not re-upgraded.
+                PomUpgrader.recommendedDirect(result, drops).forEach(wanted::putIfAbsent);
+            }
+            plan = PomUpgrader.plan(root, pomFiles(), result, wanted, drops);
         } catch (IOException e) {
             throw new MojoFailureException("RedKite could not prepare the changes: " + e.getMessage(), e);
         }

@@ -54,4 +54,10 @@ class ApplyMojoTest {
         MojoFailureException e = assertThrows(MojoFailureException.class, mojo::execute);
         assertTrue(e.getMessage().contains("redkite.upgrades"));
     }
+
+    @Test
+    void theRecommendedGoalIsApplyWithTheRecommendedVersionsSwitchedOn() {
+        assertTrue(new RecommendedMojo().recommended);
+        assertTrue(!new ApplyMojo().recommended);
+    }
 }

@@ -148,6 +148,28 @@ public final class PomUpgrader {
         return new Plan(changes, dropped, changed, problems);
     }
 
+    /**
+     * Every direct dependency that RedKite has a recommended version for, as {@code groupId:artifactId} to null (the
+     * recommended version), ready to hand to {@link #plan}. Dependencies it could not change anyway (a SNAPSHOT, or one
+     * with no declaration in a POM) and those in {@code except} are left out; transitive ones are never pinned.
+     */
+    public static Map<String, String> recommendedDirect(ReportExporter.Result result, Set<String> except) {
+        Set<String> upgradable = new LinkedHashSet<>();
+        for (ScanComponent c : result.report().components()) {
+            if (c.direct() && !c.snapshot() && c.sourceFilePath() != null) {
+                upgradable.add(c.coordinate().groupId() + ":" + c.coordinate().artifactId());
+            }
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        for (UpgradeRecommendation r : result.report().recommendations()) {
+            String coord = r.coordinate().groupId() + ":" + r.coordinate().artifactId();
+            if (upgradable.contains(coord) && !except.contains(coord) && r.targetVersion() != null && !r.targetVersion().isBlank()) {
+                out.put(coord, null);
+            }
+        }
+        return out;
+    }
+
     /** Writes the planned POMs under {@code projectRoot}. */
     public static void write(Path projectRoot, Plan plan) throws IOException {
         for (Map.Entry<String, String> e : plan.patchedPoms().entrySet()) {

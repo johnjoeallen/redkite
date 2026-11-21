@@ -95,6 +95,7 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 # in the project to analyse (root pom.xml directory)
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:report   # print the report, never fails the build
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:recommended   # upgrade every direct dependency to the recommended version
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # edit the POMs
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:apply -Dredkite.drop=com.rabbitmq:amqp-client   # drop a pin
 ```

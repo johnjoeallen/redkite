@@ -11,6 +11,7 @@ It reuses RedKite's own scanner, Maven Central and OSV.dev providers and an H2 d
 | `redkite:report` | none | Analyse and print the report. Never fails the build. |
 | `redkite:check` | `verify` | Print the report, then fail the build for vulnerabilities a developer can fix. |
 | `redkite:apply` | none | Edit the POMs: upgrade or pin the dependencies you name (`-Dredkite.upgrades`), or drop pins (`-Dredkite.drop`). |
+| `redkite:recommended` | none | Edit the POMs: upgrade every direct dependency to its recommended version. |
 
 All goals are aggregators: they run once, at the execution root, and analyse every module beneath it.
 
@@ -101,6 +102,10 @@ No POM or `settings.xml` change is needed. The cache is on when `RK_CACHE` is `t
 `redkite:apply` is the command-line version of the server's "Apply selected". Run `redkite:report` to see what is recommended, then name what you want changed:
 
 ```bash
+# every direct dependency to its recommended version (transitive ones are not pinned)
+mvn -B redkite:recommended
+mvn -B redkite:recommended -Dredkite.dryRun=true
+
 # an explicit version
 mvn -B redkite:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3
 
@@ -214,8 +219,8 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | `failOnSnapshot` | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `failOnIncomplete` | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
 | `upgrades` | `redkite.upgrades` | none | `apply` | Upgrades to apply: comma-separated `groupId:artifactId[:version]`; no version means the recommended one. A transitive dependency is pinned. |
-| `drop` | `redkite.drop` | none | `apply` | Pins to drop: comma-separated `groupId:artifactId`. Give this, `upgrades`, or both. |
-| `dryRun` | `redkite.dryRun` | `false` | `apply` | Show what would change and write nothing. |
+| `drop` | `redkite.drop` | none | `apply`, `recommended` | Pins to drop: comma-separated `groupId:artifactId`. Give this, `upgrades`, or both. |
+| `dryRun` | `redkite.dryRun` | `false` | `apply`, `recommended` | Show what would change and write nothing. |
 
 ## Notes
 
