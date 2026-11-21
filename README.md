@@ -93,10 +93,10 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 
 ```bash
 # in the project to analyse (root pom.xml directory)
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:report   # print the report, never fails the build
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:check    # fail the build for vulnerabilities that have a same-major fix
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # edit the POMs
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:apply -Dredkite.drop=com.rabbitmq:amqp-client   # drop a pin
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:apply -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # edit the POMs
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.204:apply -Dredkite.drop=com.rabbitmq:amqp-client   # drop a pin
 ```
 
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
