@@ -93,8 +93,8 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 
 ```bash
 # in the project to analyse (root pom.xml directory)
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.201:report   # print the report, never fails the build
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.201:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.203:check    # fail the build for vulnerabilities that have a same-major fix
 ```
 
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
