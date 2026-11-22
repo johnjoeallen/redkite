@@ -27,7 +27,7 @@ This section is a runbook, written so that a person or a coding agent can follow
 - The plugin is published on Maven Central, so Maven downloads it on first use. There is nothing to install by hand.
 - Plugin coordinates: `net.dublinux.redkite:red-kite-maven-plugin`. Goals: `report` and `check`. Short prefix: `redkite`.
 - It never edits POMs or any project file. By default it writes nothing to disk. It reads the project, queries Maven Central and OSV.dev, and prints to the build log.
-- It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 17+, Maven 3.9+ and network access.
+- It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 25+, Maven 3.9+ and network access.
 
 **1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.205`. Maven downloads it the first time you run it.
 

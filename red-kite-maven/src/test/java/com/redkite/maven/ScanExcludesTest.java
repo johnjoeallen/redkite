@@ -33,4 +33,16 @@ class ScanExcludesTest {
         assertTrue(ScanExcludes.of(List.of()).isEmpty());
         assertFalse(ScanExcludes.none().excludes(Path.of("/r"), Path.of("a/pom.xml")));
     }
+
+    @Test
+    void readsExcludesFromThePluginConfigurationInThePom(@TempDir Path root) throws Exception {
+        java.nio.file.Files.writeString(root.resolve("pom.xml"), "<project><build><pluginManagement><plugins>"
+                + "<plugin><groupId>other</groupId><artifactId>other-plugin</artifactId>"
+                + "<configuration><excludes><exclude>nope</exclude></excludes></configuration></plugin>"
+                + "<plugin><groupId>net.dublinux.redkite</groupId><artifactId>red-kite-maven-plugin</artifactId>"
+                + "<configuration><excludes><exclude>test/projects</exclude><exclude>samples/</exclude></excludes>"
+                + "</configuration></plugin></plugins></pluginManagement></build></project>");
+        assertEquals(List.of("test/projects", "samples"), ScanExcludes.fromPom(root).entries());
+        assertTrue(ScanExcludes.fromPom(root.resolve("missing")).isEmpty());
+    }
 }

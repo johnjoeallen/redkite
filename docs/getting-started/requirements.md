@@ -1,6 +1,6 @@
 # Requirements
 
-- Java 17 or later ([download](https://adoptium.net))
+- Java 25 or later ([download](https://adoptium.net))
 - Maven 3.9 or later
 
 Both `java` and `mvn` must be available on the system `PATH` — RedKite shells out to Maven for dependency-tree resolution and build validation. Verify both before installing:

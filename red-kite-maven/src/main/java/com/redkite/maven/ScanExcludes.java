@@ -23,6 +23,40 @@ public final class ScanExcludes {
         return NONE;
     }
 
+    /**
+     * The exclusions configured for the RedKite Maven plugin in {@code root/pom.xml}: every
+     * {@code <excludes><exclude>} under a {@code red-kite-maven-plugin} {@code <plugin>} (build, pluginManagement
+     * or a profile). This lets the server honour the same POM setting the plugin uses. A missing or
+     * unparseable POM excludes nothing.
+     */
+    public static ScanExcludes fromPom(Path root) {
+        Path pom = root.resolve("pom.xml");
+        if (!java.nio.file.Files.isRegularFile(pom)) return NONE;
+        try {
+            javax.xml.parsers.DocumentBuilderFactory f = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            org.w3c.dom.Document doc = f.newDocumentBuilder().parse(pom.toFile());
+            List<String> dirs = new ArrayList<>();
+            org.w3c.dom.NodeList plugins = doc.getElementsByTagName("plugin");
+            for (int i = 0; i < plugins.getLength(); i++) {
+                org.w3c.dom.Element plugin = (org.w3c.dom.Element) plugins.item(i);
+                if (!"red-kite-maven-plugin".equals(childText(plugin, "artifactId"))) continue;
+                org.w3c.dom.NodeList excludes = plugin.getElementsByTagName("exclude");
+                for (int j = 0; j < excludes.getLength(); j++) dirs.add(excludes.item(j).getTextContent());
+            }
+            return of(dirs);
+        } catch (Exception e) {
+            return NONE;
+        }
+    }
+
+    private static String childText(org.w3c.dom.Element parent, String name) {
+        for (org.w3c.dom.Node n = parent.getFirstChild(); n != null; n = n.getNextSibling()) {
+            if (n instanceof org.w3c.dom.Element e && e.getTagName().equals(name)) return e.getTextContent().trim();
+        }
+        return null;
+    }
+
     /** Normalises the configured directories; null, blank and {@code .} entries are ignored. */
     public static ScanExcludes of(java.util.Collection<String> dirs) {
         if (dirs == null) return NONE;
