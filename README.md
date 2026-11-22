@@ -102,6 +102,24 @@ mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:drop -Dredkite.pins=c
 mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.205:unpin -Dredkite.pins=com.rabbitmq:amqp-client     # keep the version, release the pin
 ```
 
+The report lists each vulnerable dependency once, with its advisories, the POMs that declare it (or the modules that pull it in), whether it is pinned, and a flag for POMs outside the build, which the upgrade goals cannot edit. Folders that are not part of the build, such as test fixtures that deliberately use old versions, can be left out of the analysis with the `excludes` setting:
+
+```xml
+<plugin>
+  <groupId>net.dublinux.redkite</groupId>
+  <artifactId>red-kite-maven-plugin</artifactId>
+  <configuration>
+    <excludes>
+      <exclude>test/projects</exclude>
+    </excludes>
+  </configuration>
+</plugin>
+```
+
+Or on the command line: `-Dredkite.excludes=test/projects,samples`.
+
+> **Java version:** RedKite is built for Java 25 from the release after 0.99.206. Earlier plugin releases run on Java 17 or later; newer ones need Java 25 or later.
+
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
 
 Every option is a `-D` property on the command line or a `<configuration>` entry in the POM:
