@@ -24,7 +24,7 @@ It analyses Maven projects, including multi-module builds, builds a dependency i
 
 ## Requirements
 
-- Java 17 or later ([download](https://adoptium.net))
+- Java 25 or later ([download](https://adoptium.net))
 - Maven 3.9+ (must be on `PATH` for dependency tree resolution)
 
 ## Install
@@ -183,7 +183,7 @@ The gear icon in the top nav opens `/config`, where the vulnerability and versio
 
 ## Build From Source
 
-Requires Maven 3.9+ and Java 17.
+Requires Maven 3.9+ and Java 25.
 
 ```bash
 mvn package -DskipTests

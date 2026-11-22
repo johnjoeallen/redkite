@@ -1,6 +1,6 @@
 # Building from Source
 
-RedKite is a standard multi-module Maven reactor, requiring nothing beyond [the same JDK and Maven RedKite itself needs](../getting-started/requirements.md) — Java 17+ and Maven 3.9+.
+RedKite is a standard multi-module Maven reactor, requiring nothing beyond [the same JDK and Maven RedKite itself needs](../getting-started/requirements.md) — Java 25+ and Maven 3.9+.
 
 ```bash
 git clone <repository-url>

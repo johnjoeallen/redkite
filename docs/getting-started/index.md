@@ -2,7 +2,7 @@
 
 This section covers the minimum steps to install RedKite, analyse a Maven project, and apply dependency changes.
 
-1. [Check the requirements](requirements.md) — Java 17+, Maven 3.9+.
+1. [Check the requirements](requirements.md) — Java 25+, Maven 3.9+.
 2. [Install and start RedKite](installation.md).
 3. [Run your first analysis](first-analysis.md) against a local Maven project.
 4. If it's a Spring Boot project, [configure a validation profile](spring-boot-projects.md) before applying anything.
