@@ -79,7 +79,7 @@ final class ScanApiHandlers {
                         job.phasesJson = scanPhases(treeProgressPercent(scanDone[0], scanMods[0]),"active",0,"pending",0,"pending",0,"pending",0,"pending");
                     }
                 };
-                ScanInput input = new MavenProjectScanner().scan(projectRoot, scanProg, job::appendLine);
+                ScanInput input = new MavenProjectScanner(false, com.redkite.maven.ScanExcludes.fromPom(projectRoot)).scan(projectRoot, scanProg, job::appendLine);
 
                 job.phasesJson = scanPhases(100,"done",0,"active",0,"pending",0,"pending",0,"pending");
                 Consumer<String> buildProg = msg -> {
