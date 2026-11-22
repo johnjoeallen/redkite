@@ -1,5 +1,6 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <!-- redkite:pin-summary 0 redkite pin(s) (0 user pinned) -->
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>net.dublinux.redkite</groupId>
@@ -11,9 +12,10 @@
   <name>RedKite Maven Plugin</name>
   <description>Generates RedKite dependency, vulnerability and upgrade reports as part of a Maven build.</description>
   <properties>
-    <maven-api.version>3.9.9</maven-api.version>
-    <maven-plugin-tools.version>3.15.1</maven-plugin-tools.version>
+    <maven-api.version>3.10.2</maven-api.version>
+    <maven-plugin-tools.version>3.16.0</maven-plugin-tools.version>
     <junit-jupiter.version>5.14.4</junit-jupiter.version>
+    <h2.version>2.5.252</h2.version>
   </properties>
   <dependencies>
     <dependency>
@@ -57,7 +59,7 @@
     <dependency>
       <groupId>com.h2database</groupId>
       <artifactId>h2</artifactId>
-      <version>2.5.250</version>
+      <version>${h2.version}</version>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>

@@ -71,6 +71,10 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.progress", defaultValue = "true")
     boolean showProgress;
 
+    /** Directories, relative to the project root, whose POMs are not analysed (test fixtures, samples). */
+    @Parameter(property = "redkite.excludes")
+    java.util.List<String> excludes;
+
     @Parameter(defaultValue = "${session}", readonly = true)
     MavenSession session;
 
@@ -102,9 +106,10 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
                 progress.start();
                 result = ReportExporter.analyse(root, url, enforcer, allowMajorUpgrades,
                         msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
-                        line -> getLog().debug(line));
+                        line -> getLog().debug(line), excludes);
             }
-            String text = TextReport.render(result.report(), showTransitives, PinnedCoordinates.find(root));
+            String text = TextReport.render(result.report(), showTransitives, PinnedCoordinates.find(root, excludes),
+                    PinnedCoordinates.findRedkitePins(root, excludes), buildPomPaths(root));
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }
@@ -119,5 +124,17 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
             rk.setLevel(previous);
         }
         execute(result);
+    }
+
+    /** Project-relative paths of the POMs in this build, or null when the session is unavailable. */
+    private java.util.Set<String> buildPomPaths(Path root) {
+        if (session == null || session.getProjects() == null) return null;
+        java.util.Set<String> out = new java.util.LinkedHashSet<>();
+        for (org.apache.maven.project.MavenProject p : session.getProjects()) {
+            if (p.getFile() == null) continue;
+            out.add(root.toAbsolutePath().normalize().relativize(p.getFile().toPath().toAbsolutePath().normalize())
+                    .toString().replace('\\', '/'));
+        }
+        return out;
     }
 }

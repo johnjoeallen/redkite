@@ -24,6 +24,13 @@ import static com.redkite.server.Versions.*;
 final class EnforcerAnalysis {
     private static final Logger LOGGER = Logger.getLogger(EnforcerAnalysis.class.getName());
     private final PomAvailabilityChecker pomAvailabilityChecker = new PomAvailabilityChecker();
+    private com.redkite.maven.ScanExcludes excludes = com.redkite.maven.ScanExcludes.none();
+
+    /** Directories the enforcer analysis must not read POMs from. */
+    EnforcerAnalysis withExcludes(com.redkite.maven.ScanExcludes excludes) {
+        this.excludes = excludes == null ? com.redkite.maven.ScanExcludes.none() : excludes;
+        return this;
+    }
 
     /**
      * Phase 2: applies computed dep-management pins to a temp copy of all project POMs
@@ -43,7 +50,7 @@ final class EnforcerAnalysis {
     void runEnforcerCheck(Path projectRoot, String scanId, Consumer<String> progress, Consumer<String> onLine) {
         try {
             Path pomPath = projectRoot.resolve("pom.xml");
-            com.redkite.maven.TempPomAnalyzer analyzer = new com.redkite.maven.TempPomAnalyzer();
+            com.redkite.maven.TempPomAnalyzer analyzer = new com.redkite.maven.TempPomAnalyzer(excludes);
             progress.accept("Dependency management 5");
 
             // Scan POM files for dep-management entries and RedKite exclusion metadata.
@@ -161,7 +168,7 @@ final class EnforcerAnalysis {
                     .toList();
             LOGGER.info(() -> "Phase 2: running enforcer with " + pins.size() + " computed dep-management pin(s)");
             EnforcerRunner.EnforcerRunResult r =
-                    new com.redkite.maven.TempPomAnalyzer().runWithPins(projectRoot, pomPath, pins, skipDirectEnforce, onLine);
+                    new com.redkite.maven.TempPomAnalyzer(excludes).runWithPins(projectRoot, pomPath, pins, skipDirectEnforce, onLine);
             if (r.passed()) {
                 LOGGER.info("Phase 2: all conflicts resolved by auto-fix");
                 return new Phase2Result(List.of(), pinsList);

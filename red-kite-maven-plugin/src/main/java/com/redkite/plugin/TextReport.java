@@ -30,6 +30,16 @@ final class TextReport {
     /** @param pinned {@code groupId:artifactId} of dependencies the user pinned; plain (non-CVE) updates for
      *                them are left out, as in the server, because a pin is a deliberate decision to hold the version */
     static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned) {
+        return render(report, showTransitives, pinned, java.util.Set.of(), null);
+    }
+
+    /** @param redkitePinned {@code groupId:artifactId} of dependencies held by a RedKite-managed
+     *                      {@code dependencyManagement} pin, shown beside each vulnerability
+     *  @param buildPoms    project-relative paths of the POMs in the Maven build; a finding declared
+     *                      elsewhere (a test fixture, say) is flagged because the upgrade goals cannot edit it.
+     *                      Null means unknown, and nothing is flagged */
+    static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned,
+                         java.util.Set<String> redkitePinned, java.util.Set<String> buildPoms) {
         List<String> out = new ArrayList<>();
         out.add("RedKite report");
         out.add("==============");
@@ -82,11 +92,26 @@ final class TextReport {
         if (vulns.isEmpty()) {
             out.add("  none");
         }
+        // One block per vulnerable dependency, with its advisories, where it is declared and its pin status.
+        Map<String, List<VulnerabilityFinding>> byDependency = new LinkedHashMap<>();
         for (VulnerabilityFinding v : vulns) {
-            out.add(String.format("  %-9s %s:%s  %s  %s", AdvisoryClassifier.severity(v).label().toUpperCase(),
-                    key(v.coordinate()), v.affectedVersion(), v.advisoryId()
-                            + (v.cves().isEmpty() ? "" : " (" + String.join(", ", v.cves()) + ")"),
-                    blank(v.fixedVersion()) ? "no fixed version known" : "fixed in " + v.fixedVersion()));
+            byDependency.computeIfAbsent(key(v.coordinate()) + ":" + v.affectedVersion(), k -> new ArrayList<>()).add(v);
+        }
+        boolean firstBlock = true;
+        for (Map.Entry<String, List<VulnerabilityFinding>> e : byDependency.entrySet()) {
+            if (!firstBlock) out.add("");
+            firstBlock = false;
+            List<VulnerabilityFinding> group = e.getValue();
+            VulnerabilityFinding head = group.get(0); // sorted, so the most severe advisory leads
+            String k = key(head.coordinate());
+            String pin = pinned.contains(k) ? "  [pinned by user]" : redkitePinned.contains(k) ? "  [pinned by RedKite]" : "";
+            out.add(String.format("  %-9s %s:%s%s", AdvisoryClassifier.severity(head).label().toUpperCase(), k,
+                    head.affectedVersion(), pin));
+            for (VulnerabilityFinding v : group) {
+                out.add("      " + v.advisoryId() + (v.cves().isEmpty() ? "" : " (" + String.join(", ", v.cves()) + ")")
+                        + "  " + (blank(v.fixedVersion()) ? "no fixed version known" : "fixed in " + v.fixedVersion()));
+            }
+            out.addAll(locations(report, head, buildPoms));
         }
         out.add("");
 
@@ -132,6 +157,37 @@ final class TextReport {
             report.treeParseWarnings().forEach(w -> out.add("  " + w));
         }
         return String.join(System.lineSeparator(), out) + System.lineSeparator();
+    }
+
+    private static final int MAX_LOCATIONS = 5;
+
+    /** Where a vulnerable dependency comes from: the POMs that declare it (direct) or the modules that
+     *  pull it in (transitive), flagging POMs outside the build, which the upgrade goals cannot edit. */
+    private static List<String> locations(ScanReport report, VulnerabilityFinding v, java.util.Set<String> buildPoms) {
+        Map<String, Boolean> where = new LinkedHashMap<>(); // description -> outside the build
+        for (ScanComponent c : report.components()) {
+            if (!c.coordinate().equals(v.coordinate()) || !v.affectedVersion().equals(c.version())) continue;
+            String pom = c.direct() ? c.sourceFilePath() : pomOf(c.modulePath());
+            if (pom == null) continue;
+            where.put((c.direct() ? "declared in " : "via ") + pom, buildPoms != null && !buildPoms.contains(pom));
+        }
+        List<String> out = new ArrayList<>();
+        int shown = 0;
+        boolean outside = false;
+        for (Map.Entry<String, Boolean> w : where.entrySet()) {
+            outside |= w.getValue();
+            if (shown++ < MAX_LOCATIONS) {
+                out.add("      " + w.getKey() + (w.getValue() ? "  (not in the build)" : ""));
+            }
+        }
+        if (where.size() > MAX_LOCATIONS) out.add("      +" + (where.size() - MAX_LOCATIONS) + " more");
+        if (outside) out.add("      The upgrade goals cannot edit POMs outside the build; exclude them or fix them by hand.");
+        return out;
+    }
+
+    private static String pomOf(String modulePath) {
+        if (modulePath == null) return null;
+        return modulePath.isEmpty() || modulePath.equals(".") ? "pom.xml" : modulePath + "/pom.xml";
     }
 
     private static void addRecommendations(List<String> out, java.util.Collection<UpgradeRecommendation> values) {

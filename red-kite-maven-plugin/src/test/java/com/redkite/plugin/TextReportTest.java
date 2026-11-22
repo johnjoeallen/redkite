@@ -86,6 +86,39 @@ class TextReportTest {
                 + "<!-- redkite:user-pin groupId=\"com.google.guava\" artifactId=\"guava\" -->"
                 + "<dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>1</version></dependency>"
                 + "</dependencies></dependencyManagement></project>");
-        assertEquals(java.util.Set.of("com.google.guava:guava"), PinnedCoordinates.find(dir));
+        assertEquals(java.util.Set.of("com.google.guava:guava"), PinnedCoordinates.find(dir, null));
+    }
+
+    @Test
+    void pinSearchSkipsExcludedDirectories(@org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        java.nio.file.Path fixture = java.nio.file.Files.createDirectories(dir.resolve("test/projects/fx"));
+        java.nio.file.Files.writeString(fixture.resolve("pom.xml"), "<project><dependencyManagement><dependencies>"
+                + "<!-- redkite:user-pin groupId=\"g\" artifactId=\"a\" -->"
+                + "<dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version></dependency>"
+                + "</dependencies></dependencyManagement></project>");
+        assertEquals(java.util.Set.of("g:a"), PinnedCoordinates.find(dir, List.of()));
+        assertEquals(java.util.Set.of(), PinnedCoordinates.find(dir, List.of("test/projects")));
+    }
+
+    @Test
+    void vulnerabilityShowsWhereItIsDeclaredPinsAndPomsOutsideTheBuild() {
+        ComponentCoordinate coord = new ComponentCoordinate("g", "a");
+        ScanComponent inBuild = new ScanComponent(1, coord, "1.0", DependencyScope.COMPILE, true,
+                VersionSource.LITERAL, "mod/pom.xml", "dependencies", Map.of(), false, null, "mod");
+        ScanComponent fixture = new ScanComponent(2, coord, "1.0", DependencyScope.COMPILE, true,
+                VersionSource.LITERAL, "test/fx/pom.xml", "dependencies", Map.of(), false, null, "test/fx");
+        com.redkite.core.domain.VulnerabilityFinding v = new com.redkite.core.domain.VulnerabilityFinding(
+                "GHSA-x", "HIGH", coord, "1.0", "1.1", null, true, null, List.of(), null);
+        ScanReport r = new ScanReport("s", "p", true, "", Instant.now(), List.of(inBuild, fixture), List.of(), List.of(v),
+                List.of(), List.of(), List.of(), List.of());
+        String text = TextReport.render(r, false, java.util.Set.of("g:a"), java.util.Set.of(),
+                java.util.Set.of("pom.xml", "mod/pom.xml"));
+        assertTrue(text.contains("declared in mod/pom.xml"), text);
+        assertTrue(text.contains("declared in test/fx/pom.xml  (not in the build)"), text);
+        assertTrue(text.contains("g:a:1.0  [pinned by user]"), text);
+        assertTrue(text.contains("cannot edit POMs outside the build"), text);
+        String unknown = TextReport.render(r, false, java.util.Set.of(), java.util.Set.of("g:a"), null);
+        assertTrue(unknown.contains("[pinned by RedKite]"), unknown);
+        assertFalse(unknown.contains("not in the build"), unknown);
     }
 }

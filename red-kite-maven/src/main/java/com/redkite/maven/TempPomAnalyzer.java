@@ -29,6 +29,15 @@ public class TempPomAnalyzer {
 
     private final RemediationApplier applier = new RemediationApplier();
     private final EnforcerRunner runner = new EnforcerRunner();
+    private final ScanExcludes excludes;
+
+    public TempPomAnalyzer() {
+        this(ScanExcludes.none());
+    }
+
+    public TempPomAnalyzer(ScanExcludes excludes) {
+        this.excludes = excludes == null ? ScanExcludes.none() : excludes;
+    }
 
     /**
      * Result of a pristine enforcer run, including metadata about what was stripped.
@@ -203,13 +212,13 @@ public class TempPomAnalyzer {
     }
 
     /** Recursively finds all {@code pom.xml} files, skipping {@code target/} and hidden dirs. */
-    private static List<Path> findAllPoms(Path root) throws IOException {
+    private List<Path> findAllPoms(Path root) throws IOException {
         List<Path> poms = new ArrayList<>();
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                 String name = dir.getFileName().toString();
-                if (name.equals("target") || name.startsWith(".")) {
+                if (name.equals("target") || name.startsWith(".") || excludes.excludes(root, dir)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
                 return FileVisitResult.CONTINUE;

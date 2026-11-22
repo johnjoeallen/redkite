@@ -16,13 +16,19 @@ import java.util.logging.Logger;
 public class MavenProjectScanner {
     private static final Logger LOGGER = Logger.getLogger(MavenProjectScanner.class.getName());
     private final boolean allowMajorUpgrades;
+    private final ScanExcludes excludes;
 
     public MavenProjectScanner() {
         this(false);
     }
 
     public MavenProjectScanner(boolean allowMajorUpgrades) {
+        this(allowMajorUpgrades, ScanExcludes.none());
+    }
+
+    public MavenProjectScanner(boolean allowMajorUpgrades, ScanExcludes excludes) {
         this.allowMajorUpgrades = allowMajorUpgrades;
+        this.excludes = excludes == null ? ScanExcludes.none() : excludes;
     }
 
     public ScanInput scan(Path projectRoot) {
@@ -52,8 +58,10 @@ public class MavenProjectScanner {
             LOGGER.info(() -> "Git metadata: branch=" + gitMetadata.branch() + ", head=" + gitMetadata.head() + ", clean=" + gitMetadata.clean());
 
             List<Path> pomFiles;
+            if (!excludes.isEmpty()) LOGGER.info(() -> "Excluding from the scan: " + excludes.entries());
             try (var stream = Files.walk(root)) {
-                pomFiles = stream.filter(p -> p.getFileName().toString().equals("pom.xml")).sorted().toList();
+                pomFiles = stream.filter(p -> p.getFileName().toString().equals("pom.xml"))
+                        .filter(p -> !excludes.excludes(root, p)).sorted().toList();
             }
             LOGGER.info(() -> "Found " + pomFiles.size() + " pom.xml file(s)");
             progress.accept("Found " + pomFiles.size() + " module(s) — parsing POMs…");

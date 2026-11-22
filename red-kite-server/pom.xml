@@ -9,8 +9,8 @@
   </parent>
   <artifactId>red-kite-server</artifactId>
   <properties>
-    <h2.version>2.5.250</h2.version>
-    <thymeleaf.version>3.1.5.RELEASE</thymeleaf.version>
+    <h2.version>2.5.252</h2.version>
+    <thymeleaf.version>3.1.7.RELEASE</thymeleaf.version>
     <junit-jupiter.version>5.14.4</junit-jupiter.version>
   </properties>
   <dependencies>

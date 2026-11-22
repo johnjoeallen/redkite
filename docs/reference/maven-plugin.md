@@ -221,6 +221,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | Parameter | Property | Default | Goals | Description |
 | --- | --- | --- | --- | --- |
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
+| `excludes` | `redkite.excludes` | none | all | Directories, relative to the project root, whose POMs are not analysed (for example test fixtures). On the command line, comma-separated; in the POM, `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `jsonReport` | `redkite.jsonReport` | `false` | both | Also write a JSON copy of the report. No files are written by default. |
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written when `jsonReport` is true. |
 | `cache` | `redkite.cache` | `false`; `true` if env `RK_CACHE=true` | both | Keep a persistent lookup cache between builds. When false, an in-memory database is used and nothing is written to disk. |

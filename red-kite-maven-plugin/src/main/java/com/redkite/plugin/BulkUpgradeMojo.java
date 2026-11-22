@@ -60,7 +60,7 @@ abstract class BulkUpgradeMojo extends PomChangeMojo {
 
     @Override
     void execute(ReportExporter.Result result) throws MojoFailureException {
-        Set<String> pinned = PinnedCoordinates.find(project.getBasedir().toPath());
+        Set<String> pinned = PinnedCoordinates.find(project.getBasedir().toPath(), excludes);
         Selection sel = select(result.report(), pinned, reasons());
         for (String coord : sel.skippedPinned()) {
             getLog().warn("Left " + coord + " alone: it is pinned. Name it with redkite:upgrade -Dredkite.upgrades=" + coord + " to change it.");

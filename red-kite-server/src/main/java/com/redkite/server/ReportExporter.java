@@ -60,16 +60,24 @@ public final class ReportExporter {
      */
     public static Result analyse(Path projectRoot, String jdbcUrl, boolean runEnforcer, boolean allowMajor,
                                  Consumer<String> progress, Consumer<String> mavenOutput) throws IOException {
+        return analyse(projectRoot, jdbcUrl, runEnforcer, allowMajor, progress, mavenOutput, java.util.List.of());
+    }
+
+    /** As above, skipping every POM in or below the project-relative {@code excludes} directories. */
+    public static Result analyse(Path projectRoot, String jdbcUrl, boolean runEnforcer, boolean allowMajor,
+                                 Consumer<String> progress, Consumer<String> mavenOutput,
+                                 java.util.Collection<String> excludes) throws IOException {
+        com.redkite.maven.ScanExcludes skip = com.redkite.maven.ScanExcludes.of(excludes);
         Path root = projectRoot.toAbsolutePath().normalize();
         if (!Files.exists(root.resolve("pom.xml"))) {
             throw new IOException("No pom.xml found at " + root);
         }
         Store store = Store.connect(jdbcUrl, "sa", "");
         store.reconfigureForProject(root);
-        ScanInput input = new MavenProjectScanner(allowMajor).scan(root, progress, mavenOutput);
+        ScanInput input = new MavenProjectScanner(allowMajor, skip).scan(root, progress, mavenOutput);
         ScanReport report = store.ingest(input, progress);
         if (runEnforcer) {
-            new EnforcerAnalysis(store).runEnforcerCheck(root, report.scanId(), progress,
+            new EnforcerAnalysis(store).withExcludes(skip).runEnforcerCheck(root, report.scanId(), progress,
                     mavenOutput != null ? mavenOutput : line -> {});
         }
         return new Result(report.scanId(), report, remediations(store, report));

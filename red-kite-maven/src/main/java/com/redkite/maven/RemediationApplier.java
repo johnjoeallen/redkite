@@ -330,6 +330,11 @@ public class RemediationApplier {
         return findMarkedCoordinates(content, USER_PIN_TAG);
     }
 
+    /** {@code groupId:artifactId} of every dependency held by a RedKite-managed dependencyManagement pin. */
+    public java.util.Set<String> findRedkitePinnedCoordinates(String content) {
+        return findMarkedCoordinates(content, DEP_MGMT_TAG);
+    }
+
     private java.util.Set<String> findMarkedCoordinates(String content, String tag) {
         java.util.Set<String> result = new java.util.LinkedHashSet<>();
         Document doc = parse(content);

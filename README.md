@@ -109,6 +109,7 @@ Every option is a `-D` property on the command line or a `<configuration>` entry
 | Property | Default | Goals | Meaning |
 |---|---|---|---|
 | `redkite.skip` | `false` | both | Skip the plugin. |
+| `redkite.excludes` | none | all | Comma-separated directories, relative to the project root, whose POMs are not analysed (for example test fixtures). In the POM: `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `redkite.progress` | `true` | both | Show progress: a live spinner on a terminal, one log line per step when piped, in `-B`, on CI or with `-X`. |
 | `redkite.allowMajorUpgrades` | `false` | both | Allow upgrade recommendations that cross a major version. |

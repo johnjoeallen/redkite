@@ -460,4 +460,8 @@ Main panels:
 ## 20. Final Principle
 RedKite Assist should provide a controlled, auditable, rollback-safe dependency remediation workflow.
 Automated strategies stay inside same-major boundaries.
-Manual gives power users explicit control when they want to go further.
+Manual gives power users explicit control when they want to go further.---
+## 21. Exclusion Folders
+Done for the Maven plugin: the `excludes` parameter (`-Dredkite.excludes=a,b`, or `<excludes><exclude>dir</exclude></excludes>` in the POM) lists project-relative directories whose POMs the scan, the enforcer analysis and the pin search skip. The root POM excludes `test/projects`, whose fixtures deliberately declare old, vulnerable versions.
+
+Still open: the server has no setting for it, so server scans still see everything under the project root.
