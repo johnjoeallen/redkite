@@ -131,7 +131,7 @@ To accept a vulnerability you have decided to live with, for example because you
 </acceptedRisks>
 ```
 
-It moves to an "Accepted risks" section, cannot fail `check`, and is left alone by `upgrade-cve` and `upgrade-all`. See the [plugin reference](https://johnjoeallen.github.io/redkite/reference/maven-plugin/#accepting-a-risk-until-a-date).
+It moves to an "Accepted risks" section, cannot fail `check`, and is left alone by `upgrade-cve` and `upgrade-all`. Add `-Dredkite.failOnUnfixable=CRITICAL` to make `check` fail on a critical that nothing can fix unless it is accepted this way; the build warns when an acceptance is within 30 days of ending. See the [plugin reference](https://johnjoeallen.github.io/redkite/reference/maven-plugin/#accepting-a-risk-until-a-date).
 
 > **Java version:** RedKite is built for Java 25 from 0.99.207, so it needs Java 25 or later. 0.99.206 and earlier plugin releases run on Java 17 or later.
 
@@ -142,6 +142,8 @@ Every option is a `-D` property on the command line or a `<configuration>` entry
 | Property | Default | Goals | Meaning |
 |---|---|---|---|
 | `redkite.skip` | `false` | both | Skip the plugin. |
+| `redkite.failOnUnfixable` | `NONE` | `check` | Also fail for a vulnerability at or above this severity when no same-major version improves on it, unless it is in `acceptedRisks`. |
+| `redkite.warnExpiringWithin` | `30` | all | Warn when an accepted risk ends within this many days. `0` turns it off. |
 | `acceptedRisks` | none | all | POM only. Vulnerabilities accepted until a date (`advisory`, `until`, optional `coordinate` and `reason`). |
 | `redkite.excludes` | none | all | Comma-separated directories, relative to the project root, whose POMs are not analysed (for example test fixtures). In the POM: `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |

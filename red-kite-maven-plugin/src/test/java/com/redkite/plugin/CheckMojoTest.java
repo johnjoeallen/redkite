@@ -127,4 +127,52 @@ class CheckMojoTest {
         assertTrue(text.contains("Vulnerabilities: 1 (1 high)"));
         assertEquals(1, text.split("DUP-1", -1).length - 1);
     }
+
+    @Test
+    void failOnUnfixableFailsWhenNothingOnTheSameMajorLineIsBetter() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        for (List<ReportExporter.Remediation> fixes : List.of(
+                List.<ReportExporter.Remediation>of(),
+                List.of(fix("2.0.0", "3.0.0", AdvisorySeverity.NONE, false)),
+                List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.CRITICAL, true)))) {
+            CheckMojo.Outcome o = CheckMojo.evaluate(r, fixes, "HIGH", "CRITICAL", false, false);
+            assertEquals(1, o.problems().size(), o.toString());
+            assertTrue(o.problems().get(0).contains("cannot be fixed by upgrading"), o.toString());
+            assertTrue(o.problems().get(0).contains("acceptedRisks"), o.toString());
+            assertTrue(o.warnings().isEmpty(), "the finding is a failure, not also a warning");
+        }
+    }
+
+    @Test
+    void failOnUnfixableLeavesAnImprovableFindingAlone() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        // a same-major version that lowers Critical to High is an improvement: warn as before, do not fail
+        CheckMojo.Outcome o = CheckMojo.evaluate(r, List.of(fix("2.0.0", "2.0.1", AdvisorySeverity.HIGH, true)),
+                "HIGH", "CRITICAL", false, false);
+        assertTrue(o.problems().isEmpty(), o.toString());
+        assertEquals(1, o.warnings().size());
+    }
+
+    @Test
+    void failOnUnfixableRespectsItsOwnThresholdAndDefaultsToOff() {
+        ScanReport high = report(true, List.of(component(false)), List.of(vuln("A", "HIGH")));
+        assertTrue(CheckMojo.evaluate(high, List.of(), "HIGH", "CRITICAL", false, false).problems().isEmpty(),
+                "a High finding is below a CRITICAL threshold");
+        assertEquals(1, CheckMojo.evaluate(high, List.of(), "CRITICAL", "HIGH", false, false).problems().size(),
+                "an unfixable High fails when failOnUnfixable is HIGH even though failOnSeverity is CRITICAL");
+        ScanReport crit = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        assertTrue(CheckMojo.evaluate(crit, List.of(), "HIGH", "NONE", false, false).problems().isEmpty());
+        assertTrue(CheckMojo.evaluate(crit, List.of(), "HIGH", false, false).problems().isEmpty());
+    }
+
+    @Test
+    void anAcceptedRiskKeepsAnUnfixableFindingFromFailing() {
+        ScanReport r = report(true, List.of(component(false)), List.of(vuln("A", "CRITICAL")));
+        ReportExporter.Result full = new ReportExporter.Result("s1", r, List.of());
+        java.time.LocalDate today = java.time.LocalDate.of(2026, 12, 1);
+        AcceptedRisks.Result live = AcceptedRisks.apply(r, List.of(new AcceptedRisk("A", null, "best available", "2027-01-01")), today);
+        assertTrue(CheckMojo.evaluate(AcceptedRisks.filter(full, live).report(), List.of(), "HIGH", "CRITICAL", false, false).problems().isEmpty());
+        AcceptedRisks.Result lapsed = AcceptedRisks.apply(r, List.of(new AcceptedRisk("A", null, "best available", "2026-11-30")), today);
+        assertEquals(1, CheckMojo.evaluate(AcceptedRisks.filter(full, lapsed).report(), List.of(), "HIGH", "CRITICAL", false, false).problems().size());
+    }
 }

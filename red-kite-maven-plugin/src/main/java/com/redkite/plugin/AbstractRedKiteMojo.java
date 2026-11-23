@@ -85,6 +85,10 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(defaultValue = "${session}", readonly = true)
     MavenSession session;
 
+    /** Warn when an accepted risk ends within this many days. 0 turns the warning off. */
+    @Parameter(property = "redkite.warnExpiringWithin", defaultValue = "30")
+    int warnExpiringWithin;
+
     /** Today, for deciding whether an accepted risk has expired; overridden in tests. */
     java.time.LocalDate today() {
         return java.time.LocalDate.now();
@@ -124,9 +128,13 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
                         msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
                         line -> getLog().debug(line), excludes);
             }
-            AcceptedRisks.Result split = AcceptedRisks.apply(result.report(), acceptedRisks, today());
+            AcceptedRisks.Result split = AcceptedRisks.apply(result.report(), acceptedRisks, today(), warnExpiringWithin);
             for (AcceptedRisks.Entry e : split.expired()) {
                 getLog().warn("RedKite: the accepted risk " + e.risk() + " expired on " + e.until() + "; it is reported again.");
+            }
+            for (AcceptedRisks.Entry e : split.expiringSoon()) {
+                getLog().warn("RedKite: the accepted risk " + e.risk() + " expires " + AcceptedRisks.remaining(today(), e.until())
+                        + " (" + e.until() + "); decide whether to extend it or fix the vulnerability.");
             }
             for (AcceptedRisk r : split.unmatched()) {
                 getLog().warn("RedKite: the accepted risk " + r + " matches no vulnerability; remove it from acceptedRisks.");
@@ -134,7 +142,7 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
             ReportExporter.Result full = result;
             result = AcceptedRisks.filter(result, split);
             String text = TextReport.render(result.report(), showTransitives, PinnedCoordinates.find(root, excludes),
-                    PinnedCoordinates.findRedkitePins(root, excludes), buildPomPaths(root), split);
+                    PinnedCoordinates.findRedkitePins(root, excludes), buildPomPaths(root), split, today());
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }

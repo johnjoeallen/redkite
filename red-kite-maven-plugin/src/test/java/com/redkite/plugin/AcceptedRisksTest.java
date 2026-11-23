@@ -107,4 +107,29 @@ class AcceptedRisksTest {
         assertTrue(text.contains("EXPIRED   g:b:1.0"), text);
         assertFalse(TextReport.render(r.report(), false).contains("Accepted risks"));
     }
+
+    @Test
+    void risksEndingWithinTheWindowAreFlaggedAndReported() {
+        ReportExporter.Result r = result(finding("GHSA-1", null, "a", "1.0"), finding("GHSA-2", null, "b", "1.0"));
+        List<AcceptedRisk> risks = List.of(new AcceptedRisk("GHSA-1", null, null, "2026-12-11"),
+                new AcceptedRisk("GHSA-2", null, null, "2027-06-01"));
+        AcceptedRisks.Result res = AcceptedRisks.apply(r.report(), risks, TODAY, 30);
+        assertEquals(1, res.expiringSoon().size());
+        assertEquals("GHSA-1", res.expiringSoon().get(0).finding().advisoryId());
+        assertEquals(2, res.accepted().size(), "an expiring risk is still accepted");
+        assertTrue(AcceptedRisks.apply(r.report(), risks, TODAY, 0).expiringSoon().isEmpty(), "0 turns the warning off");
+        // the last day counts, and the window includes its final day
+        assertEquals(1, AcceptedRisks.apply(r.report(), risks, TODAY, 10).expiringSoon().size());
+        assertTrue(AcceptedRisks.apply(r.report(), risks, TODAY, 9).expiringSoon().isEmpty());
+        String text = TextReport.render(AcceptedRisks.filter(r, res).report(), false, java.util.Set.of(), java.util.Set.of(), null, res, TODAY);
+        assertTrue(text.contains("accepted until 2026-12-11  (EXPIRES IN 10 DAYS)"), text);
+        assertFalse(text.contains("2027-06-01  (EXPIRES"), text);
+    }
+
+    @Test
+    void remainingIsWordedForTodayTomorrowAndLater() {
+        assertEquals("today", AcceptedRisks.remaining(TODAY, TODAY));
+        assertEquals("tomorrow", AcceptedRisks.remaining(TODAY, TODAY.plusDays(1)));
+        assertEquals("in 5 days", AcceptedRisks.remaining(TODAY, TODAY.plusDays(5)));
+    }
 }

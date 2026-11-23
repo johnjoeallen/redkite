@@ -48,6 +48,13 @@ final class TextReport {
     static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned,
                          java.util.Set<String> redkitePinned, java.util.Set<String> buildPoms,
                          AcceptedRisks.Result accepted) {
+        return render(report, showTransitives, pinned, redkitePinned, buildPoms, accepted, java.time.LocalDate.now());
+    }
+
+    /** @param today the date "expires in N days" is counted from */
+    static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned,
+                         java.util.Set<String> redkitePinned, java.util.Set<String> buildPoms,
+                         AcceptedRisks.Result accepted, java.time.LocalDate today) {
         List<String> out = new ArrayList<>();
         out.add("RedKite report");
         out.add("==============");
@@ -126,7 +133,7 @@ final class TextReport {
         }
         out.add("");
 
-        if (accepted != null && !accepted.isEmpty()) addAcceptedRisks(out, accepted);
+        if (accepted != null && !accepted.isEmpty()) addAcceptedRisks(out, accepted, today);
 
         List<ScanComponent> snapshots = report.components().stream().filter(ScanComponent::snapshot).toList();
         out.add("SNAPSHOT dependencies");
@@ -172,12 +179,13 @@ final class TextReport {
         return String.join(System.lineSeparator(), out) + System.lineSeparator();
     }
 
-    private static void addAcceptedRisks(List<String> out, AcceptedRisks.Result accepted) {
+    private static void addAcceptedRisks(List<String> out, AcceptedRisks.Result accepted, java.time.LocalDate today) {
         out.add("Accepted risks");
         out.add("--------------");
         for (AcceptedRisks.Entry e : accepted.accepted()) {
-            out.add(String.format("  %-9s %s:%s  %s  accepted until %s", AdvisoryClassifier.severity(e.finding()).label().toUpperCase(),
-                    key(e.finding().coordinate()), e.finding().affectedVersion(), advisory(e.finding()), e.until()));
+            String soon = accepted.expiringSoon().contains(e) ? "  (EXPIRES " + AcceptedRisks.remaining(today, e.until()).toUpperCase() + ")" : "";
+            out.add(String.format("  %-9s %s:%s  %s  accepted until %s%s", AdvisoryClassifier.severity(e.finding()).label().toUpperCase(),
+                    key(e.finding().coordinate()), e.finding().affectedVersion(), advisory(e.finding()), e.until(), soon));
             if (e.risk().reason != null && !e.risk().reason.isBlank()) out.add("      reason: " + e.risk().reason.strip());
         }
         for (AcceptedRisks.Entry e : accepted.expired()) {

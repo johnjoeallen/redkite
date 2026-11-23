@@ -33,6 +33,14 @@ public class CheckMojo extends AbstractRedKiteMojo {
     @Parameter(property = "redkite.failOnSeverity", defaultValue = "HIGH")
     String failOnSeverity;
 
+    /**
+     * Also fail for a vulnerability at or above this severity when no version on the same major line improves
+     * on the current one, so there is nothing to upgrade to. Such a finding normally only warns. It passes only
+     * if it is covered by an unexpired {@code acceptedRisks} entry. NONE (the default) never fails for this.
+     */
+    @Parameter(property = "redkite.failOnUnfixable", defaultValue = "NONE")
+    String failOnUnfixable;
+
     /** Fail when the project depends on a SNAPSHOT artifact. */
     @Parameter(property = "redkite.failOnSnapshot", defaultValue = "false")
     boolean failOnSnapshot;
@@ -46,7 +54,7 @@ public class CheckMojo extends AbstractRedKiteMojo {
 
     @Override
     void execute(ReportExporter.Result result) throws MojoFailureException {
-        Outcome outcome = evaluate(result.report(), result.remediations(), failOnSeverity, failOnSnapshot, failOnIncomplete);
+        Outcome outcome = evaluate(result.report(), result.remediations(), failOnSeverity, failOnUnfixable, failOnSnapshot, failOnIncomplete);
         outcome.warnings().forEach(w -> getLog().warn("RedKite: " + w));
         if (!outcome.problems().isEmpty()) {
             outcome.problems().forEach(p -> getLog().error("RedKite: " + p));
@@ -57,8 +65,14 @@ public class CheckMojo extends AbstractRedKiteMojo {
 
     static Outcome evaluate(ScanReport report, List<ReportExporter.Remediation> remediations, String failOnSeverity,
                             boolean failOnSnapshot, boolean failOnIncomplete) {
+        return evaluate(report, remediations, failOnSeverity, "NONE", failOnSnapshot, failOnIncomplete);
+    }
+
+    static Outcome evaluate(ScanReport report, List<ReportExporter.Remediation> remediations, String failOnSeverity,
+                            String failOnUnfixable, boolean failOnSnapshot, boolean failOnIncomplete) {
         List<String> problems = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
+        Map<String, String> unfixable = unfixable(report, remediations, AdvisorySeverity.fromString(failOnUnfixable));
         AdvisorySeverity threshold = AdvisorySeverity.fromString(failOnSeverity);
         if (threshold != AdvisorySeverity.NONE && threshold != AdvisorySeverity.UNKNOWN) {
             // Group the over-threshold advisories by the dependency version that carries them.
@@ -82,11 +96,15 @@ public class CheckMojo extends AbstractRedKiteMojo {
                 if (fix != null) {
                     problems.add(what + "; " + (compare(fix.targetVersion(), fix.currentVersion()) < 0 ? "downgrade" : "upgrade")
                             + " to " + fix.targetVersion() + " leaves nothing at or above " + threshold.label());
+                } else if (unfixable.containsKey(key)) {
+                    problems.add(unfixable.remove(key));
                 } else {
                     warnings.add(what + "; no version on the same major line is below " + threshold.label() + ", so this does not fail the build");
                 }
             }
         }
+        // Unfixable findings below failOnSeverity, or on components the pass above did not reach.
+        problems.addAll(unfixable.values());
         if (failOnSnapshot) {
             for (ScanComponent c : report.components()) {
                 if (c.snapshot()) {
@@ -98,6 +116,37 @@ public class CheckMojo extends AbstractRedKiteMojo {
             problems.add("analysis incomplete: " + report.completenessMessage());
         }
         return new Outcome(problems, warnings);
+    }
+
+    /**
+     * The components with a vulnerability at or above {@code threshold} for which no same-major version
+     * has a lower worst severity, keyed by {@code groupId:artifactId:version}, with the failure message.
+     */
+    private static Map<String, String> unfixable(ScanReport report, List<ReportExporter.Remediation> remediations,
+                                                 AdvisorySeverity threshold) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (threshold == AdvisorySeverity.NONE || threshold == AdvisorySeverity.UNKNOWN) return out;
+        Map<String, Set<String>> advisories = new LinkedHashMap<>();
+        Map<String, AdvisorySeverity> worst = new LinkedHashMap<>();
+        for (VulnerabilityFinding f : report.vulnerabilityFindings()) {
+            AdvisorySeverity severity = AdvisoryClassifier.severity(f);
+            String key = f.coordinate().groupId() + ":" + f.coordinate().artifactId() + ":" + f.affectedVersion();
+            worst.merge(key, severity, AdvisorySeverity::max);
+            if (severity.ordinal() >= threshold.ordinal()) advisories.computeIfAbsent(key, k -> new LinkedHashSet<>()).add(f.advisoryId());
+        }
+        for (Map.Entry<String, Set<String>> e : advisories.entrySet()) {
+            String key = e.getKey();
+            AdvisorySeverity w = worst.get(key);
+            boolean improvable = remediations.stream()
+                    .filter(r -> (r.groupId() + ":" + r.artifactId() + ":" + r.currentVersion()).equals(key))
+                    .anyMatch(r -> r.sameMajor() && r.residualSeverity().ordinal() < w.ordinal());
+            if (!improvable) {
+                out.put(key, key + " has " + w.label() + " vulnerabilities (" + String.join(", ", e.getValue())
+                        + ") and no version on the same major line is better, so it cannot be fixed by upgrading; "
+                        + "fix it another way, or accept it for now with <acceptedRisks> (advisory, reason, until)");
+            }
+        }
+        return out;
     }
 
     /** Orders dotted versions numerically segment by segment; only used to word the message. */

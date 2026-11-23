@@ -26,9 +26,10 @@ final class AcceptedRisks {
      * @param expired    findings whose accepted risk has run out; also in {@code active}
      * @param unmatched  accepted risks that match no finding, which can be removed
      * @param covered    {@code groupId:artifactId:version} of components whose every finding is accepted
+     * @param expiringSoon accepted entries whose last day falls within the warning window; also in {@code accepted}
      */
     record Result(List<VulnerabilityFinding> active, List<Entry> accepted, List<Entry> expired,
-                  List<AcceptedRisk> unmatched, Set<String> covered) {
+                  List<AcceptedRisk> unmatched, Set<String> covered, List<Entry> expiringSoon) {
         boolean isEmpty() {
             return accepted.isEmpty() && expired.isEmpty();
         }
@@ -58,6 +59,12 @@ final class AcceptedRisks {
     }
 
     static Result apply(ScanReport report, List<AcceptedRisk> risks, LocalDate today) {
+        return apply(report, risks, today, 0);
+    }
+
+    /** @param warnDays accepted risks ending within this many days (counting today) are listed in
+     *                  {@link Result#expiringSoon()}; 0 or less turns that off */
+    static Result apply(ScanReport report, List<AcceptedRisk> risks, LocalDate today, int warnDays) {
         List<VulnerabilityFinding> active = new ArrayList<>();
         Map<String, Entry> accepted = new LinkedHashMap<>();
         Map<String, Entry> expired = new LinkedHashMap<>();
@@ -85,7 +92,13 @@ final class AcceptedRisks {
         if (risks != null) {
             for (AcceptedRisk r : risks) if (r != null && !used.contains(r)) unmatched.add(r);
         }
-        return new Result(active, new ArrayList<>(accepted.values()), new ArrayList<>(expired.values()), unmatched, covered);
+        List<Entry> soon = new ArrayList<>();
+        if (warnDays > 0) {
+            for (Entry e : accepted.values()) {
+                if (!e.until().isAfter(today.plusDays(warnDays))) soon.add(e);
+            }
+        }
+        return new Result(active, new ArrayList<>(accepted.values()), new ArrayList<>(expired.values()), unmatched, covered, soon);
     }
 
     /**
@@ -106,6 +119,12 @@ final class AcceptedRisks {
                 .filter(m -> !split.covered().contains(m.groupId() + ":" + m.artifactId() + ":" + m.currentVersion()))
                 .toList();
         return new ReportExporter.Result(result.scanId(), filtered, rem);
+    }
+
+    /** "today", "tomorrow" or "in N days": how long an accepted risk has left. */
+    static String remaining(LocalDate today, LocalDate until) {
+        long days = java.time.temporal.ChronoUnit.DAYS.between(today, until);
+        return days <= 0 ? "today" : days == 1 ? "tomorrow" : "in " + days + " days";
     }
 
     private static boolean covers(AcceptedRisk r, VulnerabilityFinding f) {

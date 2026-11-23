@@ -210,6 +210,22 @@ If no such version exists, for example because the vulnerability has no fix yet,
 
 Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, up to six each side of the current version plus the latest release, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
 
+## Making unfixable vulnerabilities fail the build
+
+By default `check` warns about a vulnerability that no version can fix and lets the build pass. A critical with no fix then goes unnoticed. Set `failOnUnfixable` to a severity to make it fail instead:
+
+```bash
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:check -Dredkite.failOnUnfixable=CRITICAL
+```
+
+```
+[ERROR] RedKite: org.springframework:spring-webmvc:6.2.19 has Critical vulnerabilities (GHSA-j9f9-w8pj-32f8, GHSA-pc63-qcmh-9cmg) and no version on the same major line is better, so it cannot be fixed by upgrading; fix it another way, or accept it for now with <acceptedRisks> (advisory, reason, until)
+```
+
+A finding counts as unfixable when it is at or above the severity you set and no version on the same major line has a lower worst severity. A version that only lowers a Critical to a High is an improvement, so that finding is not unfixable; it is still handled by `failOnSeverity`. The two settings are independent, so `failOnUnfixable` can be higher or lower than `failOnSeverity`.
+
+The way through is an [accepted risk](#accepting-a-risk-until-a-date): a dated, reasoned decision to stay on that version. The build passes while the acceptance is current and fails again the day after its `until` date.
+
 ## Accepting a risk until a date
 
 Sometimes the version you have is the best one available: the vulnerability has no fix yet, or every candidate is just as bad. Record that decision in the root POM with `acceptedRisks`. The vulnerability then moves out of the report's vulnerability list into an "Accepted risks" section, and stops counting toward `check`. It stops being accepted after the `until` date.
@@ -240,6 +256,7 @@ What happens:
 - **`check`:** an accepted vulnerability cannot fail the build.
 - **Upgrade goals:** when every vulnerability on a dependency version is accepted, `upgrade`-family goals that choose upgrades for you (`upgrade-cve`, `upgrade-all`) leave that dependency alone, because you chose to stay on it. Naming it with `redkite:upgrade` still changes it.
 - **Expiry:** after the `until` date the vulnerability is reported and checked as normal, the *Accepted risks* section lists it as `EXPIRED`, and the build log carries a warning naming the date.
+- **Expiring soon:** an acceptance that ends within `warnExpiringWithin` days (default 30) is flagged `(EXPIRES IN N DAYS)` in the report, and the build log warns with the date, so you can extend it or fix the vulnerability before it lapses. It is still accepted until the date. `0` turns this off.
 - **Stale entries:** an entry that matches no vulnerability, for example because the dependency was upgraded, is logged as a warning so you can remove it.
 - **Mistakes:** a missing `advisory` or `until`, an `until` that is not a `yyyy-MM-dd` date, or a `coordinate` that is not `groupId:artifactId[:version]` stops the goal with an error before anything is analysed.
 - **JSON report:** the JSON copy still contains every finding, accepted or not.
@@ -288,6 +305,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | Parameter | Property | Default | Goals | Description |
 | --- | --- | --- | --- | --- |
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
+| `warnExpiringWithin` | `redkite.warnExpiringWithin` | `30` | all | Warn when an accepted risk ends within this many days. `0` turns the warning off. |
 | `acceptedRisks` | none | none | all | Vulnerabilities accepted until a date; see [Accepting a risk until a date](#accepting-a-risk-until-a-date). POM only. |
 | `excludes` | `redkite.excludes` | none | all | Directories, relative to the project root, whose POMs are not analysed (for example test fixtures). On the command line, comma-separated; in the POM, `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `jsonReport` | `redkite.jsonReport` | `false` | both | Also write a JSON copy of the report. No files are written by default. |
@@ -300,6 +318,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | `enforcer` | `redkite.enforcer` | `false` | both | Also run the dependency-convergence analysis (several extra Maven runs). |
 | `allowMajorUpgrades` | `redkite.allowMajorUpgrades` | `false` | both | Allow major-version upgrade recommendations. |
 | `failOnSeverity` | `redkite.failOnSeverity` | `HIGH` | `check` | Severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) at or above which a fixable vulnerability fails the build; `NONE` disables. |
+| `failOnUnfixable` | `redkite.failOnUnfixable` | `NONE` | `check` | Also fail for a vulnerability at or above this severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`; `NONE` disables) when no version on the same major line improves on the current one. It passes only if covered by an unexpired `acceptedRisks` entry. See [Making unfixable vulnerabilities fail the build](#making-unfixable-vulnerabilities-fail-the-build). |
 | `failOnSnapshot` | `redkite.failOnSnapshot` | `false` | `check` | Fail on SNAPSHOT dependencies. |
 | `failOnIncomplete` | `redkite.failOnIncomplete` | `false` | `check` | Fail when metadata could not be fetched. |
 | `upgrades` | `redkite.upgrades` | none | `upgrade` | Dependencies to upgrade: comma-separated `groupId:artifactId[:version]`; no version means the recommended one. A transitive dependency is pinned. Required. |
