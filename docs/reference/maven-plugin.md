@@ -27,9 +27,9 @@ This section is a runbook, written so that a person or a coding agent can follow
 - The plugin is published on Maven Central, so Maven downloads it on first use. There is nothing to install by hand.
 - Plugin coordinates: `net.dublinux.redkite:red-kite-maven-plugin`. Goals: `report` and `check`. Short prefix: `redkite`.
 - It never edits POMs or any project file. By default it writes nothing to disk. It reads the project, queries Maven Central and OSV.dev, and prints to the build log.
-- It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 25+, Maven 3.9+ and network access.
+- It runs `mvn dependency:tree` as a child process, so it needs `mvn` on `PATH`, Java 25+ (0.99.206 and earlier: Java 17+), Maven 3.9+ and network access.
 
-**1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.205`. Maven downloads it the first time you run it.
+**1. Pick the version.** Use the latest release of `net.dublinux.redkite:red-kite-maven-plugin` on [Maven Central](https://central.sonatype.com/artifact/net.dublinux.redkite/red-kite-maven-plugin). This page uses `0.99.207`. Maven downloads it the first time you run it.
 
 **2. (Optional) Make the short `redkite:` prefix work (once per machine).** Add this to `~/.m2/settings.xml`. Create the file if it is missing, and add the `<pluginGroup>` line inside an existing `<pluginGroups>` element if there is one:
 
@@ -41,7 +41,7 @@ This section is a runbook, written so that a person or a coding agent can follow
 </settings>
 ```
 
-If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.99.205:report` (and `…:check`) wherever the commands below say `mvn redkite:report`.
+If you can't or don't want to change `settings.xml`, skip this step and use the full form `mvn net.dublinux.redkite:red-kite-maven-plugin:0.99.207:report` (and `…:check`) wherever the commands below say `mvn redkite:report`.
 
 **3. Run it in the target project.** From the directory holding the root `pom.xml`, with no edits to that project:
 
@@ -62,7 +62,7 @@ mvn -B redkite:check      # print the report; fail the build for fixable vulnera
       <plugin>
         <groupId>net.dublinux.redkite</groupId>
         <artifactId>red-kite-maven-plugin</artifactId>
-        <version>0.99.205</version>
+        <version>0.99.207</version>
         <executions>
           <execution>
             <goals><goal>check</goal></goals>
@@ -208,7 +208,7 @@ Set any of these on the command line with `-D<property>=<value>`, or in the POM:
 <plugin>
   <groupId>net.dublinux.redkite</groupId>
   <artifactId>red-kite-maven-plugin</artifactId>
-  <version>0.99.205</version>
+  <version>0.99.207</version>
   <configuration>
     <failOnSeverity>CRITICAL</failOnSeverity>
     <allowMajorUpgrades>false</allowMajorUpgrades>
