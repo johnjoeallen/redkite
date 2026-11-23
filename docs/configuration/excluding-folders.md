@@ -15,7 +15,7 @@ Add the folders to the plugin's configuration in the project's **root `pom.xml`*
       <plugin>
         <groupId>net.dublinux.redkite</groupId>
         <artifactId>red-kite-maven-plugin</artifactId>
-        <version>0.99.207</version>
+        <version>0.99.208</version>
         <configuration>
           <excludes>
             <exclude>test/projects</exclude>
@@ -33,7 +33,7 @@ The plugin parameter exists from release `0.99.207`; earlier releases ignore the
 On the command line, pass a comma-separated list. This adds nothing to the POM and only affects that run:
 
 ```bash
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:report -Dredkite.excludes=test/projects,samples
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:report -Dredkite.excludes=test/projects,samples
 ```
 
 ## How entries match

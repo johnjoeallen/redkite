@@ -93,13 +93,13 @@ The plugin is on Maven Central (`net.dublinux.redkite:red-kite-maven-plugin`), s
 
 ```bash
 # in the project to analyse (root pom.xml directory)
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:report   # print the report, never fails the build
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:check    # fail the build for vulnerabilities that have a same-major fix
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:upgrade -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # upgrade what you name
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:upgrade-cve    # upgrade only to fix vulnerabilities
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:upgrade-all    # CVE fixes plus recommended upgrades
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:drop -Dredkite.pins=com.rabbitmq:amqp-client      # remove a pin
-mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.207:unpin -Dredkite.pins=com.rabbitmq:amqp-client     # keep the version, release the pin
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:report   # print the report, never fails the build
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:check    # fail the build for vulnerabilities that have a same-major fix
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:upgrade -Dredkite.upgrades=com.fasterxml.jackson.core:jackson-databind:2.22.3   # upgrade what you name
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:upgrade-cve    # upgrade only to fix vulnerabilities
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:upgrade-all    # CVE fixes plus recommended upgrades
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:drop -Dredkite.pins=com.rabbitmq:amqp-client      # remove a pin
+mvn -B net.dublinux.redkite:red-kite-maven-plugin:0.99.208:unpin -Dredkite.pins=com.rabbitmq:amqp-client     # keep the version, release the pin
 ```
 
 The report lists each vulnerable dependency once, with its advisories, the POMs that declare it (or the modules that pull it in), whether it is pinned, and a flag for POMs outside the build, which the upgrade goals cannot edit. Folders that are not part of the build, such as test fixtures that deliberately use old versions, can be left out of the analysis with the `excludes` setting:
