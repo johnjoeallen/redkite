@@ -5,6 +5,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import org.apache.maven.plugin.AbstractMojo;
+import java.util.List;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Parameter;
@@ -75,8 +76,19 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
     @Parameter(property = "redkite.excludes")
     java.util.List<String> excludes;
 
+    /** Vulnerabilities the project accepts until a date. Each entry needs an {@code advisory} and an {@code until}
+     *  date (yyyy-MM-dd, inclusive); {@code coordinate} and {@code reason} are optional. After the date the
+     *  vulnerability is reported again. */
+    @Parameter
+    java.util.List<AcceptedRisk> acceptedRisks;
+
     @Parameter(defaultValue = "${session}", readonly = true)
     MavenSession session;
+
+    /** Today, for deciding whether an accepted risk has expired; overridden in tests. */
+    java.time.LocalDate today() {
+        return java.time.LocalDate.now();
+    }
 
     abstract void execute(ReportExporter.Result result) throws MojoFailureException;
 
@@ -85,6 +97,10 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
         if (skip) {
             getLog().info("RedKite is skipped.");
             return;
+        }
+        List<String> invalid = AcceptedRisks.validate(acceptedRisks);
+        if (!invalid.isEmpty()) {
+            throw new MojoExecutionException("Invalid RedKite configuration: " + String.join("; ", invalid));
         }
         ReportExporter.Result result;
         // RedKite's analysis classes log every component at INFO; keep that out of the build log
@@ -108,14 +124,23 @@ abstract class AbstractRedKiteMojo extends AbstractMojo {
                         msg -> { getLog().debug(msg); if (showProgress) progress.update(msg); },
                         line -> getLog().debug(line), excludes);
             }
+            AcceptedRisks.Result split = AcceptedRisks.apply(result.report(), acceptedRisks, today());
+            for (AcceptedRisks.Entry e : split.expired()) {
+                getLog().warn("RedKite: the accepted risk " + e.risk() + " expired on " + e.until() + "; it is reported again.");
+            }
+            for (AcceptedRisk r : split.unmatched()) {
+                getLog().warn("RedKite: the accepted risk " + r + " matches no vulnerability; remove it from acceptedRisks.");
+            }
+            ReportExporter.Result full = result;
+            result = AcceptedRisks.filter(result, split);
             String text = TextReport.render(result.report(), showTransitives, PinnedCoordinates.find(root, excludes),
-                    PinnedCoordinates.findRedkitePins(root, excludes), buildPomPaths(root));
+                    PinnedCoordinates.findRedkitePins(root, excludes), buildPomPaths(root), split);
             if (consoleReport) {
                 getLog().info(System.lineSeparator() + text);
             }
             if (jsonReport) {
                 Path out = outputDirectory.toPath();
-                ReportWriter.writeJson(out, result.report());
+                ReportWriter.writeJson(out, full.report());
                 getLog().info("RedKite JSON report written to " + out.resolve("redkite-report.json"));
             }
         } catch (IOException | RuntimeException e) {

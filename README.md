@@ -118,6 +118,21 @@ The report lists each vulnerable dependency once, with its advisories, the POMs 
 
 Or on the command line: `-Dredkite.excludes=test/projects,samples`. The server reads the same setting from the root POM. See [Excluding Folders](https://johnjoeallen.github.io/redkite/configuration/excluding-folders/).
 
+To accept a vulnerability you have decided to live with, for example because your version is the best one available, list it with a date after which it is reported again:
+
+```xml
+<acceptedRisks>
+  <acceptedRisk>
+    <advisory>GHSA-j9f9-w8pj-32f8</advisory>
+    <coordinate>org.springframework:spring-webmvc:6.2.19</coordinate>
+    <reason>Best version on this major line; no fix released yet</reason>
+    <until>2027-03-31</until>
+  </acceptedRisk>
+</acceptedRisks>
+```
+
+It moves to an "Accepted risks" section, cannot fail `check`, and is left alone by `upgrade-cve` and `upgrade-all`. See the [plugin reference](https://johnjoeallen.github.io/redkite/reference/maven-plugin/#accepting-a-risk-until-a-date).
+
 > **Java version:** RedKite is built for Java 25 from 0.99.207, so it needs Java 25 or later. 0.99.206 and earlier plugin releases run on Java 17 or later.
 
 To use the short `redkite:` prefix instead, add `<pluginGroup>net.dublinux.redkite</pluginGroup>` under `<pluginGroups>` in `~/.m2/settings.xml`, then run `mvn -B redkite:report` or `mvn -B redkite:check`.
@@ -127,6 +142,7 @@ Every option is a `-D` property on the command line or a `<configuration>` entry
 | Property | Default | Goals | Meaning |
 |---|---|---|---|
 | `redkite.skip` | `false` | both | Skip the plugin. |
+| `acceptedRisks` | none | all | POM only. Vulnerabilities accepted until a date (`advisory`, `until`, optional `coordinate` and `reason`). |
 | `redkite.excludes` | none | all | Comma-separated directories, relative to the project root, whose POMs are not analysed (for example test fixtures). In the POM: `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `redkite.consoleReport` | `true` | both | Print the text report to the build log. |
 | `redkite.progress` | `true` | both | Show progress: a live spinner on a terminal, one log line per step when piped, in `-B`, on CI or with `-X`. |

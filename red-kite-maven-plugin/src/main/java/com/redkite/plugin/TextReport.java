@@ -40,6 +40,14 @@ final class TextReport {
      *                      Null means unknown, and nothing is flagged */
     static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned,
                          java.util.Set<String> redkitePinned, java.util.Set<String> buildPoms) {
+        return render(report, showTransitives, pinned, redkitePinned, buildPoms, null);
+    }
+
+    /** @param accepted the vulnerabilities the project has accepted until a date; they are listed in their own
+     *                  section and are not in {@code report}'s findings. Null means none are configured */
+    static String render(ScanReport report, boolean showTransitives, java.util.Set<String> pinned,
+                         java.util.Set<String> redkitePinned, java.util.Set<String> buildPoms,
+                         AcceptedRisks.Result accepted) {
         List<String> out = new ArrayList<>();
         out.add("RedKite report");
         out.add("==============");
@@ -57,6 +65,9 @@ final class TextReport {
         vulns.sort(Comparator.<VulnerabilityFinding>comparingInt(v -> -AdvisoryClassifier.severity(v).ordinal())
                 .thenComparing(v -> key(v.coordinate())));
         out.add("Vulnerabilities: " + vulns.size() + severityBreakdown(vulns));
+        if (accepted != null && !accepted.accepted().isEmpty()) {
+            out.add("Accepted risks:  " + accepted.accepted().size());
+        }
         // Like the server's Outdated count: a plain "newer version exists" on a transitive dependency is
         // left out, because nothing in the project makes it move and there is nothing to change for it.
         // Direct dependencies and anything driven by a vulnerability are listed; showTransitives lists all.
@@ -115,6 +126,8 @@ final class TextReport {
         }
         out.add("");
 
+        if (accepted != null && !accepted.isEmpty()) addAcceptedRisks(out, accepted);
+
         List<ScanComponent> snapshots = report.components().stream().filter(ScanComponent::snapshot).toList();
         out.add("SNAPSHOT dependencies");
         out.add("---------------------");
@@ -157,6 +170,25 @@ final class TextReport {
             report.treeParseWarnings().forEach(w -> out.add("  " + w));
         }
         return String.join(System.lineSeparator(), out) + System.lineSeparator();
+    }
+
+    private static void addAcceptedRisks(List<String> out, AcceptedRisks.Result accepted) {
+        out.add("Accepted risks");
+        out.add("--------------");
+        for (AcceptedRisks.Entry e : accepted.accepted()) {
+            out.add(String.format("  %-9s %s:%s  %s  accepted until %s", AdvisoryClassifier.severity(e.finding()).label().toUpperCase(),
+                    key(e.finding().coordinate()), e.finding().affectedVersion(), advisory(e.finding()), e.until()));
+            if (e.risk().reason != null && !e.risk().reason.isBlank()) out.add("      reason: " + e.risk().reason.strip());
+        }
+        for (AcceptedRisks.Entry e : accepted.expired()) {
+            out.add(String.format("  EXPIRED   %s:%s  %s  acceptance ended %s; reported under Vulnerabilities",
+                    key(e.finding().coordinate()), e.finding().affectedVersion(), advisory(e.finding()), e.until()));
+        }
+        out.add("");
+    }
+
+    private static String advisory(VulnerabilityFinding v) {
+        return v.advisoryId() + (v.cves().isEmpty() ? "" : " (" + String.join(", ", v.cves()) + ")");
     }
 
     private static final int MAX_LOCATIONS = 5;

@@ -210,6 +210,44 @@ If no such version exists, for example because the vulnerability has no fix yet,
 
 Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, up to six each side of the current version plus the latest release, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
 
+## Accepting a risk until a date
+
+Sometimes the version you have is the best one available: the vulnerability has no fix yet, or every candidate is just as bad. Record that decision in the root POM with `acceptedRisks`. The vulnerability then moves out of the report's vulnerability list into an "Accepted risks" section, and stops counting toward `check`. It stops being accepted after the `until` date.
+
+```xml
+<configuration>
+  <acceptedRisks>
+    <acceptedRisk>
+      <advisory>GHSA-j9f9-w8pj-32f8</advisory>
+      <coordinate>org.springframework:spring-webmvc:6.2.19</coordinate>
+      <reason>Best version on this major line; no fix released yet</reason>
+      <until>2027-03-31</until>
+    </acceptedRisk>
+  </acceptedRisks>
+</configuration>
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `advisory` | yes | A GHSA or CVE identifier. Either form matches, ignoring case. |
+| `until` | yes | The last day, as `yyyy-MM-dd`, on which the risk is accepted. From the next day it is reported again. |
+| `coordinate` | no | `groupId:artifactId` or `groupId:artifactId:version`. Without it the advisory is accepted on every dependency. With a version, the acceptance stops applying when that version changes. |
+| `reason` | no | Why the risk is acceptable. Printed in the report. |
+
+What happens:
+
+- **Reporting:** an accepted vulnerability is listed under *Accepted risks* with its reason and date, so it stays visible. The *Vulnerabilities* count leaves it out, and a separate *Accepted risks* count is shown.
+- **`check`:** an accepted vulnerability cannot fail the build.
+- **Upgrade goals:** when every vulnerability on a dependency version is accepted, `upgrade`-family goals that choose upgrades for you (`upgrade-cve`, `upgrade-all`) leave that dependency alone, because you chose to stay on it. Naming it with `redkite:upgrade` still changes it.
+- **Expiry:** after the `until` date the vulnerability is reported and checked as normal, the *Accepted risks* section lists it as `EXPIRED`, and the build log carries a warning naming the date.
+- **Stale entries:** an entry that matches no vulnerability, for example because the dependency was upgraded, is logged as a warning so you can remove it.
+- **Mistakes:** a missing `advisory` or `until`, an `until` that is not a `yyyy-MM-dd` date, or a `coordinate` that is not `groupId:artifactId[:version]` stops the goal with an error before anything is analysed.
+- **JSON report:** the JSON copy still contains every finding, accepted or not.
+
+A user pin (`redkite:user-pin`) keeps RedKite from changing a version but does not hide its vulnerabilities. Use `acceptedRisks` to record that you have decided to live with one.
+
+The RedKite server does not read `acceptedRisks`; it applies to the Maven plugin.
+
 ## Excluding folders
 
 RedKite analyses every `pom.xml` under the project root. To leave out folders that are not part of the build, such as test fixtures or samples, list them in the `excludes` parameter in the root POM, or pass `-Dredkite.excludes=dir1,dir2` for one run:
@@ -250,6 +288,7 @@ The *Parameter* column is the `<configuration>` element name and the *Property* 
 | Parameter | Property | Default | Goals | Description |
 | --- | --- | --- | --- | --- |
 | `skip` | `redkite.skip` | `false` | both | Skip the plugin. |
+| `acceptedRisks` | none | none | all | Vulnerabilities accepted until a date; see [Accepting a risk until a date](#accepting-a-risk-until-a-date). POM only. |
 | `excludes` | `redkite.excludes` | none | all | Directories, relative to the project root, whose POMs are not analysed (for example test fixtures). On the command line, comma-separated; in the POM, `<excludes><exclude>test/projects</exclude></excludes>`. |
 | `jsonReport` | `redkite.jsonReport` | `false` | both | Also write a JSON copy of the report. No files are written by default. |
 | `outputDirectory` | `redkite.outputDirectory` | `${project.build.directory}/redkite` | both | Where the JSON report is written when `jsonReport` is true. |
