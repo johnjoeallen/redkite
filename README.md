@@ -116,7 +116,7 @@ The report lists each vulnerable dependency once, with its advisories, the POMs 
 </plugin>
 ```
 
-Or on the command line: `-Dredkite.excludes=test/projects,samples`.
+Or on the command line: `-Dredkite.excludes=test/projects,samples`. The server reads the same setting from the root POM. See [Excluding Folders](https://johnjoeallen.github.io/redkite/configuration/excluding-folders/).
 
 > **Java version:** RedKite is built for Java 25 from 0.99.207, so it needs Java 25 or later. 0.99.206 and earlier plugin releases run on Java 17 or later.
 

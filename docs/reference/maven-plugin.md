@@ -157,25 +157,40 @@ mvn -B redkite:report -Dredkite.jsonReport=true         # also write target/redk
 
 ## Reading the output and acting on it
 
-The report is plain text, one line per finding:
+The report is plain text. Each vulnerable dependency is listed once, with its advisories, where it comes from and whether it is pinned:
 
 ```
 RedKite report
 ==============
-Components:      254 (64 direct, 190 transitive)
+Components:      118 (43 direct, 75 transitive)
 Analysis:        complete
-Vulnerabilities: 10 (2 critical, 6 high, 2 medium)
-Recommendations: 81
+Vulnerabilities: 4 (2 critical, 2 high)
+Recommendations: 20
 
 Vulnerabilities
 ---------------
-  CRITICAL  org.springframework:spring-webmvc:6.2.19  GHSA-j9f9-w8pj-32f8 (CVE-2026-47890)  no fixed version known
-  HIGH      com.fasterxml.jackson.core:jackson-core:2.22.2  GHSA-7hhh-6rmp-j9qf (CVE-2026-89425)  fixed in 2.22.3
+  CRITICAL  org.springframework:spring-webmvc:6.2.19  [pinned by RedKite]
+      GHSA-j9f9-w8pj-32f8 (CVE-2026-47890)  no fixed version known
+      GHSA-pc63-qcmh-9cmg (CVE-2026-47884)  no fixed version known
+      declared in pom.xml
+
+  HIGH      com.fasterxml.jackson.core:jackson-core:2.22.2
+      GHSA-7hhh-6rmp-j9qf (CVE-2026-89425)  fixed in 2.22.3
+      GHSA-p6pp-m3f8-5c89 (CVE-2026-89407)  fixed in 2.22.3
+      declared in test/projects/convergence-fixture/old-wrapper/pom.xml  (not in the build)
+      The upgrade goals cannot edit POMs outside the build; exclude them or fix them by hand.
 
 Recommended upgrades
 --------------------
   com.fasterxml.jackson.core:jackson-core   2.22.2 -> 2.22.3  [CVE_FIX, PATCH risk]
 ```
+
+Under each dependency:
+
+- **Advisories:** one line each, with its fix, or `no fixed version known`.
+- **Where it comes from:** `declared in <pom>` for a direct dependency, or `via <module pom>` for a transitive one. Up to five locations are listed, then `+N more`.
+- **`[pinned by user]` / `[pinned by RedKite]`:** the dependency is held by a `redkite:user-pin` marker or a RedKite-managed `dependencyManagement` pin.
+- **`(not in the build)`:** the declaring POM is outside the Maven build, so the upgrade goals cannot edit it. See [Excluding folders](#excluding-folders).
 
 To act on a `check` failure, change the dependency's version in the project's POM (or the property that holds it) to the version named in the message, rebuild and test it yourself, then re-run `redkite:check`. You can have the plugin make that change with `redkite:upgrade-cve` (or `redkite:upgrade` for one dependency). A `[WARNING]` from `check` means there is nothing fixable on the same major line, so no version change will clear it; it doesn't fail the build.
 
@@ -194,6 +209,20 @@ If no such version exists, for example because the vulnerability has no fix yet,
 ```
 
 Candidate versions come from RedKite's CVE search (a bounded window of nearby versions, up to six each side of the current version plus the latest release, each verified against OSV.dev), so a fixable finding the search doesn't reach is reported as a warning rather than failing.
+
+## Excluding folders
+
+RedKite analyses every `pom.xml` under the project root. To leave out folders that are not part of the build, such as test fixtures or samples, list them in the `excludes` parameter in the root POM, or pass `-Dredkite.excludes=dir1,dir2` for one run:
+
+```xml
+<configuration>
+  <excludes>
+    <exclude>test/projects</exclude>
+  </excludes>
+</configuration>
+```
+
+Entries are directories relative to the project root and exclude everything below them. The setting applies to the report, `check`, the upgrade goals, the enforcer analysis and the pin search, and the RedKite server reads it from the same place. See [Excluding Folders](../configuration/excluding-folders.md) for the details.
 
 ## Output
 

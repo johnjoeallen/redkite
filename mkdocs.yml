@@ -112,6 +112,7 @@ nav:
       - Overview: configuration/index.md
       - Application Settings: configuration/application-settings.md
       - Project Settings: configuration/project-settings.md
+      - Excluding Folders: configuration/excluding-folders.md
       - Cache Settings: configuration/cache-settings.md
       - Maven Settings: configuration/maven-settings.md
 
